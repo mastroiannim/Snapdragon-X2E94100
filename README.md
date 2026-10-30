@@ -26,13 +26,35 @@ Per eseguire correttamente lo stack con accelerazione NPU Hexagon (`HTP0`), il s
 
 ---
 
-### Avvio rapido
+### Avvio rapido e Auto-Configurazione Intelligente
 
-1. Esegui [llama-server.bat](llama-server.bat):
-   * Lo script lancia preventivamente [sync-geniex.ps1](sync-geniex.ps1) (in modalità automatica `-AutoConfirm`) per verificare che `llama-server.exe` e le librerie di GenieX siano allineati allo stesso commit e che i backend `HTP0` (NPU) e `GPUOpenCL` (GPU Adreno) rispondano correttamente.
-   * Imposta `ADSP_LIBRARY_PATH` (sia per la sessione corrente sia a livello utente per i processi figli del router di `llama-server`).
-   * Avvia `llama-server.exe` sulla porta `18803` con offload ibrido NPU + GPU (`-dev HTP0,GPUOpenCL -ts 50,50 -ngl 999`) e contesto dinamico preimpostato a `65536` token (espandibile fino a `131072` o oltre).
-2. Per eseguire i benchmark prestazionali ed energetici sul tuo hardware, lancia [benchmark-hexagon.ps1](benchmark-hexagon.ps1) (report completo in [BENCHMARK.md](BENCHMARK.md)).
+1. **Avvio immediato (consigliato):**
+   * Fai doppio clic su [llama-server.bat](llama-server.bat) (o eseguilo dal prompt):
+   * [llama-server.bat](llama-server.bat) interroga l'Auto-Configuratore [launch-hexagon.ps1](launch-hexagon.ps1), che scansiona i metadati binari del modello selezionato (o seleziona automaticamente il top-performer `LFM2.5-24B-A2B-QAD-Q4_0.gguf` a **~46 token/s**), calcola la ripartizione Ibrida ottimale tra NPU Hexagon e GPU Adreno (`HTP0,GPUOpenCL -ts 80,20`), imposta il limite FastRPC sul contesto e avvia `llama-server.exe` sulla porta standard `18803`.
+
+2. **Scelta manuale del modello o elenco opzioni:**
+   ```powershell
+   # Visualizza tutti i modelli disponibili e il profilo hardware calcolato:
+   .\llama-server.bat -ListOnly
+
+   # Avvia un modello specifico con auto-configurazione dei flag ottimali:
+   .\llama-server.bat LFM2.5-24B-A2B-QAD-Q4_0.gguf
+   .\llama-server.bat qwen2.5-coder-14b-instruct-q4_0.gguf
+   .\llama-server.bat flint-UD-Q4_K_XL.gguf
+
+   # Simulazione (mostra i metadati estratti e i parametri calcolati senza avviare il processo):
+   .\launch-hexagon.ps1 -Model "LFM2.5-24B" -DryRun
+   ```
+
+3. **Configurazione in Cline / VS Code:**
+   * **API Provider:** `OpenAI Compatible`
+   * **Base URL:** `http://127.0.0.1:18803/v1`
+   * **API Key:** `sk-no-key-required` (qualsiasi valore)
+   * **Model ID:** `LFM2.5-24B-A2B-QAD-Q4_0` (o il modello avviato)
+   * **Model Context Window:** `64000` (o `65536`)
+   * **Max Output Tokens:** `4096`
+
+4. Per rieseguire la telemetria energetica comparativa sul tuo hardware, lancia [benchmark-hexagon.ps1](benchmark-hexagon.ps1) (report completo in [BENCHMARK.md](BENCHMARK.md)).
 
 ---
 
@@ -97,3 +119,24 @@ Tramite [benchmark-hexagon.ps1](benchmark-hexagon.ps1) abbiamo misurato su **Sna
 2. **Sopra i ~15 GB (`Qwen3.8-27B` da 15.2 GB e `Qwen3.6-35B-A3B` da 19.4 GB) il pool FastRPC NPU satura e l'ibrido / GPU diventano essenziali:**
    * Superata la soglia di ~14–15 GB di pesi, la sessione CDSP della sola NPU (`HTP0`) non riesce più a mappare tutti i layer/esperti in DMA e riversa le operazioni in fallback sulla CPU Oryon: sul `35B-A3B` la sola CPU schizza a **`41.0 W`** (portando il laptop a **`88.1 W`**!) e il prefill crolla a **`30.0 t/s`**.
    * Attivando **`-dev HTP0,GPUOpenCL -ts 50,50`** (che lascia solo ~7.6–9.7 GB sulla NPU e sposta il resto sulla GPU Adreno) o **`-dev GPUOpenCL`**, il fallback CPU scompare: sul `35B-A3B` il consumo del portatile scende di **24–28 Watt** (`88 W → 60–64 W`), la generazione sale da **`20.2 a 22.7 / 25.3 t/s` (+25%)** e il prefill su `GPUOpenCL` balza a **`152.2 t/s` (5.1x più veloce)** dimezzando i Joule per token (`2.41 → 1.26 J/tok`).
+
+---
+
+### 5. L'Auto-Configuratore Intelligente ([launch-hexagon.ps1](launch-hexagon.ps1))
+
+Invece di affidarsi a configurazioni manuali o generiche, [launch-hexagon.ps1](launch-hexagon.ps1) include un parser C# ad alte prestazioni che legge direttamente l'header binario del file `.gguf` in meno di 100 ms ed estrae:
+1. **Architettura e Famiglia:** `lfm2moe`, `flint`, `qwen2`, `spark`, ecc.
+2. **Topologia di Calcolo:** Modello denso vs Mixture-of-Experts (`expert_count` ed `expert_used_count`).
+3. **Meccanismo di Attention:** Full Causal vs Sliding Window Attention (`attention.sliding_window`).
+4. **Formato di Quantizzazione:** `Q4_0`, `Q4_K_M`, `Q4_K_XL`, `Q8_0`.
+5. **Geometria dei Tensori:** Conteggio layer, teste di Query e teste KV (`attention.head_count_kv`).
+
+#### Matrice Decisionale Euristica
+
+| Categoria Modello | Rilevamento Metadati | Configurazione Calcolata | Motivazione Hardware |
+| :--- | :--- | :--- | :--- |
+| **MoE Leggero**<br>*(es. `LFM2.5-24B-A2B`)* | `expert_count > 0`, `expert_used_count <= 4`, peso $\le 13$ GB | **`-dev HTP0,GPUOpenCL -ts 80,20 -c 65536`** | Solo ~2B di parametri attivi per token. Lo split 80/20 sfrutta due canali bus paralleli (crossbar SoC) raggiungendo il picco assoluto di generazione (**~46 token/s**). |
+| **MoE con Sliding Window**<br>*(es. `Flint Preview`)* | `expert_count > 0`, `sliding_window > 0` | **`-dev HTP0,GPUOpenCL -ts 85,15 -c 131072`** | La finestra di attenzione a 513 token limita drasticamente la memoria KV; permette contesti fino a 131k token mantenendo velocità stabile (~6.7 t/s). |
+| **Dense Medio**<br>*(es. `Qwen 2.5 Coder 14B`)* | `expert_count == 0`, $7 \text{ GB} \le \text{peso} \le 13.5 \text{ GB}$ | **`-dev HTP0,GPUOpenCL -ts 75,25 -c 65536`** | Su contesti lunghi (>30k token) la sola NPU saturerebbe il bus DMA a 2.9 t/s; l'offload del 25% su GPU Adreno sblocca il collo di bottiglia della memoria. Contesto limitato a 64k per rispettare il tetto FastRPC di 1 GiB. |
+| **Dense Compatto**<br>*(es. `Spark 4B`, `Ornith 9B`)* | `expert_count == 0`, $\text{peso} \le 6 \text{ GB}$ | **`-dev HTP0 -c 65536`** | Pesi e KV entrano interamente nel dominio DMA della NPU Hexagon: massima efficienza (14–18W SoC) e prefill istantaneo (750–1550 t/s). |
+| **Giganti > 15 GB**<br>*(es. `Qwen 27B`, `Qwen 35B`)* | $\text{peso} > 14.5 \text{ GB}$ | **`-dev HTP0,GPUOpenCL -ts 50,50 -c 65536`** | Previene la saturazione del descrittore FastRPC e azzera il fallback termico della CPU (-25W sul sistema). |
