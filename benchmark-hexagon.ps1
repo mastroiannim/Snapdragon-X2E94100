@@ -203,6 +203,12 @@ foreach ($m in $Models) {
 Write-Host "`n=== RISULTATI RIEPILOGATIVI ===" -ForegroundColor Cyan
 $allResults | Format-Table -AutoSize
 
+# I valori non misurati devono essere espliciti nel report, non zero o stringhe vuote.
+function Format-OptionalPower($value) {
+    if ($null -eq $value) { return "N/D" }
+    return [string]$value
+}
+
 if (-not $SkipReportWrite -and $allResults.Count -gt 0) {
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.AppendLine("# Benchmark & PMIC Energy Report (Auto-Generated)")
@@ -213,7 +219,7 @@ if (-not $SkipReportWrite -and $allResults.Count -gt 0) {
     [void]$sb.AppendLine("| Modello | Profilo | Test | Velocita' (t/s) | NPU (W) | GPU (W) | CPU (W) | RAM (W) | INFRA (W) | SoC Tot (W) | Sistema (W) |")
     [void]$sb.AppendLine("| :--- | :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     foreach ($row in $allResults) {
-        [void]$sb.AppendLine("| `$($row.Model)` | **$($row.Profile)** | `$($row.Test)` | **$($row.TokPerSec)** ± $($row.StdDev) | $($row.NPU_W) | $($row.GPU_W) | $($row.CPU_W) | $($row.MEM_W) | $($row.INFRA_W) | **$($row.SOC_W)** | $($row.SYS_W) |")
+        [void]$sb.AppendLine("| `$($row.Model)` | **$($row.Profile)** | `$($row.Test)` | **$($row.TokPerSec)** ± $($row.StdDev) | $(Format-OptionalPower $row.NPU_W) | $(Format-OptionalPower $row.GPU_W) | $(Format-OptionalPower $row.CPU_W) | $(Format-OptionalPower $row.MEM_W) | $(Format-OptionalPower $row.INFRA_W) | **$(Format-OptionalPower $row.SOC_W)** | $(Format-OptionalPower $row.SYS_W) |")
     }
     [System.IO.File]::WriteAllText($ReportPath, $sb.ToString(), [System.Text.Encoding]::UTF8)
     Write-Host "[OK] Report salvato in: $ReportPath" -ForegroundColor Green
