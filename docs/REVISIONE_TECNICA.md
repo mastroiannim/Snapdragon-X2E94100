@@ -10,7 +10,7 @@
 4. **Controllo runtime**: `launch-hexagon.ps1 -CheckRuntime` esegue una verifica di allineamento, non una sincronizzazione. `sync-geniex.ps1` e' read-only per default; `-Apply` sblocca il vecchio percorso di aggiornamento, ancora **sperimentale e non validato**.
 5. **Rollback**: un backup preesistente non viene sovrascritto; un backup incompleto non puo' essere usato per ripristinare; una copia valida non viene eliminata soltanto perche' `--list-devices` termina con successo.
 6. **Benchmark**: un PMIC assente non invalida la misura di throughput. Le stime di potenza rimangono indicative dell'intero processo; `J/token` e `token/J` sono omessi finche' non esistano finestre temporali omogenee con baseline idle.
-7. **GGUF**: `general.file_type` usa la famiglia `llama_ftype`, non `ggml_type`; corretto `BF16=32`, `IQ2_XXS=19` e la distinzione K/IQ. Metadata e stringhe anomale vengono rifiutate invece di produrre risultati parziali. Il parser NON e\x27 ancora un validatore completo del formato.
+7. **GGUF**: `general.file_type` usa la famiglia `llama_ftype`, non `ggml_type`; corretto `BF16=32`, `IQ2_XXS=19` e la distinzione K/IQ. Metadata e stringhe anomale vengono rifiutate invece di produrre risultati parziali. Il parser NON e' ancora un validatore completo del formato.
 8. **Verifica statica automatica**: un workflow PowerShell controlla il parsing di tutti gli script, la compilazione del C# e fixture GGUF sintetiche positive/negative.
 
 ## Rischi residui: non occultarli
