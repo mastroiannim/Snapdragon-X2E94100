@@ -3,6 +3,23 @@
 > [!IMPORTANT]
 > **Registro storico, non benchmark energetico validato.** Questa tabella conserva i valori dichiarati dall'esperimento originale senza ricalcolarli. La precedente versione di `benchmark-hexagon.ps1` usava separatori `/` in alcuni argomenti `-dev/-ts`; le prove riportate non hanno tracciabilità sufficiente per dimostrare la riproducibilità dei relativi profili. Le potenze PMIC campionate e i t/s non erano sincronizzati alla stessa fase: le colonne `J/tok`, `tok/J` e gli incrementi energetici **non costituiscono misure convalidate**. Le spiegazioni su una soglia FastRPC di 14–15 GiB e sul fallback CPU sono **ipotesi**, non diagnosi confermate. Le tabelle restano disponibili per confronto storico, non per sostenere affermazioni causali o di superiorità hardware. Si veda [la matrice di compatibilità](docs/COMPATIBILITA.md).
 
+## Evidenza di esecuzione già acquisita
+
+**Compatibilità funzionale osservata nei percorsi esercitati; riproducibilità non ancora stabilita; universalità non dimostrata.** I benchmark storici riportano esecuzioni di `llama-bench.exe` con frontend `llama.cpp` e componenti runtime provenienti da GenieX sullo Snapdragon X2E94100. Sono evidenze di caricamento ed esecuzione del calcolo su modelli GGUF, oltre la sola enumerazione dei dispositivi. Un'esecuzione completata esclude un'incompatibilità ABI che impedisca quei percorsi, ma non certifica tutte le interfacce, la correttezza numerica degli output o il funzionamento di `llama-server.exe`.
+
+Il manifest SHA-256 serve a identificare e riprodurre l'insieme di binari che ha funzionato; la sua assenza non annulla l'evidenza di esecuzione riportata. Un manifest acquisito oggi identifica l'installazione attuale e non ricostruisce automaticamente quella storica.
+
+Esempi dal registro sottostante (profili dichiarati, prefill `pp512`):
+
+| Modello | Profilo dichiarato | Prefill (t/s) |
+| --- | --- | ---: |
+| LFM2.5-24B-A2B | HTP0 | 801,98 |
+| Ornith-1.5-9B | HTP0 | 750,87 |
+| Qwen3.8-27B | GPUOpenCL | 70,95 |
+| Qwen3.6-35B-A3B | GPUOpenCL | 152,17 |
+
+L'attribuzione ai dispositivi richiede i log di offload; i token/s da soli non provano correttezza numerica o ripartizione del lavoro. L'ambiguità dei separatori nei profili ibridi non annulla le esecuzioni riuscite dei profili singoli. Le etichette “100% NPU/GPU” e le spiegazioni causali conservate sotto appartengono al registro originale e vanno lette con questi limiti. Non sono stati eseguiti nuovi benchmark per questa revisione documentale.
+
 **Piattaforma di test:**
 * **SoC:** Qualcomm Snapdragon X2 Elite Extreme (`X2E94100`)
 * **NPU:** Hexagon `v81` (`HTP0`, DMA64 attivo, 8 HVX + 2 HMX)
