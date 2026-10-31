@@ -44,6 +44,8 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.styles import Style as PtStyle
 from prompt_toolkit.formatted_text import HTML
 
+from stack_manager import StackManager
+
 
 # ---------------------------------------------------------------------------
 # Rilevamento Telemetria Sistema Windows ARM64 (Senza dipendenze esterne)
@@ -110,6 +112,7 @@ SLASH_COMMANDS = {
     "/model": "Cambia modello attivo o elenca i modelli disponibili sul router",
     "/models": "Elenca tutti i modelli registrati con dettagli hardware",
     "/status": "Visualizza dashboard telemetria (NPU, GPU, RAM, Server)",
+    "/stack": "Verifica stack, versioni GenieX/llama-cpp, aggiornamenti e sync",
     "/bench": "Esegue un benchmark prestazionale in tempo reale (t/s e latenza)",
     "/clear": "Cancella la cronologia messaggi e azzera il contesto",
     "/new": "Sinonimo di /clear (avvia una nuova sessione)",
@@ -163,6 +166,15 @@ class OpenClawCompleter(Completer):
                             start_position=-len(arg),
                             display=sub,
                         )
+            elif cmd.lower() == "/stack":
+                arg = parts[1] if len(parts) > 1 else ""
+                for sub in ("status", "check", "sync", "update-geniex", "update-llama"):
+                    if sub.startswith(arg.lower()):
+                        yield Completion(
+                            sub,
+                            start_position=-len(arg),
+                            display=sub,
+                        )
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +195,7 @@ class HexagonClawTUI:
 
         self.console = Console(legacy_windows=False)
         self.presets = load_ini_presets(self.ini_path)
+        self.stack_mgr = StackManager(workspace_dir=self.workspace_dir)
         self.available_models: List[str] = []
         self.active_model = model or "LFM2.5-24B-A2B-QAD-Q4_0"
 
@@ -531,6 +544,9 @@ class HexagonClawTUI:
         elif cmd == "/server":
             self.handle_server_command(args)
 
+        elif cmd == "/stack":
+            self.handle_stack_command(args)
+
         else:
             self.console.print(f"[red]Comando sconosciuto: {cmd}. Digita [bold]/help[/bold] per la lista comandi.[/red]")
 
@@ -546,6 +562,7 @@ class HexagonClawTUI:
         t.add_row("/models", "", "Elenca tutti i modelli GGUF disponibili sul router con dettagli hardware")
         t.add_row("/model", "<nome>", "Seleziona e cambia istantaneamente il modello attivo")
         t.add_row("/status", "", "Dashboard telemetria SoC Snapdragon (NPU HTP0, GPU Adreno, RAM)")
+        t.add_row("/stack", "[status|check|sync|update-*]", "Verifica e aggiorna lo stack software (GenieX, llama.cpp, DSP NPU)")
         t.add_row("/bench", "[n_tokens]", "Esegue un benchmark sintetico e misura prefill/generation t/s")
         t.add_row("/clear, /new", "", "Azzera la cronologia messaggi e riparte da zero")
         t.add_row("/system", "[nuovo prompt]", "Visualizza o ridefinisce il system prompt dell'assistente")
@@ -795,6 +812,73 @@ class HexagonClawTUI:
 
         else:
             self.console.print("Uso: [cyan]/server [status | start | stop][/cyan]")
+
+    def handle_stack_command(self, args_str: str):
+        sub = args_str.strip().lower() if args_str else "status"
+
+        if sub in ("status", "verify", "v"):
+            self.stack_mgr.render_stack_dashboard(self.console)
+
+        elif sub in ("check", "updates", "up"):
+            self.stack_mgr.render_updates_dashboard(self.console)
+
+        elif sub in ("sync", "sincronizza"):
+            self.console.print("\n[cyan]Sincronizzazione runtime GenieX -> llama-bin in corso...[/cyan]")
+            ok, msg, files = self.stack_mgr.sync_runtime_from_geniex(auto_stop_server=True)
+            if ok:
+                self.console.print(f"[bold green]✓ Sincronizzazione completata:[/bold green]\n{msg}\n")
+            else:
+                self.console.print(f"[bold red]✗ Sincronizzazione fallita:[/bold red]\n{msg}\n")
+
+        elif sub in ("update-geniex", "geniex"):
+            self.console.print("\n[cyan]Esecuzione aggiornamento ufficiale GenieX CLI ('geniex update')...[/cyan]")
+            ok, msg = self.stack_mgr.update_geniex_cli()
+            if ok:
+                self.console.print(f"[bold green]✓ {msg}[/bold green]\n")
+            else:
+                self.console.print(f"[bold red]✗ {msg}[/bold red]\n")
+
+        elif sub in ("update-llama", "llama", "update-llamacpp"):
+            self.console.print("\n[cyan]Controllo disponibilità archivio Windows ARM64 per llama.cpp...[/cyan]")
+            updates = self.stack_mgr.check_updates()
+            if not updates.get("arm64_asset_url"):
+                self.console.print("[yellow]Nessun archivio binario Windows ARM64 disponibile per l'aggiornamento automatico.[/yellow]")
+                return
+
+            tag = updates.get("latest_llamacpp_build", "")
+            self.console.print(
+                f"[bold yellow]⚠️ Attenzione:[/bold yellow] Verranno aggiornati solo gli eseguibili frontend ({tag}).\n"
+                "Gli artefatti DSP Hexagon NPU WHQL (libggml-htp*.so, ggml-hexagon.dll) verranno preservati intatti.\n"
+            )
+            confirm = "y"
+            if self.prompt_session is not None:
+                try:
+                    confirm = self.prompt_session.prompt("Procedere con l'aggiornamento del frontend? [Y/n]: ").strip().lower()
+                except Exception:
+                    confirm = "y"
+            else:
+                self.console.print("Procedere con l'aggiornamento del frontend? [Y/n]: ", end="")
+                confirm = input().strip().lower()
+
+            if confirm in ("", "y", "s", "si", "yes"):
+                self.console.print("\n[cyan]Download ed estrazione sicura del frontend in corso...[/cyan]")
+                ok, msg = self.stack_mgr.update_llamacpp_frontend(auto_stop_server=True)
+                if ok:
+                    self.console.print(f"[bold green]✓ {msg}[/bold green]\n")
+                else:
+                    self.console.print(f"[bold red]✗ {msg}[/bold red]\n")
+            else:
+                self.console.print("[dim]Operazione annullata dall'utente.[/dim]\n")
+
+        else:
+            self.console.print(
+                "Uso comando [bold cyan]/stack[/bold cyan]:\n"
+                "  • [cyan]/stack status[/cyan]        : Verifica integrità versioni e file runtime\n"
+                "  • [cyan]/stack check[/cyan]         : Controlla aggiornamenti online (GitHub / Qualcomm)\n"
+                "  • [cyan]/stack sync[/cyan]          : Sincronizza e riallinea le DLL da GenieX\n"
+                "  • [cyan]/stack update-geniex[/cyan] : Aggiorna GenieX CLI\n"
+                "  • [cyan]/stack update-llama[/cyan]  : Aggiorna frontend llama.cpp preservando i driver NPU\n"
+            )
 
     # -----------------------------------------------------------------------
     # Loop Principale Interattivo REPL

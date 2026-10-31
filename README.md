@@ -148,6 +148,12 @@ python tui.py --model "LFM2.5-24B"      # Con modello specifico iniziale
   * `/models`: Elenco completo dei modelli disponibili sul router con strategie hardware.
   * `/model <nome>`: Cambio istantaneo del modello attivo (caricato on-demand dal router).
   * `/status`: Dashboard approfondita su architettura SoC, 18 core Oryon, NPU Hexagon e GPU Adreno.
+  * `/stack [status|check|sync|update-*]`: Gestione e manutenzione dello stack software e runtime:
+    * `/stack status`: Verifica integrità, versioni GenieX CLI (v0.10.0), QAIRT (2.50), commit llama.cpp e stato dei 16 file di runtime GGML e driver NPU WHQL.
+    * `/stack check`: Controllo online su GitHub Releases per nuove build Windows ARM64 e aggiornamenti Qualcomm.
+    * `/stack sync`: Sincronizzazione sicura delle DLL e degli artefatti DSP da GenieX a llama-bin con backup preventivo e gestione dei lock NTFS.
+    * `/stack update-geniex`: Esecuzione dell'aggiornamento ufficiale di GenieX CLI (`geniex update`).
+    * `/stack update-llama`: Aggiornamento selettivo dei binari frontend preservando categoricamente i driver NPU.
   * `/bench [n_tokens]`: Benchmark prestazionale live con misurazione TTFT e velocità di decodifica ($t/s$).
   * `/server [status|start|stop]`: Monitoraggio e controllo del processo `llama-server`.
   * `/clear` o `/new`: Reset della conversazione e del contesto.
