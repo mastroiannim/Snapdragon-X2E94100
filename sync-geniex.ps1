@@ -1,7 +1,8 @@
 param(
     [string]$BinPath = (Join-Path $env:USERPROFILE "llama-cpp\llama-bin-win-cpu-arm64"),
     [string]$GenieXDir = (Join-Path $env:LOCALAPPDATA "GenieX CLI"),
-    [switch]$AutoConfirm
+    [switch]$AutoConfirm,
+    [switch]$Apply
 )
 
 $ErrorActionPreference = "Stop"
@@ -140,7 +141,8 @@ foreach ($gf in $genieFiles) {
         $tf = Get-Item $targetFile
         if ($tf.Length -ne $gf.Length) {
             $missingOrOutdated += $gf.Name
-        } elseif ($tf.LastWriteTimeUtc -ne $gf.LastWriteTimeUtc) {
+        } else {
+            # Timestamp uguali non provano che due file siano identici.
             $srcHash = (Get-FileHash -Path $gf.FullName -Algorithm SHA256).Hash
             $dstHash = (Get-FileHash -Path $targetFile -Algorithm SHA256).Hash
             if ($srcHash -ne $dstHash) {
@@ -150,7 +152,9 @@ foreach ($gf in $genieFiles) {
     }
 }
 
-$hashAligned = ($currentHash -ne "") -and ($currentHash.StartsWith($genieHash) -or $genieHash.StartsWith($currentHash))
+$hashAligned = ($genieHash -match "^[0-9a-fA-F]{7,40}$") -and ($currentHash -match "^[0-9a-fA-F]{7,40}$") -and
+               ($currentHash.StartsWith($genieHash, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $genieHash.StartsWith($currentHash, [System.StringComparison]::OrdinalIgnoreCase))
 $isFullyAligned = $srvWorks -and $hashAligned -and ($missingOrOutdated.Count -eq 0)
 
 if ($isFullyAligned) {
@@ -160,7 +164,12 @@ if ($isFullyAligned) {
     exit 0
 }
 
-# 4. Se non è allineato, mostra i dettagli e proponi l'aggiornamento sicuro
+# Verifica in sola lettura: non aggiornare un runtime senza opt-in separato.
+if (-not $Apply) {
+    throw "Runtime non allineato. Nessun file modificato. L'aggiornamento non validato richiede -Apply esplicito."
+}
+
+# 4. Solo con -Apply esplicito: operazione SPERIMENTALE e non convalidata.
 Write-Host "[!] Rilevato disallineamento tra lo stack llama-cpp e GenieX ($genieVer):" -ForegroundColor Yellow
 Write-Host "    - Commit attuale in llama-cpp : $(if ($currentHash) { $currentHash } else { 'N/D o non funzionante con HTP0' })"
 Write-Host "    - Commit richiesto da GenieX  : $genieHash ($genieVer)"
@@ -168,7 +177,8 @@ if ($missingOrOutdated.Count -gt 0) {
     Write-Host "    - Librerie GenieX da collegare: $($missingOrOutdated.Count) file ($($missingOrOutdated[0..([Math]::Min(3, $missingOrOutdated.Count-1))] -join ', ')...)"
 }
 Write-Host ""
-Write-Host "L'aggiornamento sicuro eseguira':" -ForegroundColor Cyan
+Write-Warning "Aggiornamento SPERIMENTALE: l'estrattore ZIP non verifica ancora checksum e firma del pacchetto." 
+Write-Host "La procedura sperimentale eseguira':" -ForegroundColor Cyan
 Write-Host "  1. Backup completo della cartella attuale per rollback automatico in caso di problemi."
 Write-Host "  2. Collegamento diretto (HardLink, 0 byte scaricati) di tutte le librerie CPU/GPU/NPU di GenieX."
 Write-Host "  3. Scaricamento selettivo HTTP Range dei soli eseguibili mancanti in GenieX (senza scaricare DLL duplicate)."
@@ -184,11 +194,11 @@ if (-not $AutoConfirm) {
 
 # 5. Procedura di aggiornamento sicuro con backup e rollback
 $backupDir = "${BinPath}.bak"
-$tempExtract = Join-Path $env:TEMP "llama-geniex-extract"
+$tempExtract = Join-Path $env:TEMP ("llama-geniex-extract-" + [guid]::NewGuid().ToString("N"))
 
 try {
     Write-Host "`n[1/4] Creazione backup di sicurezza in '$backupDir'..." -ForegroundColor Cyan
-    if (Test-Path $backupDir) { Remove-Item $backupDir -Recurse -Force }
+    if (Test-Path $backupDir) { throw "Backup preesistente: $backupDir. Non sovrascrivere; verifica e sposta manualmente." }
     if (Test-Path $BinPath) {
         Copy-Item -Path $BinPath -Destination $backupDir -Recurse -Force
     } else {
@@ -210,22 +220,17 @@ try {
 
         $foundAsset = $null
         $foundTag = $null
-        $fallbackAsset = $null
-        $fallbackTag = $null
         foreach ($offset in @(0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6, -7, 7, -8, 8, -9, 9, -10, 10)) {
             $candidateTag = "b$($estNum + $offset)"
             try {
                 $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/$candidateTag" -Headers $headers -ErrorAction Stop
                 $asset = $rel.assets | Where-Object { $_.name -match "bin-win-cpu-arm64\.zip$" } | Select-Object -First 1
                 if ($asset) {
-                    if (-not $fallbackAsset) {
-                        $fallbackAsset = $asset
-                        $fallbackTag = $candidateTag
-                    }
                     try {
-                        $tagRef = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/llama.cpp/git/ref/tags/$candidateTag" -Headers $headers -ErrorAction Stop
-                        $tagSha = $tagRef.object.sha
-                        if ($tagSha -and ($tagSha.StartsWith($genieHash) -or $genieHash.StartsWith($tagSha))) {
+                        # API commits risolve tag annotati e lightweight al commit target.
+                        $tagCommit = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/llama.cpp/commits/$candidateTag" -Headers $headers -ErrorAction Stop
+                        $tagSha = [string]$tagCommit.sha
+                        if ($genieHash -match "^[0-9a-fA-F]{7,40}$" -and $tagSha.StartsWith($genieHash, [System.StringComparison]::OrdinalIgnoreCase)) {
                             $foundAsset = $asset
                             $foundTag = $candidateTag
                             break
@@ -291,9 +296,8 @@ try {
     }
     # --list-devices non prova che l'inferenza sia realmente offloaded.
 
-    # Rimuovi backup e file temporanei
-    Remove-Item $backupDir -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "`n[OK] Aggiornamento completato con successo! Stack allineato a GenieX $genieVer ($genieHash)." -ForegroundColor Green
+    # Conserva il backup: --list-devices non convalida l'inferenza reale.
+    Write-Host "`n[OK] Discovery completata; backup conservato in $backupDir (test di inferenza ancora necessari)." -ForegroundColor Yellow
     Write-Host ""
 } catch {
     Write-Host "`n[ERRORE] Aggiornamento fallito: $($_.Exception.Message)" -ForegroundColor Red
