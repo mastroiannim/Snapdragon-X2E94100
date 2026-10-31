@@ -1,7 +1,7 @@
 # Benchmark Report: Prestazioni ed Efficienza Energetica NPU (`HTP0`) vs GPU (`GPUOpenCL`) vs Ibrido (`HTP0,GPUOpenCL`)
 
 > [!IMPORTANT]
-> **Registro storico, non benchmark energetico validato.** Questa tabella conserva i valori dichiarati dall'esperimento originale senza ricalcolarli. La precedente versione di `benchmark-hexagon.ps1` usava separatori `/` in alcuni argomenti `-dev/-ts`; le prove riportate non hanno tracciabilità sufficiente per dimostrare la riproducibilità dei relativi profili. Le potenze PMIC campionate e i t/s non erano sincronizzati alla stessa fase: le colonne `J/tok`, `tok/J` e gli incrementi energetici **non costituiscono misure convalidate**. Le spiegazioni su una soglia FastRPC di 14–15 GiB e sul fallback CPU sono **ipotesi**, non diagnosi confermate. Le tabelle restano disponibili per confronto storico, non per sostenere affermazioni causali o di superiorità hardware. Si veda [la matrice di compatibilità](docs/COMPATIBILITA.md).
+> **Registro storico, non benchmark energetico validato.** Questa tabella conserva i valori dichiarati dall'esperimento originale senza ricalcolarli. Le prove riportate non hanno tracciabilità sufficiente per dimostrare la riproducibilità dei relativi profili. I separatori `/` dello script sono previsti da `llama-bench` e non costituiscono un errore. Le potenze PMIC campionate e i t/s non erano sincronizzati alla stessa fase: le colonne `J/tok`, `tok/J` e gli incrementi energetici **non costituiscono misure convalidate**. Le spiegazioni su una soglia FastRPC di 14–15 GiB e sul fallback CPU sono **ipotesi**, non diagnosi confermate. Le tabelle restano disponibili per confronto storico, non per sostenere affermazioni causali o di superiorità hardware. Si veda [la matrice di compatibilità](docs/COMPATIBILITA.md).
 
 ## Evidenza di esecuzione già acquisita
 
@@ -18,7 +18,7 @@ Esempi dal registro sottostante (profili dichiarati, prefill `pp512`):
 | Qwen3.8-27B | GPUOpenCL | 70,95 |
 | Qwen3.6-35B-A3B | GPUOpenCL | 152,17 |
 
-L'attribuzione ai dispositivi richiede i log di offload; i token/s da soli non provano correttezza numerica o ripartizione del lavoro. L'ambiguità dei separatori nei profili ibridi non annulla le esecuzioni riuscite dei profili singoli. Le etichette “100% NPU/GPU” e le spiegazioni causali conservate sotto appartengono al registro originale e vanno lette con questi limiti. Non sono stati eseguiti nuovi benchmark per questa revisione documentale.
+L'attribuzione ai dispositivi richiede i log di offload; i token/s da soli non provano correttezza numerica o ripartizione del lavoro. Il separatore `/` è previsto da `llama-bench` per `-dev` e `-ts`: è indicato dall'help locale e confermato dal [parser della revisione storica e467e5b](https://github.com/ggml-org/llama.cpp/blob/e467e5b/tools/llama-bench/llama-bench.cpp). Non costituisce un errore dello script; la sintassi va distinta da quella degli altri frontend. Comandi effettivi e log rimangono necessari per documentare l'offload, indipendentemente dai separatori. Le etichette “100% NPU/GPU” e le spiegazioni causali conservate sotto appartengono al registro originale e vanno lette con questi limiti. Non sono stati eseguiti nuovi benchmark per questa revisione documentale.
 
 **Piattaforma di test:**
 * **SoC:** Qualcomm Snapdragon X2 Elite Extreme (`X2E94100`)
