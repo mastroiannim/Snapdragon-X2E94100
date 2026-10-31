@@ -118,7 +118,7 @@ if (Test-Path $llamaSrv) {
         }
         $pHtp = Start-Process -FilePath $llamaSrv -ArgumentList "--list-devices" -WorkingDirectory $BinPath -NoNewWindow -PassThru -Wait -RedirectStandardOutput "$env:TEMP\llama_htp_out.txt" -RedirectStandardError "$env:TEMP\llama_htp_err.txt"
         $devText = ((@(Get-Content "$env:TEMP\llama_htp_out.txt" -ErrorAction SilentlyContinue) +
-                     @(Get-Content "$env:TEMP\llama_htp_err.txt" -ErrorAction SilentlyContinue)) -join "\n")
+                     @(Get-Content "$env:TEMP\llama_htp_err.txt" -ErrorAction SilentlyContinue)) -join "`n")
         if ($pVer.ExitCode -eq 0 -and $pHtp.ExitCode -eq 0 -and
             $devText -match "HTP0" -and $devText -match "GPUOpenCL") {
             $srvWorks = $true
@@ -194,6 +194,7 @@ if (-not $AutoConfirm) {
 
 # 5. Procedura di aggiornamento sicuro con backup e rollback
 $backupDir = "${BinPath}.bak"
+$backupReady = $false
 $tempExtract = Join-Path $env:TEMP ("llama-geniex-extract-" + [guid]::NewGuid().ToString("N"))
 
 try {
@@ -201,6 +202,8 @@ try {
     if (Test-Path $backupDir) { throw "Backup preesistente: $backupDir. Non sovrascrivere; verifica e sposta manualmente." }
     if (Test-Path $BinPath) {
         Copy-Item -Path $BinPath -Destination $backupDir -Recurse -Force
+        # Solo un backup completo puo' essere usato per il rollback.
+        $backupReady = $true
     } else {
         New-Item -ItemType Directory -Path $BinPath -Force | Out-Null
     }
@@ -289,7 +292,7 @@ try {
     Write-Host "[4/4] Verifica integrita' e caricamento backend NPU (HTP0) e GPU (GPUOpenCL)..." -ForegroundColor Cyan
     $pTestHtp = Start-Process -FilePath $llamaSrv -ArgumentList "--list-devices" -WorkingDirectory $BinPath -NoNewWindow -PassThru -Wait -RedirectStandardOutput "$env:TEMP\test_htp.txt" -RedirectStandardError "$env:TEMP\test_htp_err.txt"
     $devicesText = ((@(Get-Content "$env:TEMP\test_htp.txt" -ErrorAction SilentlyContinue) +
-                     @(Get-Content "$env:TEMP\test_htp_err.txt" -ErrorAction SilentlyContinue)) -join "\n")
+                     @(Get-Content "$env:TEMP\test_htp_err.txt" -ErrorAction SilentlyContinue)) -join "`n")
     if ($pTestHtp.ExitCode -ne 0 -or $devicesText -notmatch "HTP0" -or
         $devicesText -notmatch "GPUOpenCL") {
         throw "Discovery NPU/GPU fallita. Verificare il log di --list-devices."
@@ -301,8 +304,8 @@ try {
     Write-Host ""
 } catch {
     Write-Host "`n[ERRORE] Aggiornamento fallito: $($_.Exception.Message)" -ForegroundColor Red
-    if (Test-Path $backupDir) {
-        Write-Host "[Rollback] Ripristino automatico del backup precedente..." -ForegroundColor Yellow
+    if ($backupReady -and (Test-Path $backupDir)) {
+        Write-Host "[Rollback] Ripristino automatico del backup completo precedente..." -ForegroundColor Yellow
         Remove-Item "$BinPath\*" -Recurse -Force -ErrorAction SilentlyContinue
         Copy-Item "$backupDir\*" -Destination $BinPath -Recurse -Force
         Remove-Item $backupDir -Recurse -Force -ErrorAction SilentlyContinue
