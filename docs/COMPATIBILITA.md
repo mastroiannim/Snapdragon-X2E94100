@@ -18,6 +18,31 @@
 
 **SDK vs runtime:** Hexagon SDK, OpenCL SDK, compilatore e toolchain sono prerequisiti per **compilare** una build con i relativi backend; non vanno confusi con i driver e le librerie runtime necessari per **eseguire una build già pronta e compatibile**. I nomi dei device (per esempio `HTP0`, `HTP0:0`, `GPUOpenCL`) dipendono dalla versione del backend: utilizzare quelli realmente restituiti da `--list-devices`, non forzare nomi ipotetici.
 
+## Verifiche specifiche dell'innesto GenieX / llama.cpp
+
+**Oggetto della verifica:** questa è una **ricomposizione locale di binari**, non un backend nuovo e non una distribuzione riconosciuta dal progetto upstream. Nell'implementazione corrente di `sync-geniex.ps1`, i due insiemi hanno origini diverse:
+
+| Provenienza | Componenti usati nel codice | Condizione necessaria |
+| --- | --- | --- |
+| Installazione `GenieX CLI\llama_cpp` | File runtime nella directory: DLL GGML/CPU/OpenCL/Hexagon, `libggml-htp-vNN.so`, `libggml-htp.cat` **se presenti in quella versione** | Provenienza, integrità e compatibilità con architettura HTP/driver; firma e relazione catalogo-artefatto |
+| Release `ggml-org/llama.cpp` | Frontend Windows ARM64 selezionati dallo script (per esempio `llama-server.exe`) | Verifica effettiva del commit target, del set ABI e delle dipendenze; nessun fallback per vicinanza numerica |
+| Sistema Windows Qualcomm | Driver MCDM, librerie/servizi FastRPC, firmware e runtime OpenCL | Disponibilità della specifica piattaforma host, non semplice esistenza dei file |
+| GGUF locale | Modello, metadata, pesi e KV cache | Architettura e operatori supportati; dimensioni di contesto fattibili nel runtime effettivo |
+
+**Perché è importante:** il post [Qualcomm GenieX Developer Preview, pubblicato il 7 luglio 2026](https://www.qualcomm.com/developer/blog/2026/06/geniex-developer-preview) documenta un'infrastruttura che include **sia** `llama.cpp` **sia** QAIRT/QNN, oltre a un server proprio. L'innesto del repository riusa la variante **`llama_cpp`** distribuita con GenieX sotto un frontend nativo `llama-server.exe` distinto: **non è corretto attribuirlo a un uso del runtime QAIRT** e non è corretto sostenere che GenieX fosse privo di server.
+
+### Prove richieste prima di dichiarare compatibile una composizione
+
+1. **Inventario:** acquisire manifest con `sha256`, percorso, architettura, provenienza, versione GenieX, `LlamaCPP Runtime Hash` e versione del frontend `llama.cpp` per **ogni** file realmente caricato, non soltanto per gli `.exe`.
+2. **Identità build:** risolvere l'esatta revisione (commit completo, non tag simile), e verificare l'insieme di ABI/exports/imports fra `llama-server.exe`, `llama-common.dll`, `ggml.dll` e tutti i backend. Un hash abbreviato uguale non copre modifiche downstream o opzioni di compilazione.
+3. **Firma HTP:** verificare il catalogo *e* la sua associazione ai `libggml-htp-vNN.so` effettivamente caricati. Non assumere che copiare il `.cat` o avere un certificato attendibile renda affidabili binari modificati.
+4. **Dipendenze e device:** annotare `ADSP_LIBRARY_PATH` effettivo e la risoluzione delle DLL; usare `--list-devices` come diagnostica preliminare, non come prova di inferenza/offload.
+5. **Smoke test e log:** in ambiente separato, eseguire un modello GGUF noto e registrare log di backend, operatori offloaded, errori, contesto e versione. Separare il corretto avvio dell'HTTP server dalla riuscita dell'inferenza sulla NPU.
+6. **Installazione:** non sovrascrivere file fino a download completo, hash/manifest verificato, staging e rollback testato. Gli hard-link funzionano soltanto quando filesystem e volume lo consentono; essendo legami allo **stesso contenuto su disco**, modifiche in-place possono alterare anche i file di partenza. Preferire copie immutabili verificabili nei test.
+7. **Licenze e distribuzione:** la licenza BSD-3-Clause dichiarata per il codice GenieX non estende automaticamente i suoi termini a ogni SDK, DLL, firmware, catalogo o driver distribuito insieme al prodotto. Verificare le licenze/notice specifiche prima di redistribuire un bundle misto. Una installazione locale non prova supporto o certificazione Qualcomm.
+
+**Stato reale degli script:** in `main`, `sync-geniex.ps1` interroga GenieX, seleziona asset upstream con una ricerca che **può ripiegare su release non esattamente corrispondenti**, estrae byte ZIP via HTTP Range, elimina e rimpiazza file, collega il runtime da GenieX e considera `--version` un controllo positivo. Questi passaggi **non soddisfano** le prove di integrità/compatibilità sopra elencate. Il [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1) propone una modalità read-only di default e rimuove parte dei fallback, ma non certifica una composizione affidabile né la sicurezza dell'estrattore ZIP. In assenza di quelle prove, **non eseguire aggiornamenti su installazioni da preservare**.
+
 ## Percorso dati e confini di responsabilità
 
 `llama-server.exe` orchestra il grafo GGML. Il backend host `ggml-hexagon` dialoga con i kernel dell'artefatto HTP `libggml-htp-vNN.so` tramite interfacce host/DSP, trasportate da FastRPC. Per QNN/QAIRT esiste un percorso distinto con proprie librerie stub/skel versionate. Non è corretto imporre **i vincoli di build di QAIRT a ogni modello GGUF**.
