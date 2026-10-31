@@ -20,7 +20,7 @@
 
 ## Verifiche innesto GenieX llama.cpp
 
-**Oggetto della verifica:** questa è una **ricomposizione locale di binari**, non un backend nuovo e non una distribuzione riconosciuta dal progetto upstream. Nell'implementazione corrente di `sync-geniex.ps1`, i due insiemi hanno origini diverse:
+**Oggetto della verifica:** questa è una **ricomposizione locale di binari**, non un backend nuovo e non una distribuzione riconosciuta dal progetto upstream. Nel percorso di composizione originario (`main` al commit `dbbb499`), i due insiemi hanno origini diverse:
 
 | Provenienza | Componenti usati nel codice | Condizione necessaria |
 | --- | --- | --- |
@@ -58,7 +58,11 @@ Il separatore `/` è previsto da `llama-bench` per `-dev` e `-ts`: è indicato d
 6. **Installazione:** non sovrascrivere file fino a download completo, hash/manifest verificato, staging e rollback testato. Gli hard-link funzionano soltanto quando filesystem e volume lo consentono; essendo legami allo **stesso contenuto su disco**, modifiche in-place possono alterare anche i file di partenza. Preferire copie immutabili verificabili nei test.
 7. **Licenze e distribuzione:** la licenza BSD-3-Clause dichiarata per il codice GenieX non estende automaticamente i suoi termini a ogni SDK, DLL, firmware, catalogo o driver distribuito insieme al prodotto. Verificare le licenze/notice specifiche prima di redistribuire un bundle misto. Una installazione locale non prova supporto o certificazione Qualcomm.
 
-**Stato reale degli script:** in `main`, `sync-geniex.ps1` interroga GenieX, seleziona asset upstream con una ricerca che **può ripiegare su release non esattamente corrispondenti**, estrae byte ZIP via HTTP Range, elimina e rimpiazza file, collega il runtime da GenieX e considera `--version` un controllo positivo. Questi passaggi **non soddisfano** le verifiche di integrità e tracciabilità sopra elencate e non garantiscono che un aggiornamento mantenga la compatibilità osservata nei benchmark. Il [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1) propone una modalità read-only di default e rimuove parte dei fallback, ma non certifica una composizione affidabile né la sicurezza dell'estrattore ZIP. In assenza di quelle prove, **non eseguire aggiornamenti su installazioni da preservare**.
+**Versioni del sincronizzatore:** il `main` originario (`dbbb499`) selezionava release con fallback approssimativi, estraeva ZIP via HTTP Range e sostituiva i file dell'installazione. Quei passaggi non certificavano integrita', ABI o riproducibilita'.
+
+Il [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1) **rimuove il downloader, l'installazione e il rollback** da `sync-geniex.ps1`. Lo script aggiornato confronta versioni/hash ed enumera i dispositivi; non installa componenti. `-Apply`, anche con `-AutoConfirm`, termina con errore prima di discovery, processi figli, cambiamenti all'ambiente o operazioni sui file. Questa protezione richiede la versione aggiornata: non e' una proprieta' del vecchio script.
+
+Un fallimento del controllo non modifica i binari e non tenta di ripararli. La verifica scrive soltanto log temporanei di diagnostica e non cambia la variabile utente persistente `ADSP_LIBRARY_PATH`. Non sostituisce un test di inferenza o un inventario completo dei moduli caricati. L'eventuale reintroduzione dell'aggiornamento richiede una modifica separata, con integrita', staging e ripristino verificati.
 
 ## Percorso dati e confini di responsabilità
 
@@ -98,7 +102,7 @@ La verifica con `signtool` conferma la firma del catalogo nelle condizioni dell'
 1. **Identificare** SO/architettura host, SoC, HTP `vNN`, driver NPU, FastRPC, firmware, OpenCL, eseguibili e DLL.
 2. **Acquisire manifest verificabile** con file, SHA-256, versione/commit e provenienza. Lo stesso commit è un controllo parziale, non un attestato di compatibilità.
 3. **Verificare catalogo e corrispondenza HTP** con i requisiti Windows; non usare un catalogo per “sanare” un artefatto di provenienza diversa.
-4. **Evitare sincronizzazioni implicite.** Lo `sync-geniex.ps1` di `main` può effettuare modifiche. Il codice del [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1) propone una modalità read-only predefinita, ma il suo ramo `-Apply` resta sperimentale.
+4. **Evitare sincronizzazioni implicite.** Il vecchio script (`dbbb499`) poteva modificare l'installazione. Nella versione del [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1), il controllo e' in sola lettura dei binari e `-Apply` e' disabilitato; non esiste un ramo di aggiornamento utilizzabile.
 5. **Richiedere prova di inferenza**, non fermarsi a `--version` e `--list-devices`. Documentare offload, throughput, stato errore e impronta software.
 
 ## Diagnosi senza attribuzione causale automatica
