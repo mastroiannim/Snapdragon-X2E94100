@@ -9,9 +9,9 @@ param(
         "Qwen3.8-27B-Q4_0.gguf",
         "Qwen_Qwen3.6-35B-A3B-Q4_0.gguf"
     ),
-    [int]$Repetitions = 2,
+    [int]$Repetitions = 5,
     [int]$Threads = 12,
-    [string]$ReportPath = (Join-Path $PSScriptRoot "BENCHMARK.md"),
+    [string]$ReportPath = (Join-Path $PSScriptRoot "BENCHMARK_AUTO.md"),
     [switch]$SkipReportWrite
 )
 
@@ -68,9 +68,11 @@ function Invoke-BenchWithPower {
                 else { "pp${PromptTokens}+tg${GenTokens}" }
     if ($Depth -gt 0) { $testType += "@d$Depth" }
 
-    $outFile = Join-Path $env:TEMP "hex_bench_out.json"
-    $errFile = Join-Path $env:TEMP "hex_bench_err.txt"
-    Remove-Item $outFile, $errFile -ErrorAction SilentlyContinue
+    $logDir = Join-Path $PSScriptRoot "benchmark-logs"
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    $runId = [guid]::NewGuid().ToString("N")
+    $outFile = Join-Path $logDir ($runId + "_stdout.json")
+    $errFile = Join-Path $logDir ($runId + "_stderr.txt")
 
     $argStr = "-m `"$fullModelPath`" -ngl 999 -fa on -b 4096 -ub 512 -t $Threads -p $PromptTokens -n $GenTokens -d $Depth -r $Repetitions $DevArgs -o json"
 
@@ -122,7 +124,10 @@ function Invoke-BenchWithPower {
             } catch {}
         }
     }
-    Remove-Item $outFile, $errFile -ErrorAction SilentlyContinue
+    if ($proc.ExitCode -ne 0) {
+        Write-Warning "llama-bench exit code $($proc.ExitCode); stderr: $errFile"
+        return $null
+    }
 
     if ($tokPerSec -le 0) {
         Write-Host "    [!] Fallito o incompatibile: $ModelFile | $ProfileName ($testType)" -ForegroundColor Yellow
@@ -130,9 +135,13 @@ function Invoke-BenchWithPower {
     }
 
     # Filtra solo i campioni durante l'esecuzione attiva sull'acceleratore (escludendo il caricamento iniziale del GGUF)
-    $active = $samples | Where-Object { $_.AccelSum -gt 1.2 }
-    if (-not $active -or $active.Count -eq 0) {
-        $active = $samples | Select-Object -Skip 2
+    # Stima dell'intero processo, incluso caricamento: non e' una misura
+    # sincronizzata della sola generazione. Non interpretare J/token come
+    # efficienza decode rigorosa fino all'aggiunta di marcatori di fase.
+    $active = @($samples | Select-Object -Skip 2)
+    if ($active.Count -eq 0) {
+        Write-Warning "Telemetria insufficiente: $ModelFile ($testType)"
+        return $null
     }
 
     $avgNPU   = [math]::Round(($active | Measure-Object -Property NPU -Average).Average, 2)
@@ -166,9 +175,9 @@ function Invoke-BenchWithPower {
 
 $profiles = @(
     @{ Name = "HTP0 (100% NPU)";        Args = "-dev HTP0" },
-    @{ Name = "HTP0/GPUOpenCL (75/25)"; Args = "-dev HTP0/GPUOpenCL -ts 75/25" },
-    @{ Name = "HTP0/GPUOpenCL (50/50)"; Args = "-dev HTP0/GPUOpenCL -ts 50/50" },
-    @{ Name = "HTP0/GPUOpenCL (25/75)"; Args = "-dev HTP0/GPUOpenCL -ts 25/75" },
+    @{ Name = "HTP0/GPUOpenCL (75/25)"; Args = "-dev HTP0,GPUOpenCL -ts 75,25" },
+    @{ Name = "HTP0/GPUOpenCL (50/50)"; Args = "-dev HTP0,GPUOpenCL -ts 50,50" },
+    @{ Name = "HTP0/GPUOpenCL (25/75)"; Args = "-dev HTP0,GPUOpenCL -ts 25,75" },
     @{ Name = "GPUOpenCL (100% GPU)";   Args = "-dev GPUOpenCL" }
 )
 
@@ -197,6 +206,7 @@ $allResults | Format-Table -AutoSize
 if (-not $SkipReportWrite -and $allResults.Count -gt 0) {
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.AppendLine("# Benchmark & PMIC Energy Report (Auto-Generated)")
+    [void]$sb.AppendLine("**Nota:** i dati energetici sono proxy di processo, non misure isolate di prefill/decode; la stima J/token e' preliminare.")
     [void]$sb.AppendLine("")
     [void]$sb.AppendLine("Generato il: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
     [void]$sb.AppendLine("")
