@@ -1,0 +1,6 @@
+# File auto-generati dal launcher
+hexagon-models.ini
+
+# File temporanei e log
+*.log
+*.tmp

@@ -9,13 +9,14 @@
     basandosi sulla telemetria PMIC reale dello Snapdragon X2 Elite.
 
 .PARAMETER Model
-    Nome del file .gguf o percorso completo. Se omesso, avvia un menu interattivo con tutti i modelli disponibili.
+    Nome del file .gguf o percorso completo. Se omesso, avvia il top-performer.
+    Ignorato in modalita' "Router" (tutti i modelli vengono configurati automaticamente).
 
 .PARAMETER Port
     Porta HTTP del server (default: 18803).
 
-.PARAMETER Host
-    Indirizzo bind (default: 127.0.0.1; per accesso LAN occorre specificare -BindHost esplicitamente).
+.PARAMETER BindHost
+    Indirizzo bind (default: 127.0.0.1; per accesso LAN occorre specificare 0.0.0.0 esplicitamente).
 
 .PARAMETER DryRun
     Mostra i parametri calcolati e il comando CLI senza avviare il processo.
@@ -25,7 +26,13 @@
 
 .PARAMETER Mode
     "Direct" (default): avvia direttamente llama-server sul modello specificato.
-    "Router": avvia llama-server con --models-dir applicando i default intelligenti globali.
+    "Router": avvia llama-server con --models-dir e un file INI generato automaticamente
+              (--models-preset) contenente i flag ottimali per CIASCUN modello.
+
+.PARAMETER ModelsMax
+    In modalita' Router: massimo numero di modelli caricati in RAM contemporaneamente (default: 2).
+    Un modello Q4_0 14B + KV cache a 64k occupa ~15 GB: con 2 modelli simultanei si saturano ~30 GB
+    dei 48 GB totali, lasciando ~18 GB per Windows 11 e Cline.
 #>
 
 param(
@@ -36,7 +43,8 @@ param(
     [ValidateSet("Direct", "Router")]
     [string]$Mode = "Direct",
     [switch]$ListOnly,
-    [switch]$CheckRuntime
+    [switch]$CheckRuntime,
+    [int]$ModelsMax = 2
 )
 
 $ErrorActionPreference = "Stop"
@@ -143,7 +151,7 @@ public class GgufModelMeta {
             }
         }
         if (m.HeadCountKv == 0 && m.HeadCount > 0) m.HeadCountKv = m.HeadCount;
-        
+
         switch (m.FileType) {
             case 0: m.QuantName = "F32"; break;
             case 1: m.QuantName = "F16"; break;
@@ -307,9 +315,135 @@ if ($ListOnly) {
     exit 0
 }
 
-# -------------------------------------------------------------
+# =============================================================
+# MODALITA' ROUTER: genera il file INI e avvia multi-modello
+# =============================================================
+if ($Mode -eq "Router") {
+    Write-Host "`n========================================================" -ForegroundColor Cyan
+    Write-Host " MODALITA' ROUTER: Auto-Configurazione per-modello" -ForegroundColor Cyan
+    Write-Host "========================================================" -ForegroundColor Cyan
+
+    # Genera il file INI con preset per-modello
+    $iniPath = Join-Path $PSScriptRoot "hexagon-models.ini"
+    $iniLines = @()
+    $iniLines += "version = 1"
+    $iniLines += ""
+    $iniLines += "# ============================================"
+    $iniLines += "# Generato automaticamente da launch-hexagon.ps1"
+    $iniLines += "# Data: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+    $iniLines += "# Piattaforma: Snapdragon X2 Elite Extreme"
+    $iniLines += "# ============================================"
+    $iniLines += ""
+    $iniLines += "# Default globali applicati a tutti i modelli"
+    $iniLines += "[*]"
+    $iniLines += "flash-attn = on"
+    $iniLines += "n-gpu-layers = 999"
+    $iniLines += "parallel = 1"
+    $iniLines += "load-mode = mlock"
+    $iniLines += "fit = off"
+    $iniLines += "threads = 12"
+    $iniLines += "threads-batch = 12"
+    $iniLines += "batch-size = 4096"
+    $iniLines += "ubatch-size = 512"
+    $iniLines += "context-shift = true"
+    $iniLines += ""
+
+    $modelCount = 0
+    foreach ($file in $allGguf) {
+        $meta = [GgufModelMeta]::Parse($file.FullName)
+        if (-not $meta) { continue }
+        # Salta i file non-modello (clip/mmproj) o troppo piccoli
+        if ($meta.Architecture -eq "clip" -or $meta.Architecture -eq "") { continue }
+
+        $cfg = Get-HexagonOptimalConfig $meta
+        $alias = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+
+        $iniLines += "# --- $($meta.ModelName) ($($cfg.SizeGB) GB, $($meta.Architecture), $($meta.QuantName)) ---"
+        $iniLines += "# Strategia: $($cfg.Strategy)"
+        $iniLines += "[$alias]"
+        $iniLines += "model = $($file.FullName)"
+        $iniLines += "device = $($cfg.Device)"
+        if ($cfg.TensorSplit) {
+            $iniLines += "tensor-split = $($cfg.TensorSplit)"
+        }
+        $iniLines += "ctx-size = $($cfg.ContextSize)"
+
+        # Aggiungi mmproj se presente per modelli multimodali
+        $mmprojCandidates = @(
+            "mmproj-$($alias)-f16.gguf",
+            "mmproj-$($alias)-BF16.gguf",
+            "mmproj-$alias.gguf"
+        )
+        foreach ($mp in $mmprojCandidates) {
+            $mpPath = Join-Path $ModelsDir $mp
+            if (Test-Path $mpPath) {
+                $iniLines += "mmproj = $mpPath"
+                break
+            }
+        }
+
+        $iniLines += ""
+        $modelCount++
+
+        Write-Host " [+] $alias" -ForegroundColor Green -NoNewline
+        Write-Host " -> $($cfg.Device)$(if ($cfg.TensorSplit) { " [-ts $($cfg.TensorSplit)]" }) | ctx $([Math]::Round($cfg.ContextSize / 1024))k | $($cfg.SizeGB) GB" -ForegroundColor Gray
+    }
+
+    # Scrivi il file INI senza BOM UTF-8 (richiesto dal parser PEG di llama-server)
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllLines($iniPath, $iniLines, $utf8NoBom)
+    Write-Host "`n Generato: $iniPath ($modelCount modelli configurati)" -ForegroundColor Yellow
+    Write-Host " Modelli simultanei in RAM: max $ModelsMax" -ForegroundColor Yellow
+    Write-Host "========================================================`n" -ForegroundColor Cyan
+
+    # Costruisci gli argomenti del router
+    $cliArgs = @(
+        "--host", $BindHost,
+        "--port", $Port,
+        "--jinja",
+        "--agent",
+        "-lv", "3",
+        "--models-dir", $ModelsDir,
+        "--models-preset", $iniPath,
+        "--models-max", $ModelsMax
+    )
+
+    # Configurazione Variabili d'Ambiente FastRPC / Hexagon
+    $env:ADSP_LIBRARY_PATH = $BinPath
+    $env:GGML_HEXAGON_OPBATCH = "512"
+    $env:GGML_HEXAGON_VTCM_SIZE = "8M"
+
+    if ($DryRun) {
+        Write-Host "[DRY RUN] Comando che verrebbe eseguito:" -ForegroundColor Yellow
+        Write-Host "& `"$ServerExe`" $($cliArgs -join ' ')" -ForegroundColor White
+        Write-Host "`nContenuto hexagon-models.ini:" -ForegroundColor Yellow
+        Get-Content $iniPath | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
+        exit 0
+    }
+
+    # Verifica runtime su richiesta
+    $syncScript = Join-Path $PSScriptRoot "sync-geniex.ps1"
+    if ($CheckRuntime) {
+        if (-not (Test-Path $syncScript)) { throw "sync-geniex.ps1 non trovato." }
+        Write-Host "Verifica read-only del runtime..." -ForegroundColor DarkGray
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $syncScript -BinPath $BinPath
+        if ($LASTEXITCODE -ne 0) { throw "Verifica runtime fallita (exit code $LASTEXITCODE); avvio annullato." }
+    }
+
+    Write-Host "Avvio llama-server.exe ROUTER su porta $Port con $modelCount modelli..." -ForegroundColor Green
+    Write-Host "Endpoint OpenAI compatibile: http://127.0.0.1:$Port/v1" -ForegroundColor Cyan
+    Write-Host "I modelli vengono caricati on-demand alla prima richiesta.`n" -ForegroundColor Cyan
+
+    Set-Location -Path $BinPath
+    & $ServerExe @cliArgs
+    exit $LASTEXITCODE
+}
+
+# =============================================================
+# MODALITA' DIRECT: singolo modello con configurazione ottimale
+# =============================================================
+
 # Selezione del Modello
-# -------------------------------------------------------------
 $targetModelFile = $null
 
 if ($Model -ne "") {
@@ -405,11 +539,7 @@ if ($cfg.TensorSplit) {
     $cliArgs += @("-ts", $cfg.TensorSplit)
 }
 
-if ($Mode -eq "Direct") {
-    $cliArgs += @("-m", $targetModelFile.FullName, "--alias", [System.IO.Path]::GetFileNameWithoutExtension($targetModelFile.Name))
-} else {
-    $cliArgs += @("--models-dir", $ModelsDir)
-}
+$cliArgs += @("-m", $targetModelFile.FullName, "--alias", [System.IO.Path]::GetFileNameWithoutExtension($targetModelFile.Name))
 
 # -------------------------------------------------------------
 # Configurazione Variabili d'Ambiente FastRPC / Hexagon
