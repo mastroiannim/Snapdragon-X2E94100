@@ -15,10 +15,13 @@
     Porta HTTP del server (default: 18803).
 
 .PARAMETER Host
-    Indirizzo bind (default: 0.0.0.0).
+    Indirizzo bind (default: 127.0.0.1; per accesso LAN occorre specificare -BindHost esplicitamente).
 
 .PARAMETER DryRun
     Mostra i parametri calcolati e il comando CLI senza avviare il processo.
+
+.PARAMETER CheckRuntime
+    Verifica (sola lettura) l'allineamento del runtime a GenieX prima dell'avvio.
 
 .PARAMETER Mode
     "Direct" (default): avvia direttamente llama-server sul modello specificato.
@@ -28,11 +31,12 @@
 param(
     [string]$Model = "",
     [int]$Port = 18803,
-    [string]$BindHost = "0.0.0.0",
+    [string]$BindHost = "127.0.0.1",
     [switch]$DryRun,
     [ValidateSet("Direct", "Router")]
     [string]$Mode = "Direct",
-    [switch]$ListOnly
+    [switch]$ListOnly,
+    [switch]$CheckRuntime
 )
 
 $ErrorActionPreference = "Stop"
@@ -85,12 +89,15 @@ public class GgufModelMeta {
 
             for (ulong i = 0; i < kvCount; i++) {
                 ulong kLen = br.ReadUInt64();
-                if (kLen > 500) break;
+                if (kLen > 500 || kLen > (ulong)(fs.Length - fs.Position))
+                    throw new InvalidDataException("GGUF metadata key length invalid");
                 string key = Encoding.UTF8.GetString(br.ReadBytes((int)kLen));
                 uint valType = br.ReadUInt32();
 
                 if (valType == 8) { // string
                     ulong sLen = br.ReadUInt64();
+                    if (sLen > 16UL * 1024 * 1024 || sLen > (ulong)(fs.Length - fs.Position))
+                        throw new InvalidDataException("GGUF metadata string length invalid");
                     string s = Encoding.UTF8.GetString(br.ReadBytes((int)sLen));
                     if (key == "general.architecture") m.Architecture = s;
                     if (key == "general.name") m.ModelName = s;
@@ -132,6 +139,7 @@ public class GgufModelMeta {
                 else if (valType == 2 || valType == 3) { br.ReadInt16(); }
                 else if (valType == 5 || valType == 6) { br.ReadInt32(); }
                 else if (valType == 11 || valType == 12) { br.ReadInt64(); }
+                else { throw new InvalidDataException("Unsupported GGUF metadata value type " + valType); }
             }
         }
         if (m.HeadCountKv == 0 && m.HeadCount > 0) m.HeadCountKv = m.HeadCount;
@@ -144,9 +152,12 @@ public class GgufModelMeta {
             case 7: m.QuantName = "Q8_0"; break;
             case 8: m.QuantName = "Q5_0"; break;
             case 9: m.QuantName = "Q5_1"; break;
-            case 10: case 11: case 12: case 13: case 14: case 15: case 16: case 17: case 18: case 19:
+            // general.file_type uses llama_ftype, NOT ggml_type.
+            case 10: case 11: case 12: case 13: case 14: case 15: case 16: case 17: case 18: case 21:
                 m.QuantName = "K-Quants"; break;
-            case 28: m.QuantName = "BF16"; break;
+            case 19: case 20: case 22: case 23: case 24: case 25: case 26: case 27: case 28: case 29: case 30: case 31:
+                m.QuantName = "IQ-Quants"; break;
+            case 32: m.QuantName = "BF16"; break;
             default: m.QuantName = "Type_" + m.FileType; break;
         }
         return m;
@@ -234,6 +245,11 @@ function Get-HexagonOptimalConfig([GgufModelMeta]$meta) {
         $ctxReason = "Contesto standard per coding agent (64k)"
     }
 
+    # Non superare il limite di contesto GGUF, anche con MoE/dense.
+    if ($meta.ContextLength -gt 0) {
+        $ctx = [Math]::Min([long]$ctx, [long]$meta.ContextLength)
+    }
+
     return [PSCustomObject]@{
         Device = $dev
         TensorSplit = $ts
@@ -307,8 +323,11 @@ if ($Model -ne "") {
         } else {
             # Ricerca parziale
             $matches = $allGguf | Where-Object { $_.Name -like "*$Model*" }
-            if ($matches.Count -ge 1) {
-                $targetModelFile = $matches[0]
+            if (@($matches).Count -gt 1) {
+                throw "Modello ambiguo: $Model. Specifica un nome GGUF esatto."
+            }
+            if (@($matches).Count -eq 1) {
+                $targetModelFile = @($matches)[0]
             } else {
                 Write-Error "Modello '$Model' non trovato in $ModelsDir"
                 exit 1
@@ -405,11 +424,13 @@ if ($DryRun) {
     exit 0
 }
 
-# Sincronizzazione WHQL e driver se presente lo script
+# Verifica runtime su richiesta, senza modificare o scaricare binari.
 $syncScript = Join-Path $PSScriptRoot "sync-geniex.ps1"
-if (Test-Path $syncScript) {
-    Write-Host "Verifica integrita' runtime FastRPC/WHQL..." -ForegroundColor DarkGray
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $syncScript -BinPath $BinPath -AutoConfirm | Out-Null
+if ($CheckRuntime) {
+    if (-not (Test-Path $syncScript)) { throw "sync-geniex.ps1 non trovato." }
+    Write-Host "Verifica read-only del runtime..." -ForegroundColor DarkGray
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $syncScript -BinPath $BinPath
+    if ($LASTEXITCODE -ne 0) { throw "Verifica runtime fallita (exit code $LASTEXITCODE); avvio annullato." }
 }
 
 Write-Host "Avvio llama-server.exe su porta $Port..." -ForegroundColor Green
