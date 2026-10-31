@@ -8,12 +8,16 @@ Il progetto nasce da un **innesto di componenti binari già distribuiti con Geni
 
 Il [post ufficiale GenieX Developer Preview, pubblicato il 7 luglio 2026](https://www.qualcomm.com/developer/blog/2026/06/geniex-developer-preview) chiarisce che GenieX **include già `llama.cpp`** e offre **anche un proprio server locale compatibile OpenAI**. GenieX espone separatamente un runtime `llama_cpp` per GGUF (CPU/GPU/HTP) e un runtime `qairt` per i pacchetti QAIRT precompilati; il nostro innesto riguarda il **primo**, non sostituisce né riutilizza automaticamente i kernel del secondo.
 
-### Come avviene l'innesto nel codice di questo repository
+### Come e' stato realizzato l'innesto storico
 
-1. `sync-geniex.ps1` ispeziona `%LOCALAPPDATA%\GenieX CLI\llama_cpp` e interroga `geniex.exe --version --skip-update` per ottenere `LlamaCPP Runtime Hash`.
-2. Lo script confronta quell'hash con `llama-server.exe --version` e tenta di individuare una release Windows ARM64 di `ggml-org/llama.cpp` da cui recuperare i **frontend** (in particolare `llama-server.exe`, `llama-cli.exe`, `llama-bench.exe`). **Nel codice corrente di `main`, la ricerca contiene un fallback approssimativo**: non certifica che il commit o l'ABI corrispondano davvero.
-3. I file della cartella `GenieX CLI\llama_cpp` sono **collegati tramite hard-link**, con fallback alla **copia**, nella cartella del server; il codice non prevede una distribuzione indipendente verificata di quegli artefatti.
-4. `launch-hexagon.ps1` imposta `ADSP_LIBRARY_PATH` per il processo e avvia il frontend `llama-server.exe` con i dispositivi e parametri GGML selezionati.
+Il sincronizzatore originario (`main` al commit `dbbb499`) operava cosi':
+
+1. Ispezionava `%LOCALAPPDATA%\GenieX CLI\llama_cpp` e interrogava `geniex.exe --version --skip-update` per ottenere `LlamaCPP Runtime Hash`.
+2. Tentava di selezionare una release Windows ARM64 di `ggml-org/llama.cpp` per recuperare i frontend. La ricerca includeva fallback approssimativi, senza certificare la corrispondenza del commit o dell'ABI.
+3. Collegava tramite hard-link, con fallback alla copia, i componenti di `GenieX CLI\llama_cpp` nella cartella dei frontend.
+4. Il launcher impostava `ADSP_LIBRARY_PATH` e avviava `llama-server.exe`.
+
+**Con la modifica del [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1), il sincronizzatore diventa un controllo in sola lettura dei binari runtime.** Il downloader, la sostituzione dei file e il rollback sono rimossi. `-Apply` viene rifiutato prima di ogni controllo, anche con `-AutoConfirm`. La preparazione di una nuova composizione richiede una procedura separata; lo script aggiornato non installa il runtime.
 
 ```text
 GenieX CLI installato                      Release llama.cpp (Windows ARM64)
@@ -32,7 +36,7 @@ GenieX CLI installato                      Release llama.cpp (Windows ARM64)
 
 **Il risultato è una composizione sperimentale, non un pacchetto ufficiale né una compatibilità garantita da Qualcomm.** La firma e il catalogo del DSP non sanano un'incompatibilità fra DLL e frontend. La licenza BSD-3-Clause del *progetto open source GenieX* non dimostra, da sola, il diritto di ridistribuire ogni artefatto SDK, runtime o catalogo incluso in un installer: vanno esaminati provenienza e termini di ciascun componente. Il repository descrive l'impiego locale dei componenti; non deve presentare un bundle misto come certificato o supportato ufficialmente.
 
-La composizione corrente **non è sicura da eseguire automaticamente**: il percorso di aggiornamento contiene un estrattore HTTP Range personalizzato, fallback di scelta release e operazioni distruttive sui file. Vedi le [precondizioni specifiche dell'innesto](docs/COMPATIBILITA.md#verifiche-innesto-geniex-llamacpp) e il [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1) per le modifiche proposte al sincronizzatore.
+Il vecchio aggiornamento automatico del commit `dbbb499` non deve essere usato su un'installazione da preservare. La versione del PR #1 lo disabilita rimuovendone il codice; conserva soltanto la verifica del runtime. Vedi le [precondizioni specifiche dell'innesto](docs/COMPATIBILITA.md#verifiche-innesto-geniex-llamacpp).
 
 **Stato:** le scelte di dispositivo, gli split e le dimensioni di contesto del launcher sono *euristiche sperimentali*, non configurazioni ottimali dimostrate. L'enumerazione dei device non equivale a una prova di inferenza sulla NPU. Nessun limite universale di modello a 14-15 GB o di contesto a 4096/65536 token è stabilito da questo progetto.
 
@@ -82,7 +86,7 @@ Riferimenti: [Qualcomm, FastRPC e stub/skel](https://www.qualcomm.com/developer/
 
 Per controlli non distruttivi, prerequisiti dettagliati, diagnosi e tracciabilità dei componenti vedere [docs/COMPATIBILITA.md](docs/COMPATIBILITA.md).
 
-## Uso dei comandi presenti in `main`
+## Uso del launcher e versioni dello script
 
 ```powershell
 # Solo inventario (non avvia il server)
@@ -95,11 +99,11 @@ Per controlli non distruttivi, prerequisiti dettagliati, diagnosi e tracciabilit
 .\launch-hexagon.ps1 -Model "nome-modello.gguf"
 ```
 
-**Avvertenza sulla versione attuale di `main`:** il launcher, prima dell'avvio reale, chiama automaticamente `sync-geniex.ps1 -AutoConfirm` quando è presente. Quest'ultimo può **sostituire binari e DLL** ed eseguire un estrattore ZIP HTTP Range non ancora validato; perciò **non usare l'avvio reale su un'installazione da preservare** finché non è applicato e verificato il cambiamento di sicurezza proposto nel [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1). Anche `-ListOnly` e `-DryRun` possono creare hard-link dei modelli durante la scansione: non sono operazioni completamente read-only.
+**Distinguere le versioni:** nel `main` originario (`dbbb499`) il launcher invocava automaticamente il sincronizzatore con `-AutoConfirm`, potendo sostituire binari e DLL. Il PR #1 rimuove quella chiamata: l'opzione `-CheckRuntime` richiede soltanto un controllo, e interrompe l'avvio se fallisce. Verificare di usare la versione aggiornata prima di affidarsi a questo comportamento.
 
-Il PR #1, separato da questa correzione documentale, introduce controlli del runtime non distruttivi per impostazione predefinita. Non presumere che tali opzioni siano già disponibili in `main` prima del merge.
+Anche dopo questa modifica, `-ListOnly` e `-DryRun` possono creare hard-link dei modelli durante la scansione: non sono operazioni completamente read-only. La sola lettura del controllore riguarda i binari runtime.
 
-Il server, se avviato, espone un endpoint compatibile OpenAI sulla porta `18803`; nelle versioni attuali di `main` il bind predefinito è `0.0.0.0` (tutte le interfacce). Per usarlo esclusivamente in locale specificare `-BindHost 127.0.0.1`; **non esporre l'endpoint senza autenticazione su una rete non attendibile**.
+Il server espone un endpoint compatibile OpenAI sulla porta `18803`. Il codice originario usava il bind `0.0.0.0`; il PR #1 imposta `127.0.0.1` come default. L'accesso LAN richiede `-BindHost` esplicito; **non esporre l'endpoint senza autenticazione su una rete non attendibile**.
 
 ## Profilazione e risultati
 
