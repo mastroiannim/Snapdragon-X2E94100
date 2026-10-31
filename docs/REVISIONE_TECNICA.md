@@ -10,7 +10,8 @@
 4. **Controllo runtime**: `launch-hexagon.ps1 -CheckRuntime` esegue una verifica di allineamento, non una sincronizzazione. `sync-geniex.ps1` e' read-only per default; `-Apply` sblocca il vecchio percorso di aggiornamento, ancora **sperimentale e non validato**.
 5. **Rollback**: un backup preesistente non viene sovrascritto; un backup incompleto non puo' essere usato per ripristinare; una copia valida non viene eliminata soltanto perche' `--list-devices` termina con successo.
 6. **Benchmark**: un PMIC assente non invalida la misura di throughput. Le stime di potenza rimangono indicative dell'intero processo; `J/token` e `token/J` sono omessi finche' non esistano finestre temporali omogenee con baseline idle.
-7. **Verifica statica automatica**: un workflow PowerShell controlla il parsing di tutti gli script e la compilazione del parser GGUF C# incorporato.
+7. **GGUF**: `general.file_type` usa la famiglia `llama_ftype`, non `ggml_type`; corretto `BF16=32`, `IQ2_XXS=19` e la distinzione K/IQ. Metadata e stringhe anomale vengono rifiutate invece di produrre risultati parziali. Il parser NON e\x27 ancora un validatore completo del formato.
+8. **Verifica statica automatica**: un workflow PowerShell controlla il parsing di tutti gli script, la compilazione del C# e fixture GGUF sintetiche positive/negative.
 
 ## Rischi residui: non occultarli
 
@@ -19,7 +20,7 @@
 | **Bloccante per aggiornamento runtime** | L'estrattore ZIP HTTP Range e' artigianale: non verifica checksum/firma dell'asset, CRC, limiti e tutti i casi ZIP64 | Evitare `-Apply` finche' non viene sostituito con una procedura transazionale e verificata |
 | **Alta** | `--list-devices` prova enumerazione, NON corretta esecuzione dei kernel HTP/GPU | Eseguire inference smoke test con log di offload |
 | **Alta** | Il ramo `-Mode Router` utilizza euristiche derivate dal modello selezionato per una directory che puo' contenere modelli diversi | Non affermare che il router abbia configurazioni per-modello ottimali |
-| **Alta** | Il parser GGUF C# non applica bounds checking completo alle lunghezze di stringhe/array e gestisce incompletamente i formati non riconosciuti | Da correggere con fixture GGUF valide, troncate e avversarie; non inserire nuovi fallback silenziosi |
+| **Alta** | Il parser GGUF C# ha alcuni bounds checks e rifiuta tipi non supportati, ma non verifica completamente gli array o tutte le varianti del formato | Da correggere con fixture GGUF valide, troncate e avversarie; non inserire nuovi fallback silenziosi |
 | **Alta, metodologica** | I campioni energetici non sono allineati alle fasi prefill/decode e mancano le baseline | Nessun rapporto J/token valido al momento |
 | **Media** | Le soglie dimensionali (6/13,5/15 GB), gli split e i limiti del contesto sono euristiche, NON leggi hardware | Misurare isolando variabili, riportare distribuzioni e intervalli |
 | **Media** | La cartella dei modelli viene modificata tramite hard-link anche prima del `-DryRun` | Separare discovery, planning ed effetti collaterali in un successivo intervento mirato |
@@ -27,7 +28,7 @@
 
 ## Test prima dell'hardware
 
-- [ ] CI Windows: parse PowerShell 5.1 e compilazione del parser C# (nessun backend richiesto)
+- [ ] CI Windows: parse PowerShell 5.1, compilazione C# e fixture GGUF deterministiche (nessun backend richiesto)
 - [ ] Controllo statico del diff: esclusione modifiche non motivate a flags di caricamento, SWA, DMA e split
 - [ ] Test locale su installazione fittizia: `-CheckRuntime` e `sync-geniex.ps1` senza `-Apply` non devono toccare i binari
 - [ ] Simulare backup non creato, backup incompleto, backup preesistente, errore download e disco pieno
