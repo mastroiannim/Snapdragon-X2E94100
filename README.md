@@ -2,6 +2,38 @@
 
 Progetto sperimentale per eseguire modelli GGUF con `llama.cpp` su CPU Oryon, GPU Adreno (`GPUOpenCL`) e NPU Hexagon (`HTP0`), anche in combinazione quando il backend e il modello lo consentono.
 
+## Il punto distintivo: riuso selettivo del runtime GenieX
+
+Il progetto nasce da un **innesto di componenti binari già distribuiti con GenieX** in un'installazione autonoma di `llama.cpp`. Non è un nuovo driver NPU, non modifica il firmware e non “sblocca” FastRPC. Consente di sperimentare con le opzioni native di `llama-server.exe` mantenendo, quando l'insieme di componenti è effettivamente compatibile, i backend GGML/HTP e OpenCL forniti con GenieX.
+
+Il [post ufficiale GenieX Developer Preview, pubblicato il 7 luglio 2026](https://www.qualcomm.com/developer/blog/2026/06/geniex-developer-preview) chiarisce che GenieX **include già `llama.cpp`** e offre **anche un proprio server locale compatibile OpenAI**. GenieX espone separatamente un runtime `llama_cpp` per GGUF (CPU/GPU/HTP) e un runtime `qairt` per i pacchetti QAIRT precompilati; il nostro innesto riguarda il **primo**, non sostituisce né riutilizza automaticamente i kernel del secondo.
+
+### Come avviene l'innesto nel codice di questo repository
+
+1. `sync-geniex.ps1` ispeziona `%LOCALAPPDATA%\GenieX CLI\llama_cpp` e interroga `geniex.exe --version --skip-update` per ottenere `LlamaCPP Runtime Hash`.
+2. Lo script confronta quell'hash con `llama-server.exe --version` e tenta di individuare una release Windows ARM64 di `ggml-org/llama.cpp` da cui recuperare i **frontend** (in particolare `llama-server.exe`, `llama-cli.exe`, `llama-bench.exe`). **Nel codice corrente di `main`, la ricerca contiene un fallback approssimativo**: non certifica che il commit o l'ABI corrispondano davvero.
+3. I file della cartella `GenieX CLI\llama_cpp` sono **collegati tramite hard-link**, con fallback alla **copia**, nella cartella del server; il codice non prevede una distribuzione indipendente verificata di quegli artefatti.
+4. `launch-hexagon.ps1` imposta `ADSP_LIBRARY_PATH` per il processo e avvia il frontend `llama-server.exe` con i dispositivi e parametri GGML selezionati.
+
+```text
+GenieX CLI installato                      Release llama.cpp (Windows ARM64)
+    |                                                |
+    +-- llama_cpp: DLL GGML, backend,                +-- frontend eseguibili
+    |   artefatti HTP .so e catalogo .cat                 |
+    |                                                |
+    +--------- collegamento/copia ---------------------+
+                         |
+                  cartella llama-bin
+                         |
+               llama-server.exe + GGML
+                         |
+           GPUOpenCL / FastRPC / HTP0
+```
+
+**Il risultato è una composizione sperimentale, non un pacchetto ufficiale né una compatibilità garantita da Qualcomm.** La firma e il catalogo del DSP non sanano un'incompatibilità fra DLL e frontend. La licenza BSD-3-Clause del *progetto open source GenieX* non dimostra, da sola, il diritto di ridistribuire ogni artefatto SDK, runtime o catalogo incluso in un installer: vanno esaminati provenienza e termini di ciascun componente. Il repository descrive l'impiego locale dei componenti; non deve presentare un bundle misto come certificato o supportato ufficialmente.
+
+La composizione corrente **non è sicura da eseguire automaticamente**: il percorso di aggiornamento contiene un estrattore HTTP Range personalizzato, fallback di scelta release e operazioni distruttive sui file. Vedi le [precondizioni specifiche dell'innesto](docs/COMPATIBILITA.md#verifiche-specifiche-dellinnesto-geniex-llamacpp) e il [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1) per le modifiche proposte al sincronizzatore.
+
 **Stato:** le scelte di dispositivo, gli split e le dimensioni di contesto del launcher sono *euristiche sperimentali*, non configurazioni ottimali dimostrate. L'enumerazione dei device non equivale a una prova di inferenza sulla NPU. Nessun limite universale di modello a 14-15 GB o di contesto a 4096/65536 token è stabilito da questo progetto.
 
 - [Precondizioni di compatibilità e procedura di verifica](docs/COMPATIBILITA.md)
@@ -46,7 +78,7 @@ Riferimenti: [Qualcomm, FastRPC e stub/skel](https://www.qualcomm.com/developer/
 5. **Percorsi e modelli.** Questo launcher presume `%USERPROFILE%\llama-cpp\llama-bin-win-cpu-arm64` per il server e `%USERPROFILE%\.cache\geniex\models` per i GGUF. `ADSP_LIBRARY_PATH` deve risolvere le librerie DSP compatibili; il launcher la imposta per il processo e gli eventuali figli.
 6. **Conferma reale.** Verificare `--version`, `--list-devices`, caricamento di un GGUF compatibile e log di offload durante *un'inferenza effettiva*. La sola presenza di `HTP0` o `GPUOpenCL` nell'elenco non basta.
 
-**GenieX non è requisito generale di GGML Hexagon**: è una delle possibili sorgenti di artefatti compatibili adottata da questo repository. Il percorso specifico di `sync-geniex.ps1` richiede invece l'installazione di GenieX. **Non mescolare automaticamente** eseguibili upstream e DLL GenieX senza verifiche ulteriori.
+**GenieX non è prerequisito universale del backend GGML Hexagon**, perché una build autonoma può generare i propri backend. **Per l'innesto specifico implementato da questo repository è invece la sorgente locale delle DLL GGML e degli artefatti HTP**, dunque `sync-geniex.ps1` richiede GenieX installato. Non presentare il riuso di tali file come supporto ufficiale alla combinazione con frontend di un'altra release: la compatibilità resta da dimostrare con manifest, hash, dipendenze e test reali.
 
 Per controlli non distruttivi, prerequisiti dettagliati, diagnosi e tracciabilità dei componenti vedere [docs/COMPATIBILITA.md](docs/COMPATIBILITA.md).
 
@@ -79,6 +111,8 @@ Per stabilire la configurazione migliore servono, a parità di modello/quantizza
 
 ## Fonti primarie
 
+- [Qualcomm — GenieX Developer Preview (7 luglio 2026)](https://www.qualcomm.com/developer/blog/2026/06/geniex-developer-preview)
+- [GenieX SDK — due runtime distinti: llama_cpp e qairt](https://github.com/qualcomm/GenieX/blob/main/sdk/README.md)
 - [Qualcomm — How AI models reach Hexagon NPU (2 ottobre 2026)](https://www.qualcomm.com/developer/blog/2026/10/how-ai-models-reach-hexagon-npu-qairt-fastrpc-hexagon-explained)
 - [llama.cpp — Snapdragon backend](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/snapdragon/README.md)
 - [llama.cpp — Hexagon developer details](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/snapdragon/developer.md)
