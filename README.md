@@ -122,6 +122,39 @@ Anche dopo questa modifica, `-ListOnly` e `-DryRun` possono creare hard-link dei
 
 Il server espone un endpoint compatibile OpenAI sulla porta `18803`. Il binding predefinito è `127.0.0.1`. L'accesso LAN richiede `-BindHost` esplicito; **non esporre l'endpoint senza autenticazione su una rete non attendibile**.
 
+## Hexagon Claw TUI (Interfaccia Terminale in Stile OpenClaw)
+
+È inclusa una **Text User Interface (TUI)** avanzata in stile **OpenClaw** (`🦞`), ottimizzata per interagire con `llama-server` e monitorare l'hardware Qualcomm Snapdragon X2 Elite Extreme direttamente da riga di comando.
+
+### Installazione Dipendenze
+```bash
+pip install -r requirements.txt
+```
+
+### Avvio della TUI
+```cmd
+.\tui.bat                               # Avvio rapido con supporto UTF-8 per console Windows
+```
+*oppure tramite PowerShell o Python:*
+```powershell
+.\launch-tui.ps1                        # Launcher PowerShell
+python tui.py --model "LFM2.5-24B"      # Con modello specifico iniziale
+```
+
+### Caratteristiche Principali
+* **Header & Telemetria Hardware:** Banner informativo persistente con stato del server (ping ms), modello attivo, accelerazione hardware (`HTP0`, `GPUOpenCL`, split vettoriale), consumo RAM LPDDR5X (ctypes nativo) e velocità di generazione ($t/s$).
+* **Streaming & Pensiero Deep Thought:** Streaming dei token in tempo reale con estrazione e formattazione distinta dei blocchi di ragionamento (`<think> ... </think>`).
+* **Autocompletamento Comandi Slash:** Suggerimenti interattivi durante la digitazione (`/`):
+  * `/models`: Elenco completo dei modelli disponibili sul router con strategie hardware.
+  * `/model <nome>`: Cambio istantaneo del modello attivo (caricato on-demand dal router).
+  * `/status`: Dashboard approfondita su architettura SoC, 18 core Oryon, NPU Hexagon e GPU Adreno.
+  * `/bench [n_tokens]`: Benchmark prestazionale live con misurazione TTFT e velocità di decodifica ($t/s$).
+  * `/server [status|start|stop]`: Monitoraggio e controllo del processo `llama-server`.
+  * `/clear` o `/new`: Reset della conversazione e del contesto.
+  * `/system [prompt]`: Ispezione o modifica del system prompt.
+  * `/temp <val>`: Regolazione della temperatura di campionamento.
+  * `/tokens`: Analisi della finestra di contesto e occupazione stimata della KV cache.
+
 ## Profilazione e risultati
 
 **Compatibilità funzionale osservata nei percorsi esercitati; riproducibilità non ancora stabilita; universalità non dimostrata.** I benchmark storici riportano esecuzioni di `llama-bench.exe` con frontend `llama.cpp` e componenti runtime provenienti da GenieX sullo Snapdragon X2E94100. Sono evidenze di caricamento ed esecuzione del calcolo su modelli GGUF, oltre la sola enumerazione dei dispositivi. Un'esecuzione completata esclude un'incompatibilità ABI che impedisca quei percorsi, ma non certifica tutte le interfacce, la correttezza numerica degli output o il funzionamento di `llama-server.exe`.

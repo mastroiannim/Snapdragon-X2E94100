@@ -4,3 +4,5 @@ hexagon-models.ini
 # File temporanei e log
 *.log
 *.tmp
+__pycache__/
+*.pyc
