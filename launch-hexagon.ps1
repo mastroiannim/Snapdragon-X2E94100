@@ -15,7 +15,7 @@
     Porta HTTP del server (default: 18803).
 
 .PARAMETER Host
-    Indirizzo bind (default: 0.0.0.0).
+    Indirizzo bind (default: 127.0.0.1; per accesso LAN occorre specificare -BindHost esplicitamente).
 
 .PARAMETER DryRun
     Mostra i parametri calcolati e il comando CLI senza avviare il processo.
@@ -28,11 +28,12 @@
 param(
     [string]$Model = "",
     [int]$Port = 18803,
-    [string]$BindHost = "0.0.0.0",
+    [string]$BindHost = "127.0.0.1",
     [switch]$DryRun,
     [ValidateSet("Direct", "Router")]
     [string]$Mode = "Direct",
-    [switch]$ListOnly
+    [switch]$ListOnly,
+    [switch]$SyncRuntime
 )
 
 $ErrorActionPreference = "Stop"
@@ -234,6 +235,11 @@ function Get-HexagonOptimalConfig([GgufModelMeta]$meta) {
         $ctxReason = "Contesto standard per coding agent (64k)"
     }
 
+    # Non superare il limite di contesto GGUF, anche con MoE/dense.
+    if ($meta.ContextLength -gt 0) {
+        $ctx = [Math]::Min([long]$ctx, [long]$meta.ContextLength)
+    }
+
     return [PSCustomObject]@{
         Device = $dev
         TensorSplit = $ts
@@ -307,8 +313,11 @@ if ($Model -ne "") {
         } else {
             # Ricerca parziale
             $matches = $allGguf | Where-Object { $_.Name -like "*$Model*" }
-            if ($matches.Count -ge 1) {
-                $targetModelFile = $matches[0]
+            if (@($matches).Count -gt 1) {
+                throw "Modello ambiguo: $Model. Specifica un nome GGUF esatto."
+            }
+            if (@($matches).Count -eq 1) {
+                $targetModelFile = @($matches)[0]
             } else {
                 Write-Error "Modello '$Model' non trovato in $ModelsDir"
                 exit 1
@@ -368,7 +377,7 @@ $cliArgs = @(
     "--jinja",
     "--agent",
     "-np", "1",
-    "-lm", "mlock",
+    "-lm", "auto",
     "-lv", "3",
     "-ngl", "999",
     "-c", $cfg.ContextSize,
@@ -397,7 +406,8 @@ if ($Mode -eq "Direct") {
 # -------------------------------------------------------------
 $env:ADSP_LIBRARY_PATH = $BinPath
 $env:GGML_HEXAGON_OPBATCH = "512"
-$env:GGML_HEXAGON_VTCM_SIZE = "8M"
+# Non forzare VTCM a 8M; lasciare decidere al driver.
+Remove-Item Env:GGML_HEXAGON_VTCM_SIZE -ErrorAction SilentlyContinue
 
 if ($DryRun) {
     Write-Host "[DRY RUN] Comando che verrebbe eseguito:" -ForegroundColor Yellow
@@ -407,9 +417,11 @@ if ($DryRun) {
 
 # Sincronizzazione WHQL e driver se presente lo script
 $syncScript = Join-Path $PSScriptRoot "sync-geniex.ps1"
-if (Test-Path $syncScript) {
-    Write-Host "Verifica integrita' runtime FastRPC/WHQL..." -ForegroundColor DarkGray
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $syncScript -BinPath $BinPath -AutoConfirm | Out-Null
+if ($SyncRuntime) {
+    if (-not (Test-Path $syncScript)) { throw "sync-geniex.ps1 non trovato." }
+    Write-Host "Sincronizzazione runtime richiesta esplicitamente..." -ForegroundColor DarkGray
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $syncScript -BinPath $BinPath -AutoConfirm
+    if ($LASTEXITCODE -ne 0) { throw "sync-geniex.ps1 fallito (exit code $LASTEXITCODE); avvio annullato." }
 }
 
 Write-Host "Avvio llama-server.exe su porta $Port..." -ForegroundColor Green
