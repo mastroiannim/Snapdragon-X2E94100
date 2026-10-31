@@ -1,62 +1,54 @@
-# Seconda revisione critica — PR #1
+# Revisione tecnica — PR #1
 
-**Criterio:** cambiare il minimo necessario per correggere errori dimostrabili; preservare i parametri runtime già scelti finché non esiste una prova comparativa. Le prove puntuali del runtime corrente (GPU, HTP0 e split 50/50) sono documentate nel [PR #2](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/2); non costituiscono validazione del downloader o di tutti i parametri del launcher.
+## Ambito valutato per il merge
 
-## Risultati verificabili
+Questa PR migliora il comportamento del launcher e i report di benchmark su un runtime gia' installato. **L'aggiornamento automatico e' escluso dall'ambito:** il downloader HTTP Range, l'installazione tramite hard-link/copia e il rollback sono rimossi da `sync-geniex.ps1`. Il codice precedente resta consultabile nella cronologia Git.
 
-1. **Sintassi dei dispositivi**: per `llama-bench`, `/` separa device e pesi nella stessa configurazione, mentre `,` seleziona varianti di benchmark. I profili usano `-dev HTP0/GPUOpenCL -ts 75/25` (e 50/50, 25/75), con `-sm layer` esplicito. Il report accetta soltanto una riga JSON con device ordinati, pesi, split-mode e numero di token coerenti con la richiesta; non prende piu' il primo elemento di risultati multipli. La sintassi del benchmark va distinta da quella di `llama-server`.
-2. **Binding HTTP**: `127.0.0.1` riduce l'esposizione involontaria rispetto a `0.0.0.0`. L'accesso LAN richiede `-BindHost` esplicito.
-3. **Loader e VTCM**: `-lm auto` e `-lm mlock` non sono equivalenti. La rimozione di `GGML_HEXAGON_VTCM_SIZE=8M` non era giustificata da un test: entrambi i valori originali sono stati conservati, senza dichiararli ottimali.
-4. **Controllo runtime**: `launch-hexagon.ps1 -CheckRuntime` esegue una verifica di allineamento, non una sincronizzazione. `sync-geniex.ps1` e' read-only per default; `-Apply` sblocca il vecchio percorso di aggiornamento, ancora **sperimentale e non validato**.
-5. **Rollback**: un backup preesistente non viene sovrascritto; un backup incompleto non puo' essere usato per ripristinare; una copia valida non viene eliminata soltanto perche' `--list-devices` termina con successo.
-6. **Benchmark**: un PMIC assente non invalida la misura di throughput. Le stime di potenza rimangono indicative dell'intero processo; `J/token` e `token/J` sono omessi finche' non esistano finestre temporali omogenee con baseline idle.
-7. **GGUF**: `general.file_type` usa la famiglia `llama_ftype`, non `ggml_type`; corretto `BF16=32`, `IQ2_XXS=19` e la distinzione K/IQ. Metadata e stringhe anomale vengono rifiutate invece di produrre risultati parziali. Il parser NON e' ancora un validatore completo del formato.
-8. **Verifica automatica**: un workflow PowerShell controlla il parsing degli script, la compilazione del C#, le fixture GGUF e i [test dei profili benchmark](../tests/benchmark-profiles.ps1). Questi ultimi coprono le cinque configurazioni, prefill/decode, JSON incoerenti o multipli, assenza PMIC, omissione dei risultati rifiutati e report Markdown con 11 colonne e valori interpolati correttamente.
+`sync-geniex.ps1` esegue soltanto confronti di versioni e SHA-256 ed enumerazione dei dispositivi. Mantiene `-Apply` come opzione riconoscibile, ma la rifiuta prima di discovery, processi figli, modifiche all'ambiente o operazioni sui file. `-AutoConfirm` e' ignorata e non puo' aggirare il blocco. Un esito negativo non suggerisce di usare Apply e non tenta riparazioni.
 
-## Verifica della correzione dei profili — 31 ottobre 2026
+Il launcher non richiama piu' automaticamente il vecchio aggiornamento. Con `-CheckRuntime` esegue il controllo e interrompe l'avvio se questo fallisce. Il controllo non certifica l'ABI completa o la correttezza numerica dell'inferenza.
 
-- Test di regressione locali superati per tutte le cinque configurazioni, con output sintetici positivi e negativi. Sono test del codice del report, senza eseguibili fittizi avviati o driver richiesti.
-- Binario reale `llama-bench` b11938 / 19cce6919: quattro righe JSON dalla variante con virgole; il nuovo controllo le rifiuta. La prova del parser con `GPUOpenCL/GPUOpenCL -ts 50/50` e `-ngl 0` produce una sola riga coerente. Questo secondo comando verifica la sintassi e non e' una prova ibrida hardware.
-- Un test reale con `GPUOpenCL`, Qwen3.5-0.8B-Q4_0 e `-ngl 99` produce una riga JSON accettata dal nuovo controllo.
-- Parsing PowerShell e fixture GGUF della CI rieseguiti localmente. L'esito Windows PowerShell 5.1 e' verificato dal workflow sul commit aggiornato.
-- Nessun nuovo test NPU 75/25 o 25/75 eseguito dalla sessione ristretta. L'esecuzione reale 50/50 documentata nel PR #2 resta evidenza separata; non e' presentata come una prova del benchmark automatico con Flash Attention attiva.
-- Nessuna modifica al downloader, al rollback, alle euristiche del launcher o ai valori energetici storici in questa correzione.
+## Correzioni incluse
 
-## Rischi residui: non occultarli
+- Bind HTTP predefinito `127.0.0.1`; accesso LAN soltanto con parametro esplicito.
+- Benchmark: `/` separa device e pesi dello stesso test, mentre `,` seleziona varianti. Sono presenti HTP0, GPUOpenCL e gli split HTP0/GPUOpenCL 75/25, 50/50 e 25/75, con `-sm layer` esplicito.
+- Accettata una sola riga JSON per invocazione, con device nell'ordine richiesto, pesi, split-mode, prompt/generazione/profondita' coerenti e statistiche valide. I risultati multipli o incoerenti sono segnalati ed esclusi dal report.
+- Tabella Markdown con 11 colonne e valori modello/test interpolati correttamente. Report predefinito BENCHMARK_AUTO.md, separato dal registro storico.
+- Throughput conservato senza PMIC; potenze mancanti N/D. Nessun rapporto J/token ricavato da finestre temporali incompatibili.
+- Parser GGUF: corretta l'enumerazione llama_ftype, controlli su chiavi/stringhe e limite di contesto del modello. Le euristiche e i parametri originari di caricamento/VTCM sono conservati senza presentarli come ottimali.
 
-| Priorita' | Fatto | Trattamento |
-| --- | --- | --- |
-| **Bloccante per aggiornamento runtime** | L'estrattore ZIP HTTP Range e' artigianale: non verifica checksum/firma dell'asset, CRC, limiti e tutti i casi ZIP64 | Evitare `-Apply` finche' non viene sostituito con una procedura transazionale e verificata |
-| **Alta** | `--list-devices` prova enumerazione, NON corretta esecuzione dei kernel HTP/GPU | Eseguire inference smoke test con log di offload |
-| **Alta** | Il ramo `-Mode Router` utilizza euristiche derivate dal modello selezionato per una directory che puo' contenere modelli diversi | Non affermare che il router abbia configurazioni per-modello ottimali |
-| **Alta** | Il parser GGUF C# ha alcuni bounds checks e rifiuta tipi non supportati, ma non verifica completamente gli array o tutte le varianti del formato | Da correggere con fixture GGUF valide, troncate e avversarie; non inserire nuovi fallback silenziosi |
-| **Alta, metodologica** | I campioni energetici non sono allineati alle fasi prefill/decode e mancano le baseline | Nessun rapporto J/token valido al momento |
-| **Media** | Le soglie dimensionali (6/13,5/15 GB), gli split e i limiti del contesto sono euristiche, NON leggi hardware | Misurare isolando variabili, riportare distribuzioni e intervalli |
-| **Media** | La cartella dei modelli viene modificata tramite hard-link anche prima del `-DryRun` | Separare discovery, planning ed effetti collaterali in un successivo intervento mirato |
-| **Media** | Il README e il benchmark storico contengono spiegazioni causali forti non ancora dimostrate | Conservare i risultati originali come storici, ma non presentarli come conferme |
+## Verifiche effettuate
 
-## Test prima dell'hardware
+| Controllo | Evidenza |
+| --- | --- |
+| Sintassi PowerShell, C# GGUF e fixture | Suite locale e workflow Windows PowerShell 5.1 |
+| Cinque profili, prefill/decode e report | Test deterministici positivi/negativi, inclusa la mancata pubblicazione dei JSON rifiutati |
+| Regressione delle virgole | Il binario reale b11938 / 19cce6919 genera quattro varianti; il controllo corretto le rifiuta |
+| Sintassi con slash | GPUOpenCL/GPUOpenCL, split 50/50 e ngl 0: una sola riga JSON coerente; prova del parser, non test ibrido hardware |
+| GPU reale | Qwen3.5-0.8B-Q4_0 con GPUOpenCL e ngl 99: una riga JSON accettata |
+| Apply disabilitato | Test in processo separato con Apply, Apply+AutoConfirm e percorsi mancanti: rifiuto anticipato, nessun file fixture modificato o backup creato |
+| Controllo senza GenieX | Errore esplicito con e senza AutoConfirm; nessuna modifica alle fixture |
+| Runtime locale in sola lettura | Nel contesto ristretto il controllo fallisce; hash dei 47 file runtime confrontati e variabile utente ADSP_LIBRARY_PATH invariati |
 
-- [ ] CI Windows: parse PowerShell 5.1, compilazione C# e fixture GGUF deterministiche (nessun backend richiesto)
-- [ ] Controllo statico del diff: esclusione modifiche non motivate a flags di caricamento, SWA, DMA e split
-- [ ] Test locale su installazione fittizia: `-CheckRuntime` e `sync-geniex.ps1` senza `-Apply` non devono toccare i binari
-- [ ] Simulare backup non creato, backup incompleto, backup preesistente, errore download e disco pieno
-- [ ] Separare la futura reimplementazione del downloader dal PR di stabilizzazione
+I test di rifiuto dell'aggiornamento sono in [tests/runtime-readonly.ps1](../tests/runtime-readonly.ps1); quelli di profili e report in [tests/benchmark-profiles.ps1](../tests/benchmark-profiles.ps1). Entrambi sono eseguiti dal workflow Windows.
 
-## Test su hardware (soltanto in seguito)
+Le prove reali GPU, HTP0 e HTP0/GPUOpenCL 50/50 sono documentate nel [PR #2](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/2). Non costituiscono test di tutte le opzioni del launcher o del benchmark automatico. Non sono stati eseguiti nuovi test NPU 75/25 o 25/75 dalla sessione ristretta.
 
-1. Registrare commit effettivo dei binari, driver, GGUF hash, versione Windows, condizioni di potenza e dispositivi disponibili.
-2. Eseguire un modello valido con CPU, HTP0, GPUOpenCL, HTP0+GPUOpenCL, mantenendo uguali token, contesto, batch e quantizzazione.
-3. Dimostrare offload effettivo dai log; non confondere discovery con elaborazione.
-4. Misurare separatamente prefill/decode; campionare energia su identico intervallo temporale, e stimare la quota incrementale sopra idle.
-5. Ripetere e registrare dispersione, temperatura e throttling. Non dichiarare optimalita' senza confronto.
+## Limiti residui dell'uso sperimentale
 
-**Non autorizzare merge** soltanto perche' il parsing PowerShell e' verde: la CI e' un controllo preliminare, non una certificazione runtime.
+- Le euristiche dimensionali, gli split e il contesto non sono ottimali dimostrati; il router applica default globali che possono essere inadatti ad altri modelli nella directory.
+- Il parser GGUF non e' un validatore completo di array, nesting, metadata avversari o tensori. Ha letto i metadata degli 11 modelli locali durante la revisione; questa evidenza non equivale a validazione completa del formato.
+- ListOnly e DryRun possono ancora creare hard-link dei modelli durante la scansione. La sola lettura qui garantita riguarda i binari runtime del controllore, non tutti gli effetti del launcher.
+- L'enumerazione non prova l'offload. Correttezza numerica, superiorita' prestazionale, sovrapposizione temporale dei kernel NPU/GPU e misure energetiche sincronizzate restano verifiche distinte.
 
-## Riferimenti upstream
+Questi limiti delimitano le funzionalita' sperimentali incluse. Le prove del downloader e del rollback non sono piu' una precondizione per il merge di questa PR, perche' quei percorsi non sono eseguibili ne' presenti nello script aggiornato.
 
-- [Opzioni di llama-server e list-devices](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
-- [llama-bench: sintassi e semantica del timing](https://github.com/ggml-org/llama.cpp/blob/master/tools/llama-bench/README.md)
-- [Snapdragon multi-device e memorie](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/snapdragon/README.md)
-- [GGML Hexagon developer guide](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/snapdragon/developer.md)
+## Reintroduzione futura dell'aggiornamento
+
+Richiede un intervento separato con download ed estrazione standard, verifica di integrita' e provenienza, staging verificato, sostituzione controllata e test di guasto/ripristino. Un aggiornamento non dovra' essere riattivato soltanto perche' --list-devices termina con successo.
+
+## Riferimenti
+
+- [llama-bench: parser della revisione usata](https://github.com/ggml-org/llama.cpp/blob/19cce6919/tools/llama-bench/llama-bench.cpp)
+- [Backend Snapdragon](https://github.com/ggml-org/llama.cpp/blob/19cce6919/docs/backend/snapdragon/README.md)
 

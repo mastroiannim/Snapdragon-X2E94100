@@ -100,4 +100,7 @@ jobs:
       - name: Verify benchmark profiles and report
         shell: powershell
         run: .\tests\benchmark-profiles.ps1
+      - name: Verify read-only runtime and disabled Apply
+        shell: powershell
+        run: .\tests\runtime-readonly.ps1
 
