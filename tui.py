@@ -386,6 +386,7 @@ class HexagonClawTUI:
                         self.messages.pop()  # Rimuovi messaggio non risposto
                         return
 
+                    server_timings = None
                     # Streaming attivo
                     for chunk_line in response.iter_lines():
                         if not chunk_line:
@@ -396,25 +397,41 @@ class HexagonClawTUI:
                                 break
                             try:
                                 chunk_json = json.loads(data_str)
+                                if "timings" in chunk_json:
+                                    server_timings = chunk_json["timings"]
+
                                 choices = chunk_json.get("choices", [])
                                 if not choices:
                                     continue
                                 delta = choices[0].get("delta", {})
-                                content_piece = delta.get("content", "")
-                                if not content_piece:
-                                    continue
+                                content_piece = delta.get("content") or ""
+                                reasoning_piece = delta.get("reasoning_content") or ""
 
-                                token_count += 1
-                                assistant_full_text += content_piece
+                                if reasoning_piece:
+                                    token_count += 1
+                                    assistant_full_text += reasoning_piece
+                                    if not in_think_block:
+                                        in_think_block = True
+                                        self.console.print("\n[dim italic]🧠 Pensiero (Reasoning):[/dim italic]")
+                                    # Stampa il pensiero in grigio sfumato
+                                    sys.stdout.write(f"\033[90m{reasoning_piece}\033[0m")
+                                    sys.stdout.flush()
 
-                                # Rilevamento tag di pensiero (es. <think> ... </think>)
-                                if "<think>" in assistant_full_text and not in_think_block and "</think>" not in assistant_full_text:
-                                    in_think_block = True
-                                    self.console.print("[dim italic]🧠 Ragionamento (Deep Thought)...[/dim italic]")
+                                elif content_piece:
+                                    token_count += 1
+                                    assistant_full_text += content_piece
+                                    if in_think_block:
+                                        in_think_block = False
+                                        self.console.print("\n")
 
-                                # Stampa diretta in streaming
-                                sys.stdout.write(content_piece)
-                                sys.stdout.flush()
+                                    # Rilevamento tag inline <think> per modelli che non usano reasoning_content
+                                    if "<think>" in assistant_full_text and not in_think_block and "</think>" not in assistant_full_text:
+                                        in_think_block = True
+                                        self.console.print("[dim italic]🧠 Pensiero (Deep Thought)...[/dim italic]")
+
+                                    # Stampa diretta in streaming
+                                    sys.stdout.write(content_piece)
+                                    sys.stdout.flush()
 
                             except json.JSONDecodeError:
                                 pass
@@ -427,7 +444,13 @@ class HexagonClawTUI:
             return
 
         t_elapsed = time.time() - t_start
-        speed = (token_count / t_elapsed) if t_elapsed > 0 else 0.0
+
+        if server_timings:
+            speed = server_timings.get("predicted_per_second", (token_count / t_elapsed) if t_elapsed > 0 else 0.0)
+            token_count = server_timings.get("predicted_n", token_count)
+            t_elapsed = (server_timings.get("predicted_ms", 0.0) / 1000.0) or t_elapsed
+        else:
+            speed = (token_count / t_elapsed) if t_elapsed > 0 else 0.0
 
         self.last_gen_speed = speed
         self.last_gen_tokens = token_count
@@ -663,6 +686,12 @@ class HexagonClawTUI:
                     f"{self.base_url}/chat/completions",
                     json=req_body,
                 ) as resp:
+                    if resp.status_code != 200:
+                        err_body = resp.read().decode("utf-8", errors="ignore")
+                        self.console.print(f"[bold red]Errore dal server ({resp.status_code}):[/bold red] {err_body}")
+                        return
+
+                    server_timings = None
                     for line in resp.iter_lines():
                         if line.startswith("data: "):
                             d = line[6:].strip()
@@ -670,22 +699,37 @@ class HexagonClawTUI:
                                 break
                             try:
                                 j = json.loads(d)
-                                piece = j.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                                if piece:
-                                    if first_token_time is None:
-                                        first_token_time = time.time()
-                                    n_tokens += 1
-                                    sys.stdout.write("▓")
-                                    sys.stdout.flush()
+                                if "timings" in j:
+                                    server_timings = j["timings"]
+
+                                choices = j.get("choices", [])
+                                if choices:
+                                    delta = choices[0].get("delta", {})
+                                    piece = (delta.get("content") or "") + (delta.get("reasoning_content") or "")
+                                    if piece:
+                                        if first_token_time is None:
+                                            first_token_time = time.time()
+                                        n_tokens += 1
+                                        sys.stdout.write("▓")
+                                        sys.stdout.flush()
                             except Exception:
                                 pass
 
             t_end = time.time()
             sys.stdout.write("\n")
 
-            ttft = (first_token_time - t0) * 1000 if first_token_time else 0.0
-            gen_time = t_end - (first_token_time or t0)
-            gen_speed = (n_tokens / gen_time) if gen_time > 0 else 0.0
+            if server_timings:
+                ttft = server_timings.get("prompt_ms", (first_token_time - t0) * 1000 if first_token_time else 0.0)
+                gen_speed = server_timings.get("predicted_per_second", 0.0)
+                n_tokens = server_timings.get("predicted_n", n_tokens)
+                gen_time = (server_timings.get("predicted_ms", 0.0) / 1000.0) or (t_end - (first_token_time or t0))
+                prefill_speed = server_timings.get("prompt_per_second", 0.0)
+            else:
+                ttft = (first_token_time - t0) * 1000 if first_token_time else 0.0
+                gen_time = t_end - (first_token_time or t0)
+                gen_speed = (n_tokens / gen_time) if gen_time > 0 else 0.0
+                prefill_speed = 0.0
+
             tot_speed = (n_tokens / (t_end - t0)) if (t_end - t0) > 0 else 0.0
 
             m_info = self.get_model_info(self.active_model)
@@ -695,6 +739,8 @@ class HexagonClawTUI:
 
             t.add_row("Hardware Accelerators", f"{m_info['device']} ({m_info['split']})")
             t.add_row("Time To First Token (TTFT)", f"{ttft:.2f} ms")
+            if prefill_speed > 0:
+                t.add_row("Throughput di Prefill", f"{prefill_speed:.2f} tokens/sec")
             t.add_row("Token Generati", f"{n_tokens} token")
             t.add_row("Tempo di Generazione", f"{gen_time:.2f} s")
             t.add_row("Throughput di Generazione", f"[bold green]{gen_speed:.2f} tokens/sec[/bold green]")
