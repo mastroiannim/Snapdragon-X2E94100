@@ -1,5 +1,8 @@
 # Benchmark Report: Prestazioni ed Efficienza Energetica NPU (`HTP0`) vs GPU (`GPUOpenCL`) vs Ibrido (`HTP0,GPUOpenCL`)
 
+> [!IMPORTANT]
+> **Registro storico, non benchmark energetico validato.** Questa tabella conserva i valori dichiarati dall'esperimento originale senza ricalcolarli. La precedente versione di `benchmark-hexagon.ps1` usava separatori `/` in alcuni argomenti `-dev/-ts`; le prove riportate non hanno tracciabilità sufficiente per dimostrare la riproducibilità dei relativi profili. Le potenze PMIC campionate e i t/s non erano sincronizzati alla stessa fase: le colonne `J/tok`, `tok/J` e gli incrementi energetici **non costituiscono misure convalidate**. Le spiegazioni su una soglia FastRPC di 14–15 GiB e sul fallback CPU sono **ipotesi**, non diagnosi confermate. Le tabelle restano disponibili per confronto storico, non per sostenere affermazioni causali o di superiorità hardware. Si veda [la matrice di compatibilità](docs/COMPATIBILITA.md).
+
 **Piattaforma di test:**
 * **SoC:** Qualcomm Snapdragon X2 Elite Extreme (`X2E94100`)
 * **NPU:** Hexagon `v81` (`HTP0`, DMA64 attivo, 8 HVX + 2 HMX)
