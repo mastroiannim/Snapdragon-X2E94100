@@ -18,9 +18,26 @@ Esempi dal registro sottostante (profili dichiarati, prefill `pp512`):
 | Qwen3.8-27B | GPUOpenCL | 70,95 |
 | Qwen3.6-35B-A3B | GPUOpenCL | 152,17 |
 
-L'attribuzione ai dispositivi richiede i log di offload; i token/s da soli non provano correttezza numerica o ripartizione del lavoro. Il separatore `/` è previsto da `llama-bench` per `-dev` e `-ts`: è indicato dall'help locale e confermato dal [parser della revisione storica e467e5b](https://github.com/ggml-org/llama.cpp/blob/e467e5b/tools/llama-bench/llama-bench.cpp). Non costituisce un errore dello script; la sintassi va distinta da quella degli altri frontend. Comandi effettivi e log rimangono necessari per documentare l'offload, indipendentemente dai separatori. Le etichette “100% NPU/GPU” e le spiegazioni causali conservate sotto appartengono al registro originale e vanno lette con questi limiti. Non sono stati eseguiti nuovi benchmark per questa revisione documentale.
+L'attribuzione ai dispositivi richiede i log di offload; i token/s da soli non provano correttezza numerica o ripartizione del lavoro. Il separatore `/` è previsto da `llama-bench` per `-dev` e `-ts`: è indicato dall'help locale e confermato dal [parser della revisione storica e467e5b](https://github.com/ggml-org/llama.cpp/blob/e467e5b/tools/llama-bench/llama-bench.cpp). Non costituisce un errore dello script; la sintassi va distinta da quella degli altri frontend. Comandi effettivi e log rimangono necessari per documentare l'offload, indipendentemente dai separatori. Le etichette “100% NPU/GPU” e le spiegazioni causali conservate sotto appartengono al registro originale e vanno lette con questi limiti. Il registro storico resta invariato; le prove brevi sul runtime corrente sono documentate separatamente qui sotto.
 
-**Piattaforma di test:**
+## Verifica puntuale del runtime corrente — 31 ottobre 2026
+
+Queste prove brevi sono separate dal registro storico e usano una build diversa: `llama-bench` **11938 / 19cce6919**. Il test GPU è stato eseguito dalla sessione dell'assistente; il test HTP0 è stato eseguito dall'utente dalla propria PowerShell e documentato con l'output incollato nella conversazione.
+
+| Modello | Device richiesto | Prefill pp32 (t/s) | Generazione tg8 (t/s) |
+| --- | --- | ---: | ---: |
+| Qwen3.5-0.8B-Q4_0 (473,21 MiB) | GPUOpenCL | 936,33 | 100,61 |
+| Qwen3.5-0.8B-Q4_0 (473,21 MiB) | HTP0 | 1314,64 | 104,19 |
+
+Parametri del comando proposto per il test HTP0: `-ngl 99 -p 32 -n 8 -b 64 -ub 32 -t 4 -r 1 -fa off`, con `ADSP_LIBRARY_PATH` impostato sulla directory dei binari. L'output ricevuto riporta modello, device, ngl, thread, batch, ubatch, Flash Attention disabilitata, pp32, tg8 e build coerenti con quel comando. Una singola ripetizione non consente di stimare la variabilità; il valore visualizzato `± 0.00` non indica incertezza nulla. Le due sessioni non costituiscono un confronto prestazionale controllato.
+
+Nel test HTP0 il log riporta caricamento di `libcdsprpc.dll` dal DriverStore Qualcomm, architettura **v81**, **DMA64 abilitato** e device `HTP0 (phys=0, virt=0, domain=cdsp:3)`. Segue il completamento delle righe pp32 e tg8 sul device HTP0: evidenza funzionale del percorso selezionato, senza misurare la quota di operatori effettivamente eseguita su ciascun processore. La colonna `backend OpenCL,HTP` non dimostra uno split GPU/NPU: il device della prova è `HTP0`.
+
+L'avviso `FASTRPC_GET_DOMAINS query failed (0x6c), using static CDSP domains` è **non bloccante in questa prova**: il backend usa i domini CDSP statici e il benchmark completa le operazioni. Nella sessione ristretta dell'assistente l'inizializzazione si arrestava invece su `Failed to open SCManager. Error: 5`; quel risultato non descrive l'esecuzione dalla PowerShell dell'utente.
+
+Questa prova conferma il funzionamento del percorso HTP0 nel runtime corrente per il modello e i parametri indicati. Non verifica output numerici rispetto a una reference, lo split ibrido o la riproducibilità su una nuova installazione.
+
+**Piattaforma di test del registro storico:**
 * **SoC:** Qualcomm Snapdragon X2 Elite Extreme (`X2E94100`)
 * **NPU:** Hexagon `v81` (`HTP0`, DMA64 attivo, 8 HVX + 2 HMX)
 * **GPU:** Qualcomm Adreno X2-90 (`GPUOpenCL`, OpenCL 3.0)
