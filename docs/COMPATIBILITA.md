@@ -31,7 +31,24 @@
 
 **Perché è importante:** il post [Qualcomm GenieX Developer Preview, pubblicato il 7 luglio 2026](https://www.qualcomm.com/developer/blog/2026/06/geniex-developer-preview) documenta un'infrastruttura che include **sia** `llama.cpp` **sia** QAIRT/QNN, oltre a un server proprio. L'innesto del repository riusa la variante **`llama_cpp`** distribuita con GenieX sotto un frontend nativo `llama-server.exe` distinto: **non è corretto attribuirlo a un uso del runtime QAIRT** e non è corretto sostenere che GenieX fosse privo di server.
 
-### Prove richieste prima di dichiarare compatibile una composizione
+### Evidenza già disponibile e limiti
+
+**Compatibilità funzionale osservata nei percorsi esercitati; riproducibilità non ancora stabilita; universalità non dimostrata.** I benchmark storici riportano esecuzioni di `llama-bench.exe` con frontend `llama.cpp` e componenti runtime provenienti da GenieX sullo Snapdragon X2E94100. Sono evidenze di caricamento ed esecuzione del calcolo su modelli GGUF, oltre la sola enumerazione dei dispositivi. Un'esecuzione completata esclude un'incompatibilità ABI che impedisca quei percorsi, ma non certifica tutte le interfacce, la correttezza numerica degli output o il funzionamento di `llama-server.exe`.
+
+Il manifest SHA-256 serve a identificare e riprodurre l'insieme di binari che ha funzionato; la sua assenza non annulla l'evidenza di esecuzione riportata. Un manifest acquisito oggi identifica l'installazione attuale e non ricostruisce automaticamente quella storica.
+
+| Livello di evidenza | Stato |
+| --- | --- |
+| Caricamento ed esecuzione dello stack composto su GGUF | Supportati dai benchmark riportati |
+| Offload NPU/GPU e ripartizione per ciascun profilo | Da documentare con comandi effettivi e log di offload |
+| Correttezza numerica e output generati | Non dimostrata dai soli token/s |
+| Riproducibilità su una nuova installazione | Non ancora stabilita; richiede identità dei componenti, ambiente, parametri e replica |
+| Compatibilità di altre versioni o percorsi del server | Non dimostrata dai test di llama-bench |
+| J/token e soglia causale FastRPC | Ancora da verificare |
+
+I separatori `/` presenti in alcuni profili ibridi dello script storico rendono necessaria la verifica del comando realmente eseguito e dei log prima di attribuire una misura a quello split. Questo limite non annulla i benchmark riusciti dei profili singoli. Le etichette “100% NPU/GPU” del registro storico indicano il profilo dichiarato, non una misura dell'offload di tutti gli operatori.
+
+### Verifiche per identificare e riprodurre una composizione
 
 1. **Inventario:** acquisire manifest con `sha256`, percorso, architettura, provenienza, versione GenieX, `LlamaCPP Runtime Hash` e versione del frontend `llama.cpp` per **ogni** file realmente caricato, non soltanto per gli `.exe`.
 2. **Identità build:** risolvere l'esatta revisione (commit completo, non tag simile), e verificare l'insieme di ABI/exports/imports fra `llama-server.exe`, `llama-common.dll`, `ggml.dll` e tutti i backend. Un hash abbreviato uguale non copre modifiche downstream o opzioni di compilazione.
@@ -41,7 +58,7 @@
 6. **Installazione:** non sovrascrivere file fino a download completo, hash/manifest verificato, staging e rollback testato. Gli hard-link funzionano soltanto quando filesystem e volume lo consentono; essendo legami allo **stesso contenuto su disco**, modifiche in-place possono alterare anche i file di partenza. Preferire copie immutabili verificabili nei test.
 7. **Licenze e distribuzione:** la licenza BSD-3-Clause dichiarata per il codice GenieX non estende automaticamente i suoi termini a ogni SDK, DLL, firmware, catalogo o driver distribuito insieme al prodotto. Verificare le licenze/notice specifiche prima di redistribuire un bundle misto. Una installazione locale non prova supporto o certificazione Qualcomm.
 
-**Stato reale degli script:** in `main`, `sync-geniex.ps1` interroga GenieX, seleziona asset upstream con una ricerca che **può ripiegare su release non esattamente corrispondenti**, estrae byte ZIP via HTTP Range, elimina e rimpiazza file, collega il runtime da GenieX e considera `--version` un controllo positivo. Questi passaggi **non soddisfano** le prove di integrità/compatibilità sopra elencate. Il [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1) propone una modalità read-only di default e rimuove parte dei fallback, ma non certifica una composizione affidabile né la sicurezza dell'estrattore ZIP. In assenza di quelle prove, **non eseguire aggiornamenti su installazioni da preservare**.
+**Stato reale degli script:** in `main`, `sync-geniex.ps1` interroga GenieX, seleziona asset upstream con una ricerca che **può ripiegare su release non esattamente corrispondenti**, estrae byte ZIP via HTTP Range, elimina e rimpiazza file, collega il runtime da GenieX e considera `--version` un controllo positivo. Questi passaggi **non soddisfano** le verifiche di integrità e tracciabilità sopra elencate e non garantiscono che un aggiornamento mantenga la compatibilità osservata nei benchmark. Il [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1) propone una modalità read-only di default e rimuove parte dei fallback, ma non certifica una composizione affidabile né la sicurezza dell'estrattore ZIP. In assenza di quelle prove, **non eseguire aggiornamenti su installazioni da preservare**.
 
 ## Percorso dati e confini di responsabilità
 
