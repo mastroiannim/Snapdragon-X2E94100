@@ -37,6 +37,31 @@ L'avviso `FASTRPC_GET_DOMAINS query failed (0x6c), using static CDSP domains` è
 
 Questa prova conferma il funzionamento del percorso HTP0 nel runtime corrente per il modello e i parametri indicati. Non verifica output numerici rispetto a una reference, lo split ibrido o la riproducibilità su una nuova installazione.
 
+## Verifica dello split HTP0 / GPUOpenCL — 31 ottobre 2026
+
+Test eseguito dall'utente dalla propria PowerShell sullo stesso Qwen3.5-0.8B-Q4_0. L'assistente ha letto il file completo `hexagon-ibrido-20261031-210101.log`, oltre all'estratto inviato nella conversazione.
+
+Parametri del comando fornito: `-dev HTP0/GPUOpenCL -sm layer -ts 50/50 -ngl 99 -p 128 -n 32 -b 128 -ub 64 -t 4 -r 3 -fa off -v`. La tabella del log conferma device, split, ngl, thread, batch, ubatch, FA e dimensioni delle prove; il log documenta l'assegnazione dei layer.
+
+| Backend | Indici assegnati | Buffer modello (MiB) | Buffer compute pp128 (MiB) | Buffer compute tg32 (MiB) |
+| --- | --- | ---: | ---: | ---: |
+| HTP0 | 0–12 | 150,97 | 7,88 | 4,73 |
+| OpenCL / GPUOpenCL | 13–24, incluso l'output (indice 24) | 323,87 | 60,88 | 30,44 |
+| CPU | Input e lavoro residuo; il log colloca token_embd.weight su CPU | 198,93 | 1,32 | 0,66 |
+
+Il modello dichiara 24 blocchi: gli indici 0–23 sono i blocchi, l'indice 24 è l'output. Lo split richiesto non garantisce identiche quantità di memoria o tempi sui due acceleratori. Il messaggio generico `offloaded 25/25 layers to GPU` va letto insieme all'assegnazione esplicita HTP0/OpenCL; non attribuisce tutti i layer all'Adreno.
+
+| Profilo | Prova | Throughput (t/s, come riportato) |
+| --- | --- | ---: |
+| HTP0/GPUOpenCL, 50/50 | pp128 | 1822,82 ± 57,86 |
+| HTP0/GPUOpenCL, 50/50 | tg32 | 97,62 ± 1,55 |
+
+Il log documenta assegnazione e buffer su entrambi i backend, completamento di entrambe le prove e rilascio dei contesti: **evidenza funzionale dell'esecuzione ibrida per layer di questo modello**. Il codice di uscita non è registrato nel file e non viene ricostruito per inferenza. La corretta esecuzione numerica e la sovrapposizione temporale dei kernel NPU/GPU rimangono verifiche distinte; non sono dimostrate da allocazioni e throughput. Queste misure non sono direttamente confrontabili con pp32/tg8 delle prove precedenti, che usavano parametri differenti.
+
+La voce PowerShell `NativeCommandError` all'inizio del file accompagna il messaggio informativo `ggml_opencl: selected platform` ricevuto su stderr; non costituisce, da sola, un errore fatale dell'inferenza. Anche l'avviso FastRPC sui domini statici è seguito dal completamento del benchmark.
+
+SHA-256 del file letto: `07e08ba9926d7d387b5d97eec3be2325b26593bd3d2af14c8887327be4405259`.
+
 **Piattaforma di test del registro storico:**
 * **SoC:** Qualcomm Snapdragon X2 Elite Extreme (`X2E94100`)
 * **NPU:** Hexagon `v81` (`HTP0`, DMA64 attivo, 8 HVX + 2 HMX)
