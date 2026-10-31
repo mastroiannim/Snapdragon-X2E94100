@@ -29,9 +29,9 @@ GenieX CLI installato                      Release llama.cpp (Windows ARM64)
                          |
                   cartella llama-bin
                          |
-               llama-server.exe + GGML
+                llama-server.exe + GGML
                          |
-           GPUOpenCL / FastRPC / HTP0
+            GPUOpenCL / FastRPC / HTP0
 ```
 
 **Il risultato è una composizione sperimentale, non un pacchetto ufficiale né una compatibilità garantita da Qualcomm.** La firma e il catalogo del DSP non sanano un'incompatibilità fra DLL e frontend. La licenza BSD-3-Clause del *progetto open source GenieX* non dimostra, da sola, il diritto di ridistribuire ogni artefatto SDK, runtime o catalogo incluso in un installer: vanno esaminati provenienza e termini di ciascun componente. Il repository descrive l'impiego locale dei componenti; non deve presentare un bundle misto come certificato o supportato ufficialmente.
@@ -92,18 +92,35 @@ Per controlli non distruttivi, prerequisiti dettagliati, diagnosi e tracciabilit
 # Solo inventario (non avvia il server)
 .\launch-hexagon.ps1 -ListOnly
 
-# Pianificazione degli argomenti (non avvia il server)
+# Pianificazione degli argomenti per un modello specifico (non avvia il server)
 .\launch-hexagon.ps1 -Model "LFM2.5-24B" -DryRun
 
-# Avviare SOLO dopo aver verificato il runtime installato
+# Avvio diretto del singolo modello consigliato o specificato
 .\launch-hexagon.ps1 -Model "nome-modello.gguf"
+
+# Modalità ROUTER: espone TUTTI i modelli contemporaneamente con configurazione hardware ottimale per ciascuno
+.\launch-hexagon.ps1 -Mode Router
+
+# Anteprima del file INI generato per il Router (senza avviare il server)
+.\launch-hexagon.ps1 -Mode Router -DryRun
+
+# Oppure tramite wrapper batch:
+.\llama-server.bat                     # Avvia il modello top-performer (LFM 2.5 24B)
+.\llama-server-all.bat                 # Avvia TUTTI i modelli in modalità Router
 ```
+
+### Dettagli Modalità Router (`-Mode Router`)
+La modalità Router sfrutta il routing nativo di `llama-server` (`--models-dir`, `--models-preset`, `--models-max`):
+1. **Analisi istantanea dei metadati GGUF:** Lo script scansiona la cartella modelli (`%USERPROFILE%\.cache\geniex\models`) ed estrae architettura, quantizzazione, teste KV, Sliding Window e parametri MoE tramite parser C# in-memory.
+2. **Generazione automatica `hexagon-models.ini`:** Genera un file di preset INI ottimizzato (senza BOM UTF-8) che imposta per ciascun modello il device corretto (`HTP0`, `GPUOpenCL` o split ibrido 80/20, 75/25, 50/50) e la finestra di contesto conforme al limite buffer DMA FastRPC (< 1 GiB).
+3. **Caricamento On-Demand & Budget RAM:** I modelli vengono caricati solo quando invocati dai client API (es. Cline). Il parametro `-ModelsMax` (default: `2`) mantiene in memoria contemporaneamente al massimo $N$ modelli, scaricando i meno recenti (LRU) per rimanere sempre all'interno del budget di 48 GB di RAM fisica LPDDR5X.
+4. **Endpoint OpenAI compatibile:** Esponendo `/v1/models` e `/v1/chat/completions`, qualsiasi client o estensione (Cline, Continue, Roo Code) può passare da un modello all'altro semplicemente specificandone l'alias.
 
 **Distinguere le versioni:** nel `main` originario (`dbbb499`) il launcher invocava automaticamente il sincronizzatore con `-AutoConfirm`, potendo sostituire binari e DLL. Il PR #1 rimuove quella chiamata: l'opzione `-CheckRuntime` richiede soltanto un controllo, e interrompe l'avvio se fallisce. Verificare di usare la versione aggiornata prima di affidarsi a questo comportamento.
 
 Anche dopo questa modifica, `-ListOnly` e `-DryRun` possono creare hard-link dei modelli durante la scansione: non sono operazioni completamente read-only. La sola lettura del controllore riguarda i binari runtime.
 
-Il server espone un endpoint compatibile OpenAI sulla porta `18803`. Il codice originario usava il bind `0.0.0.0`; il PR #1 imposta `127.0.0.1` come default. L'accesso LAN richiede `-BindHost` esplicito; **non esporre l'endpoint senza autenticazione su una rete non attendibile**.
+Il server espone un endpoint compatibile OpenAI sulla porta `18803`. Il binding predefinito è `127.0.0.1`. L'accesso LAN richiede `-BindHost` esplicito; **non esporre l'endpoint senza autenticazione su una rete non attendibile**.
 
 ## Profilazione e risultati
 
