@@ -18,7 +18,7 @@
 
 **SDK vs runtime:** Hexagon SDK, OpenCL SDK, compilatore e toolchain sono prerequisiti per **compilare** una build con i relativi backend; non vanno confusi con i driver e le librerie runtime necessari per **eseguire una build già pronta e compatibile**. I nomi dei device (per esempio `HTP0`, `HTP0:0`, `GPUOpenCL`) dipendono dalla versione del backend: utilizzare quelli realmente restituiti da `--list-devices`, non forzare nomi ipotetici.
 
-## Verifiche specifiche dell'innesto GenieX / llama.cpp
+## Verifiche innesto GenieX llama.cpp
 
 **Oggetto della verifica:** questa è una **ricomposizione locale di binari**, non un backend nuovo e non una distribuzione riconosciuta dal progetto upstream. Nell'implementazione corrente di `sync-geniex.ps1`, i due insiemi hanno origini diverse:
 
