@@ -11,9 +11,7 @@ $GenieLlamaDir = Join-Path $GenieXDir "llama_cpp"
 # Assicura che ADSP_LIBRARY_PATH punti a $BinPath per permettere al driver FastRPC (libcdsprpc.dll)
 # di caricare libggml-htp-v81.so e libggml-htp.cat sulla NPU Hexagon (HTP0)
 $env:ADSP_LIBRARY_PATH = $BinPath
-if ([Environment]::GetEnvironmentVariable("ADSP_LIBRARY_PATH", "User") -ne $BinPath) {
-    [Environment]::SetEnvironmentVariable("ADSP_LIBRARY_PATH", $BinPath, "User")
-}
+# ADSP_LIBRARY_PATH resta limitata a questo processo e ai figli.
 
 function Expand-RemoteZipSelective($url, [long]$size, $destDir, $skipFileNames) {
     $tailSize = [Math]::Min($size, 65536)
@@ -87,8 +85,7 @@ Write-Host "  Controllo allineamento stack llama-cpp <-> GenieX CLI" -Foreground
 Write-Host "============================================================" -ForegroundColor Cyan
 
 if (-not (Test-Path $GenieExe) -or -not (Test-Path $GenieLlamaDir)) {
-    Write-Host "[!] GenieX CLI non trovato in '$GenieXDir'. Salto il controllo sinergico." -ForegroundColor Yellow
-    exit 0
+    throw "GenieX CLI non trovato in '$GenieXDir': impossibile sincronizzare esplicitamente."
 }
 
 # 1. Leggi versione e commit di GenieX CLI
@@ -101,8 +98,7 @@ foreach ($line in $genieOut) {
 }
 
 if (-not $genieHash) {
-    Write-Host "[!] Impossibile determinare LlamaCPP Runtime Hash da GenieX CLI." -ForegroundColor Yellow
-    exit 0
+    throw "Impossibile determinare LlamaCPP Runtime Hash da GenieX CLI."
 }
 
 # 2. Controlla stato attuale di llama-cpp in $BinPath
@@ -119,8 +115,11 @@ if (Test-Path $llamaSrv) {
         if ($allText -match "commit\s+([0-9a-fA-F]+)") {
             $currentHash = $Matches[1]
         }
-        $pHtp = Start-Process -FilePath $llamaSrv -ArgumentList "-dev HTP0 --version" -WorkingDirectory $BinPath -NoNewWindow -PassThru -Wait -RedirectStandardOutput "$env:TEMP\llama_htp_out.txt" -RedirectStandardError "$env:TEMP\llama_htp_err.txt"
-        if ($pVer.ExitCode -eq 0 -and $pHtp.ExitCode -eq 0) {
+        $pHtp = Start-Process -FilePath $llamaSrv -ArgumentList "--list-devices" -WorkingDirectory $BinPath -NoNewWindow -PassThru -Wait -RedirectStandardOutput "$env:TEMP\llama_htp_out.txt" -RedirectStandardError "$env:TEMP\llama_htp_err.txt"
+        $devText = ((@(Get-Content "$env:TEMP\llama_htp_out.txt" -ErrorAction SilentlyContinue) +
+                     @(Get-Content "$env:TEMP\llama_htp_err.txt" -ErrorAction SilentlyContinue)) -join "\n")
+        if ($pVer.ExitCode -eq 0 -and $pHtp.ExitCode -eq 0 -and
+            $devText -match "HTP0" -and $devText -match "GPUOpenCL") {
             $srvWorks = $true
         }
     } catch {
@@ -232,9 +231,8 @@ try {
                             break
                         }
                     } catch {
-                        $foundAsset = $asset
-                        $foundTag = $candidateTag
-                        break
+                        # API failure does not establish commit compatibility.
+                        continue
                     }
                 }
             } catch {
@@ -242,10 +240,7 @@ try {
             }
         }
 
-        if (-not $foundAsset -and $fallbackAsset) {
-            $foundAsset = $fallbackAsset
-            $foundTag = $fallbackTag
-        }
+        # No approximate release fallback: require exact commit/tag match.
 
         if (-not $foundAsset) {
             throw "Nessun pacchetto Windows ARM64 trovato su GitHub intorno al build b$estNum."
@@ -259,7 +254,12 @@ try {
         $stats = Expand-RemoteZipSelective $foundAsset.browser_download_url $foundAsset.size $tempExtract $genieFileNames
         Write-Host "      Scaricati $($stats.Extracted) file frontend; saltati $($stats.Skipped) file gia' presenti in GenieX." -ForegroundColor Gray
 
-        Remove-Item -Path "$BinPath\*" -Recurse -Force -ErrorAction SilentlyContinue
+        foreach ($required in @("llama-server.exe", "llama-cli.exe", "llama-bench.exe")) {
+            if (-not (Test-Path (Join-Path $tempExtract $required))) {
+                throw "ZIP incompleto: $required non estratto. Installazione preservata."
+            }
+        }
+        Remove-Item -Path "$BinPath\*" -Recurse -Force -ErrorAction Stop
         Get-ChildItem -Path $tempExtract -File | ForEach-Object {
             Copy-Item -Path $_.FullName -Destination (Join-Path $BinPath $_.Name) -Force
         }
@@ -282,12 +282,14 @@ try {
     Write-Host "      Collegati $linkedCount file da GenieX (CPU Oryon + GPU Adreno + NPU Hexagon HTP0)." -ForegroundColor Gray
 
     Write-Host "[4/4] Verifica integrita' e caricamento backend NPU (HTP0) e GPU (GPUOpenCL)..." -ForegroundColor Cyan
-    $pTestHtp = Start-Process -FilePath $llamaSrv -ArgumentList "-dev HTP0 --version" -WorkingDirectory $BinPath -NoNewWindow -PassThru -Wait -RedirectStandardOutput "$env:TEMP\test_htp.txt" -RedirectStandardError "$env:TEMP\test_htp_err.txt"
-    $pTestGpu = Start-Process -FilePath $llamaSrv -ArgumentList "-dev GPUOpenCL --version" -WorkingDirectory $BinPath -NoNewWindow -PassThru -Wait -RedirectStandardOutput "$env:TEMP\test_gpu.txt" -RedirectStandardError "$env:TEMP\test_gpu_err.txt"
-
-    if ($pTestHtp.ExitCode -ne 0 -or $pTestGpu.ExitCode -ne 0) {
-        throw "Verifica fallita (ExitCode HTP0=$($pTestHtp.ExitCode), GPUOpenCL=$($pTestGpu.ExitCode))."
+    $pTestHtp = Start-Process -FilePath $llamaSrv -ArgumentList "--list-devices" -WorkingDirectory $BinPath -NoNewWindow -PassThru -Wait -RedirectStandardOutput "$env:TEMP\test_htp.txt" -RedirectStandardError "$env:TEMP\test_htp_err.txt"
+    $devicesText = ((@(Get-Content "$env:TEMP\test_htp.txt" -ErrorAction SilentlyContinue) +
+                     @(Get-Content "$env:TEMP\test_htp_err.txt" -ErrorAction SilentlyContinue)) -join "\n")
+    if ($pTestHtp.ExitCode -ne 0 -or $devicesText -notmatch "HTP0" -or
+        $devicesText -notmatch "GPUOpenCL") {
+        throw "Discovery NPU/GPU fallita. Verificare il log di --list-devices."
     }
+    # --list-devices non prova che l'inferenza sia realmente offloaded.
 
     # Rimuovi backup e file temporanei
     Remove-Item $backupDir -Recurse -Force -ErrorAction SilentlyContinue
@@ -302,6 +304,7 @@ try {
         Remove-Item $backupDir -Recurse -Force -ErrorAction SilentlyContinue
         Write-Host "[Rollback] Ripristino completato." -ForegroundColor Green
     }
+    throw
 } finally {
     Remove-Item $tempExtract, "$env:TEMP\test_htp.txt", "$env:TEMP\test_htp_err.txt", "$env:TEMP\test_gpu.txt", "$env:TEMP\test_gpu_err.txt" -Recurse -Force -ErrorAction SilentlyContinue
 }
