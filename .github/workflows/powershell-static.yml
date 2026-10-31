@@ -1,0 +1,42 @@
+name: PowerShell static checks
+
+on:
+  pull_request:
+    paths:
+      - '*.ps1'
+      - '.github/workflows/powershell-static.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse all PowerShell scripts
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $scripts = @(Get-ChildItem -Path . -Filter '*.ps1' -Recurse -File)
+          if ($scripts.Count -eq 0) { throw 'No PowerShell scripts found' }
+          foreach ($script in $scripts) {
+            $tokens = $null
+            $parseErrors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $script.FullName, [ref]$tokens, [ref]$parseErrors
+            )
+            foreach ($issue in @($parseErrors)) {
+              Write-Error ("{0}:{1}: {2}" -f $script.FullName, $issue.Extent.StartLineNumber, $issue.Message)
+            }
+          }
+      - name: Compile the embedded GGUF metadata parser
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Get-Content -Path '.\launch-hexagon.ps1' -Raw
+          $pattern = '(?s)\$csharpCode = @''\r?\n(.*?)\r?\n''@'
+          $m = [regex]::Match($source, $pattern)
+          if (-not $m.Success) { throw 'Embedded C# parser not found' }
+          Add-Type -TypeDefinition $m.Groups[1].Value -ErrorAction Stop
