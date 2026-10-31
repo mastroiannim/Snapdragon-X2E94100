@@ -1,142 +1,128 @@
-Il segreto sta nell'aver **scavalcato completamente sia il runtime statico QNN/QAIRT sia i limiti del wrapper GenieX**, combinando il meglio di due mondi che normalmente su Windows ARM64 restano separati.
+# llama.cpp su Snapdragon X2E94100 (Windows ARM64)
 
-Ecco cosa succede sotto il cofano, perché funziona senza limiti di contesto e cosa serve per avviarlo:
+Progetto sperimentale per eseguire modelli GGUF con `llama.cpp` su CPU Oryon, GPU Adreno (`GPUOpenCL`) e NPU Hexagon (`HTP0`), anche in combinazione quando il backend e il modello lo consentono.
 
----
+## Il punto distintivo: riuso selettivo del runtime GenieX
 
-### Prerequisiti per avere lo stack funzionante
+Il progetto nasce da un **innesto di componenti binari già distribuiti con GenieX** in un'installazione autonoma di `llama.cpp`. Non è un nuovo driver NPU, non modifica il firmware e non “sblocca” FastRPC. Consente di sperimentare con le opzioni native di `llama-server.exe` mantenendo, quando l'insieme di componenti è effettivamente compatibile, i backend GGML/HTP e OpenCL forniti con GenieX.
 
-Per eseguire correttamente lo stack con accelerazione NPU Hexagon (`HTP0`), il sistema deve soddisfare i seguenti requisiti:
+Il [post ufficiale GenieX Developer Preview, pubblicato il 7 luglio 2026](https://www.qualcomm.com/developer/blog/2026/06/geniex-developer-preview) chiarisce che GenieX **include già `llama.cpp`** e offre **anche un proprio server locale compatibile OpenAI**. GenieX espone separatamente un runtime `llama_cpp` per GGUF (CPU/GPU/HTP) e un runtime `qairt` per i pacchetti QAIRT precompilati; il nostro innesto riguarda il **primo**, non sostituisce né riutilizza automaticamente i kernel del secondo.
 
-1. **Hardware e Sistema Operativo:**
-   * **Windows 11 ARM64** su piattaforma **Qualcomm Snapdragon X Series** (Snapdragon X Elite / Plus o **Snapdragon X2 Elite**).
-   * Driver NPU Qualcomm MCDM / FastRPC di sistema attivi (`qcnspmcdm*.sys` e `C:\Windows\System32\libcdsprpc.dll`).
+### Come e' stato realizzato l'innesto storico
 
-2. **Qualcomm GenieX CLI installato:**
-   * Deve essere installato **GenieX CLI** nel percorso predefinito `%LOCALAPPDATA%\GenieX CLI` (o specificato tramite il parametro `-GenieXDir` in [sync-geniex.ps1](sync-geniex.ps1)).
-   * La sottocartella `%LOCALAPPDATA%\GenieX CLI\llama_cpp` fornisce le librerie core (`ggml.dll`, `ggml-hexagon.dll`, `ggml-opencl.dll`), il binario DSP (`libggml-htp-v81.so` / `v73` / `v75` / `v79`) e soprattutto il catalogo **`libggml-htp.cat` firmato WHQL**.
+Il sincronizzatore originario (`main` al commit `dbbb499`) operava cosi':
 
-3. **Connessione Internet (solo al primo avvio o dopo un update di GenieX):**
-   * Necessaria a [sync-geniex.ps1](sync-geniex.ps1) per interrogare le API GitHub di `ggml-org/llama.cpp` e scaricare selettivamente via HTTP Range gli eseguibili frontend (`llama-server.exe`, `llama-cli.exe`, `llama-bench.exe`, ecc.) compilati dallo stesso identico commit di GenieX.
-   * La cartella di destinazione (`%USERPROFILE%\llama-cpp\llama-bin-win-cpu-arm64`) viene creata e popolata automaticamente dallo script se non esiste.
+1. Ispezionava `%LOCALAPPDATA%\GenieX CLI\llama_cpp` e interrogava `geniex.exe --version --skip-update` per ottenere `LlamaCPP Runtime Hash`.
+2. Tentava di selezionare una release Windows ARM64 di `ggml-org/llama.cpp` per recuperare i frontend. La ricerca includeva fallback approssimativi, senza certificare la corrispondenza del commit o dell'ABI.
+3. Collegava tramite hard-link, con fallback alla copia, i componenti di `GenieX CLI\llama_cpp` nella cartella dei frontend.
+4. Il launcher impostava `ADSP_LIBRARY_PATH` e avviava `llama-server.exe`.
 
-4. **Modelli GGUF:**
-   * Uno o più modelli `.gguf` presenti in `%USERPROFILE%\.cache\geniex\models` (scaricabili tramite GenieX o copiati manualmente in qualsiasi sottocartella: [llama-server.bat](llama-server.bat) provvede automaticamente a indicizzarli tramite HardLink nella directory principale dei modelli).
-   * **Nota sui formati quantizzati per la NPU:** il backend `ggml-hexagon` accelera nativamente sul DSP i formati `Q4_0`, `Q4_K`, `Q8_0` e `MXFP4` (i pesi `repack` vengono gestiti direttamente sulle unità HVX/HMX).
+**Con la modifica del [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1), il sincronizzatore diventa un controllo in sola lettura dei binari runtime.** Il downloader, la sostituzione dei file e il rollback sono rimossi. `-Apply` viene rifiutato prima di ogni controllo, anche con `-AutoConfirm`. La preparazione di una nuova composizione richiede una procedura separata; lo script aggiornato non installa il runtime.
 
----
+```text
+GenieX CLI installato                      Release llama.cpp (Windows ARM64)
+    |                                                |
+    +-- llama_cpp: DLL GGML, backend,                +-- frontend eseguibili
+    |   artefatti HTP .so e catalogo .cat                 |
+    |                                                |
+    +--------- collegamento/copia ---------------------+
+                         |
+                  cartella llama-bin
+                         |
+               llama-server.exe + GGML
+                         |
+           GPUOpenCL / FastRPC / HTP0
+```
 
-### Avvio rapido e Auto-Configurazione Intelligente
+**Il risultato è una composizione sperimentale, non un pacchetto ufficiale né una compatibilità garantita da Qualcomm.** La firma e il catalogo del DSP non sanano un'incompatibilità fra DLL e frontend. La licenza BSD-3-Clause del *progetto open source GenieX* non dimostra, da sola, il diritto di ridistribuire ogni artefatto SDK, runtime o catalogo incluso in un installer: vanno esaminati provenienza e termini di ciascun componente. Il repository descrive l'impiego locale dei componenti; non deve presentare un bundle misto come certificato o supportato ufficialmente.
 
-1. **Avvio immediato (consigliato):**
-   * Fai doppio clic su [llama-server.bat](llama-server.bat) (o eseguilo dal prompt):
-   * [llama-server.bat](llama-server.bat) interroga l'Auto-Configuratore [launch-hexagon.ps1](launch-hexagon.ps1), che scansiona i metadati binari del modello selezionato (o seleziona automaticamente il top-performer `LFM2.5-24B-A2B-QAD-Q4_0.gguf` a **~46 token/s**), calcola la ripartizione Ibrida ottimale tra NPU Hexagon e GPU Adreno (`HTP0,GPUOpenCL -ts 80,20`), imposta il limite FastRPC sul contesto e avvia `llama-server.exe` sulla porta standard `18803`.
+Il vecchio aggiornamento automatico del commit `dbbb499` non deve essere usato su un'installazione da preservare. La versione del PR #1 lo disabilita rimuovendone il codice; conserva soltanto la verifica del runtime. Vedi le [precondizioni specifiche dell'innesto](docs/COMPATIBILITA.md#verifiche-innesto-geniex-llamacpp).
 
-2. **Scelta manuale del modello o elenco opzioni:**
-   ```powershell
-   # Visualizza tutti i modelli disponibili e il profilo hardware calcolato:
-   .\llama-server.bat -ListOnly
+**Stato:** le scelte di dispositivo, gli split e le dimensioni di contesto del launcher sono *euristiche sperimentali*, non configurazioni ottimali dimostrate. L'enumerazione dei device non equivale a una prova di inferenza sulla NPU. Nessun limite universale di modello a 14-15 GB o di contesto a 4096/65536 token è stabilito da questo progetto.
 
-   # Avvia un modello specifico con auto-configurazione dei flag ottimali:
-   .\llama-server.bat LFM2.5-24B-A2B-QAD-Q4_0.gguf
-   .\llama-server.bat qwen2.5-coder-14b-instruct-q4_0.gguf
-   .\llama-server.bat flint-UD-Q4_K_XL.gguf
+- [Precondizioni di compatibilità e procedura di verifica](docs/COMPATIBILITA.md)
+- [Benchmark storici, con limitazioni metodologiche](BENCHMARK.md)
+- [Launcher](launch-hexagon.ps1) · [Benchmark](benchmark-hexagon.ps1) · [Sincronizzatore sperimentale](sync-geniex.ps1)
 
-   # Simulazione (mostra i metadati estratti e i parametri calcolati senza avviare il processo):
-   .\launch-hexagon.ps1 -Model "LFM2.5-24B" -DryRun
-   ```
+## Architettura: due percorsi distinti
 
-3. **Configurazione in Cline / VS Code:**
-   * **API Provider:** `OpenAI Compatible`
-   * **Base URL:** `http://127.0.0.1:18803/v1`
-   * **API Key:** `sk-no-key-required` (qualsiasi valore)
-   * **Model ID:** `LFM2.5-24B-A2B-QAD-Q4_0` (o il modello avviato)
-   * **Model Context Window:** `64000` (o `65536`)
-   * **Max Output Tokens:** `4096`
+**QAIRT/QNN:** Qualcomm AI Runtime fornisce API, strumenti e backend per CPU/GPU/HTP. Nella via QNN HTP, le librerie host e le componenti DSP/stub/skel devono essere compatibili con sistema operativo, architettura host, versione HTP e runtime. QAIRT non implica per definizione un contesto fisso a 4096 token o l'obbligo di un unico grafo monolitico statico.
 
-4. Per rieseguire la telemetria energetica comparativa sul tuo hardware, lancia [benchmark-hexagon.ps1](benchmark-hexagon.ps1) (report completo in [BENCHMARK.md](BENCHMARK.md)).
+**GGML Hexagon di llama.cpp (questo progetto):**
 
----
+```text
+GGUF -> llama-server.exe / GGML
+                 |
+                 v
+    ggml-hexagon.dll (host ARM64)
+                 |
+         interfaccia stub / FastRPC
+                 |
+           skel e dispatcher
+                 |
+    libggml-htp-vNN.so (kernel HTP)
+                 |
+           NPU Hexagon
+```
 
-### 1. Perché di solito la NPU Qualcomm ha il limite del contesto fisso (es. 4096)?
-Nello stack tradizionale Qualcomm (**QAIRT / QNN / SNPE / Genie**, cioè quelle ~650 MB di DLL `QnnHtp.dll` e `QairtHtpPrepare.dll` che avevi prima nella cartella), il modello deve essere compilato **in anticipo (Ahead-of-Time)** in un grafo monolitico statico per la NPU:
-* I pesi e la forma di tutti i tensori (inclusa la KV-cache) vengono "congelati" dentro file `.bin` / `.dlc`.
-* Questo ti costringe a usare solo modelli pre-convertiti per la tua specifica architettura e fissa un tetto rigido alla finestra di contesto (spesso 4096 token).
+Il backend GGML usa un proprio percorso di esecuzione sul DSP, senza richiedere la compilazione dei modelli GGUF tramite QNN. **Non bypassa FastRPC, i servizi/driver di piattaforma, i requisiti di firma su Windows o il firmware DSP.** L'HTP esegue gli operatori che il backend supporta; gli altri possono restare su CPU o altri device. Una configurazione `-dev HTP0,GPUOpenCL` non garantisce che tutti gli operatori siano offloaded.
 
-### 2. Come funziona invece `ggml-hexagon` (Esecuzione dinamica *Op-by-Op* sul DSP)
-Il backend nativo **`ggml-hexagon.dll`** + **`libggml-htp-v81.so`** non usa QNN/SNPE per compilare l'intero modello:
-* Mantiene il **grafo dinamico di `llama.cpp`** sulla CPU e usa la NPU Hexagon esattamente come se fosse una GPU CUDA: invia le singole operazioni matematiche (MatMul quantizzate `Q4_0`, `Q4_K`, `Q8_0`, `MXFP4`, Flash Attention, RoPE, RMSNorm, MoE) in tempo reale tramite una coda FastRPC (`dspqueue`) direttamente alle unità vettoriali (**8 HVX**) e matriciali (**2 HMX**) della NPU.
-* Sullo **Snapdragon X2 Elite (`v81`)** sfrutta inoltre il **DMA64** con memoria condivisa (`fastrpc_mmap`) fino a **~80 GB di VMEM**: la KV-cache cresce dinamicamente in RAM condivisa e la NPU legge direttamente i buffer del `.gguf` generico, permettendoti di impostare `-c 131072` (o qualsiasi altra dimensione) su qualunque GGUF standard.
+Su Windows Snapdragon, **MCDM (Microsoft Compute Driver Model)** offre l'infrastruttura driver compute/NPU; **FastRPC** svolge il trasporto delle chiamate tra processor domains con proprie librerie di servizio. Qualcomm distingue espressamente MCDM da FastRPC: il primo non va denominato semplicemente “driver FastRPC”.
 
----
+Il backend GGML utilizza memoria DDR condivisa e VTCM per dati temporanei. Lo spazio di indirizzamento di una **singola sessione HTP** non coincide con la dimensione massima del GGUF: la gestione di modelli grandi dipende dalla versione del backend, dal mapping dei buffer e/o dalla suddivisione tra sessioni/device. Il rallentamento osservato su alcuni modelli non dimostra, da solo, saturazione FastRPC o fallback CPU. Nemmeno uno split CPU/NPU/GPU prova l'esistenza di canali DDR fisicamente indipendenti.
 
-### 3. I 3 ostacoli su Windows che abbiamo aggirato
+Riferimenti: [Qualcomm, FastRPC e stub/skel](https://www.qualcomm.com/developer/blog/2026/10/how-ai-models-reach-hexagon-npu-qairt-fastrpc-hexagon-explained) · [GGML Hexagon: architettura e memoria](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/snapdragon/developer.md).
 
-Se questo backend esiste in `llama.cpp`, perché scaricando `llama.cpp` da GitHub non funzionava? Per tre motivi precisi che abbiamo risolto:
+## Requisiti prima dell'uso
 
-1. **Il blocco della firma digitale WHQL su Windows (`libggml-htp.cat`):**
-   * Su Windows 11 con Secure Boot attivo, il driver kernel Qualcomm (`qcnspmcdm8480.sys`) rifiuta di caricare sul DSP della NPU qualsiasi binario `.so` (`libggml-htp-v81.so`) che non sia certificato da **Microsoft Windows Hardware Compatibility Publisher (WHQL)**.
-   * Le build ufficiali di GitHub (`ggml-org/llama.cpp`) non hanno la chiave privata di Qualcomm/Microsoft per firmare il catalogo, quindi **non includono il backend Hexagon per Windows**.
-   * **Qualcomm GenieX CLI**, invece, distribuisce nella sua cartella interna proprio `libggml-htp-v81.so` accompagnato dal catalogo **`libggml-htp.cat` firmato WHQL**, ma non fornisce `llama-server.exe` né `llama-cli.exe` (e il comando `geniex` impone i suoi default, come `--nctx 4096`).
+1. **Host e piattaforma.** Windows 11 **ARM64** su Snapdragon supportato; driver NPU, servizi FastRPC e firmware compatibili con il dispositivo. Per la GPU occorrono anche driver Adreno/OpenCL funzionanti. Le librerie host (`.exe`, `.dll`) devono essere compilate per ARM64.
+2. **Versione HTP corretta.** Il backend host e l'artefatto DSP `libggml-htp-vNN.so` devono corrispondere all'architettura Hexagon effettiva (per esempio v81 sul sistema oggetto degli esperimenti); non selezionare una `vNN` dalla sola dimensione del modello.
+3. **Compatibilità dell'insieme di binari.** `llama-server.exe`, librerie `llama`/`ggml`, backend GPU/HTP, DLL dipendenti e artefatti DSP devono provenire da una combinazione compatibile. **Stesso commit è un indizio importante ma non sufficiente** per provare ABI, set di backend, driver e firma.
+4. **Catalogo HTP attendibile.** Su Windows il catalogo `libggml-htp.cat` deve essere correttamente firmato da un certificato attendibile e riferito agli artefatti HTP installati. Non è obbligatoriamente una firma WHQL Qualcomm: la documentazione upstream descrive anche certificati di test propri, in un *ambiente di sviluppo configurato esplicitamente* per test-signing. Non disabilitare Secure Boot o le protezioni del sistema come procedura predefinita.
+5. **Percorsi e modelli.** Questo launcher presume `%USERPROFILE%\llama-cpp\llama-bin-win-cpu-arm64` per il server e `%USERPROFILE%\.cache\geniex\models` per i GGUF. `ADSP_LIBRARY_PATH` deve risolvere le librerie DSP compatibili; il launcher la imposta per il processo e gli eventuali figli.
+6. **Conferma reale.** Verificare `--version`, `--list-devices`, caricamento di un GGUF compatibile e log di offload durante *un'inferenza effettiva*. La sola presenza di `HTP0` o `GPUOpenCL` nell'elenco non basta.
 
-2. **L'innesto chirurgico tra gli eseguibili di GitHub e le DLL firmate di GenieX:**
-   * Le DLL di GenieX sono compilate da uno specifico commit di `llama.cpp` (`e467e5b`) con il registro `ggml_backend_hexagon_reg` integrato in `ggml.dll`.
-   * Se provi a usare un `llama-server.exe` di una build diversa (come la `b11887`), l'ABI C++ di `llama-common.dll` non coincide e il programma va in crash all'avvio (`0xC0000139`).
-   * Con lo script [sync-geniex.ps1](sync-geniex.ps1) abbiamo interrogato `geniex.exe --version`, risalito automaticamente all'esatta build GitHub corrispondente a quel commit (`b11643`), estratto via HTTP Range **solo i frontend (`llama-server.exe`, `llama-cli.exe`, `*-impl.dll`)** e collegato via HardLink tutte le DLL e i `.so` firmati WHQL di GenieX.
+**GenieX non è prerequisito universale del backend GGML Hexagon**, perché una build autonoma può generare i propri backend. **Per l'innesto specifico implementato da questo repository è invece la sorgente locale delle DLL GGML e degli artefatti HTP**, dunque `sync-geniex.ps1` richiede GenieX installato. Non presentare il riuso di tali file come supporto ufficiale alla combinazione con frontend di un'altra release: i benchmark storici supportano la compatibilità funzionale nei percorsi esercitati; manifest, hash, dipendenze e log servono a documentare l'insieme effettivamente utilizzato e a stabilirne la riproducibilità.
 
-3. **La variabile segreta del driver FastRPC (`ADSP_LIBRARY_PATH`):**
-   * Quando `ggml-hexagon.dll` chiede al driver di sistema `libcdsprpc.dll` di aprire l'URI `file:///libggml-htp-v81.so?...&_dom=cdsp`, il driver **non cerca nella cartella dell'eseguibile**, ma legge la variabile d'ambiente `ADSP_LIBRARY_PATH` per trovare sia il file `.so` sia il catalogo `.cat` da validare con `CryptCATOpen`.
-   * Senza quella variabile restituiva `0x80000406` (`AEE_ERESOURCENOTFOUND`). Impostando `ADSP_LIBRARY_PATH` sulla cartella dei binari (anche a livello utente per le istanze figlie lanciate dal router di `llama-server.exe`), il driver FastRPC valida la firma Microsoft/Qualcomm e apre la sessione `HTP0` al primo colpo.
+Per controlli non distruttivi, prerequisiti dettagliati, diagnosi e tracciabilità dei componenti vedere [docs/COMPATIBILITA.md](docs/COMPATIBILITA.md).
 
----
+## Uso del launcher e versioni dello script
 
-### 4. Benchmark Prestazionali ed Efficienza Energetica (`HTP0` vs `GPUOpenCL` vs Ibrido)
+```powershell
+# Solo inventario (non avvia il server)
+.\launch-hexagon.ps1 -ListOnly
 
-Tramite [benchmark-hexagon.ps1](benchmark-hexagon.ps1) abbiamo misurato su **Snapdragon X2 Elite** (Hexagon `v81` + Adreno `X2-90`) sia i token/s sia i consumi energetici reali per singolo rail hardware del PMIC (`NPU`, `GPU`, `CPU`, `RAM`, `INFRA`, `SoC`). Il report completo è disponibile in **[BENCHMARK.md](BENCHMARK.md)**.
+# Pianificazione degli argomenti (non avvia il server)
+.\launch-hexagon.ps1 -Model "LFM2.5-24B" -DryRun
 
-#### Sintesi dei risultati principali
+# Avviare SOLO dopo aver verificato il runtime installato
+.\launch-hexagon.ps1 -Model "nome-modello.gguf"
+```
 
-| Modello | Taglia | Profilo | Prefill `pp512` (t/s) | Gen `tg` (t/s) | Potenza `SoC` in Gen (W) | Energia per Token (`J/tok`) |
-| :--- | :---: | :--- | ---: | ---: | ---: | ---: |
-| **`Qwen3.6-35B-A3B-Q4_0`** *(MoE 35B)* | **19.4 GB** | `HTP0` (100% NPU) | 30.0 *(Fallback CPU)* | 20.24 | 48.72 W *(CPU 41.0W, Sys 88W)* | 2.407 J/tok |
-| **`Qwen3.6-35B-A3B-Q4_0`** *(MoE 35B)* | **19.4 GB** | `HTP0,GPUOpenCL` (`50,50`) | 31.9 | **22.71 (+12.2%)** | 34.85 W *(CPU 25.7W, Sys 64W)* | **1.535 J/tok (-36% J)** |
-| **`Qwen3.6-35B-A3B-Q4_0`** *(MoE 35B)* | **19.4 GB** | `GPUOpenCL` (100% GPU) | **152.2 (5.1x)** | **25.26 (+24.8%)** | **31.93 W** *(GPU 7.1W, Sys 60W)* | **1.264 J/tok (-47% J)** |
-| **`Qwen3.8-27B-Q4_0`** *(Dense 27B)* | **15.2 GB** | `HTP0` (100% NPU) | 32.7 | 5.42 | 16.86 W *(NPU 5.9W, CPU 6.2W)* | 3.111 J/tok |
-| **`Qwen3.8-27B-Q4_0`** *(Dense 27B)* | **15.2 GB** | `HTP0,GPUOpenCL` (`75,25`) | 27.8 | **5.81 (+7.2%)** | **16.73 W** *(NPU 3.5W, GPU 5.5W)* | **2.880 J/tok (-7.4% J)** |
-| **`Qwen3.8-27B-Q4_0`** *(Dense 27B)* | **15.2 GB** | `GPUOpenCL` (100% GPU) | **71.0 (2.2x)** | **5.86 (+8.1%)** | 19.52 W *(GPU 12.3W, CPU 3.2W)* | 3.331 J/tok |
-| **`LFM2.5-24B-A2B-Q4_0`** *(MoE 24B)* | **12.6 GB** | `HTP0` (100% NPU) | **802.0** | 38.43 | **18.20 W** *(NPU 4.1W, CPU 10.3W)* | **0.474 J/tok** |
-| **`LFM2.5-24B-A2B-Q4_0`** *(MoE 24B)* | **12.6 GB** | `HTP0,GPUOpenCL` (`50,50`) | 778.5 | **41.90 (+9.0%)** | 21.28 W *(NPU 2.1W, GPU 4.8W)* | 0.508 J/tok |
-| **`Ornith-1.5-9B-Q4_0`** *(Dense 9B)* | **5.1 GB** | `HTP0` (100% NPU) | **750.9** | 15.40 | 19.94 W *(NPU 4.8W, CPU 10.4W)* | 1.295 J/tok |
-| **`Ornith-1.5-9B-Q4_0`** *(Dense 9B)* | **5.1 GB** | `HTP0,GPUOpenCL` (`75,25`) | 594.1 | **17.20 (+11.7%)** | **17.37 W** *(NPU 3.2W, GPU 4.5W)* | **1.010 J/tok (-22% J)** |
-| **`Spark-X2.5-4B-Q4_K_M`** *(K-Quants)* | **2.4 GB** | `HTP0` (100% NPU) | **1554.3** | **30.61** | — | — |
-| **`Spark-X2.5-4B-Q4_K_M`** *(K-Quants)* | **2.4 GB** | `HTP0,GPUOpenCL` (`50,50`) | 538.4 (-65%) | 28.79 (-6%) | — | — |
+**Distinguere le versioni:** nel `main` originario (`dbbb499`) il launcher invocava automaticamente il sincronizzatore con `-AutoConfirm`, potendo sostituire binari e DLL. Il PR #1 rimuove quella chiamata: l'opzione `-CheckRuntime` richiede soltanto un controllo, e interrompe l'avvio se fallisce. Verificare di usare la versione aggiornata prima di affidarsi a questo comportamento.
 
-#### Punti chiave emersi dai test: la soglia dei ~14–15 GB
+Anche dopo questa modifica, `-ListOnly` e `-DryRun` possono creare hard-link dei modelli durante la scansione: non sono operazioni completamente read-only. La sola lettura del controllore riguarda i binari runtime.
 
-1. **Sotto i ~13 GB (`Qwen-0.8B`, `Spark-4B`, `Ornith-9B`, `LFM2.5-24B-A2B` da 12.6 GB) domina `HTP0` (100% NPU):**
-   * Finché il modello entra interamente nel pool FastRPC DMA64 della NPU, `HTP0` macina **750–3800 token/s** in prefill assorbendo solo **`14.9–18.2 W` di SoC** (`50.4 token/Joule`, cioè **4.73x più efficiente della GPU**).
-   * Su modelli Dense da 9B, un leggero split `-ts 75,25` può comunque dimezzare il *busy-polling* CPU in generazione (`10.4 W → 4.8 W`), migliorando i token/s del `+11.7%` e l'efficienza del `+28%`.
-2. **Sopra i ~15 GB (`Qwen3.8-27B` da 15.2 GB e `Qwen3.6-35B-A3B` da 19.4 GB) il pool FastRPC NPU satura e l'ibrido / GPU diventano essenziali:**
-   * Superata la soglia di ~14–15 GB di pesi, la sessione CDSP della sola NPU (`HTP0`) non riesce più a mappare tutti i layer/esperti in DMA e riversa le operazioni in fallback sulla CPU Oryon: sul `35B-A3B` la sola CPU schizza a **`41.0 W`** (portando il laptop a **`88.1 W`**!) e il prefill crolla a **`30.0 t/s`**.
-   * Attivando **`-dev HTP0,GPUOpenCL -ts 50,50`** (che lascia solo ~7.6–9.7 GB sulla NPU e sposta il resto sulla GPU Adreno) o **`-dev GPUOpenCL`**, il fallback CPU scompare: sul `35B-A3B` il consumo del portatile scende di **24–28 Watt** (`88 W → 60–64 W`), la generazione sale da **`20.2 a 22.7 / 25.3 t/s` (+25%)** e il prefill su `GPUOpenCL` balza a **`152.2 t/s` (5.1x più veloce)** dimezzando i Joule per token (`2.41 → 1.26 J/tok`).
+Il server espone un endpoint compatibile OpenAI sulla porta `18803`. Il codice originario usava il bind `0.0.0.0`; il PR #1 imposta `127.0.0.1` come default. L'accesso LAN richiede `-BindHost` esplicito; **non esporre l'endpoint senza autenticazione su una rete non attendibile**.
 
----
+## Profilazione e risultati
 
-### 5. L'Auto-Configuratore Intelligente ([launch-hexagon.ps1](launch-hexagon.ps1))
+**Compatibilità funzionale osservata nei percorsi esercitati; riproducibilità non ancora stabilita; universalità non dimostrata.** I benchmark storici riportano esecuzioni di `llama-bench.exe` con frontend `llama.cpp` e componenti runtime provenienti da GenieX sullo Snapdragon X2E94100. Sono evidenze di caricamento ed esecuzione del calcolo su modelli GGUF, oltre la sola enumerazione dei dispositivi. Un'esecuzione completata esclude un'incompatibilità ABI che impedisca quei percorsi, ma non certifica tutte le interfacce, la correttezza numerica degli output o il funzionamento di `llama-server.exe`.
 
-Invece di affidarsi a configurazioni manuali o generiche, [launch-hexagon.ps1](launch-hexagon.ps1) include un parser C# ad alte prestazioni che legge direttamente l'header binario del file `.gguf` in meno di 100 ms ed estrae:
-1. **Architettura e Famiglia:** `lfm2moe`, `flint`, `qwen2`, `spark`, ecc.
-2. **Topologia di Calcolo:** Modello denso vs Mixture-of-Experts (`expert_count` ed `expert_used_count`).
-3. **Meccanismo di Attention:** Full Causal vs Sliding Window Attention (`attention.sliding_window`).
-4. **Formato di Quantizzazione:** `Q4_0`, `Q4_K_M`, `Q4_K_XL`, `Q8_0`.
-5. **Geometria dei Tensori:** Conteggio layer, teste di Query e teste KV (`attention.head_count_kv`).
+Il manifest SHA-256 serve a identificare e riprodurre l'insieme di binari che ha funzionato; la sua assenza non annulla l'evidenza di esecuzione riportata. Un manifest acquisito oggi identifica l'installazione attuale e non ricostruisce automaticamente quella storica.
 
-#### Matrice Decisionale Euristica
+Il launcher usa classificazione GGUF, dimensione file, MoE/SWA e soglie dimensionali per proporre `HTP0`, `GPUOpenCL` o uno split. I rapporti come `80,20`, `75,25`, `50,50` **non sono probabilità né quote garantite di carico computazionale**, e la dimensione del GGUF non misura da sola pressione di mapping, occupazione della KV cache o supporto degli operatori.
 
-| Categoria Modello | Rilevamento Metadati | Configurazione Calcolata | Motivazione Hardware |
-| :--- | :--- | :--- | :--- |
-| **MoE Leggero**<br>*(es. `LFM2.5-24B-A2B`)* | `expert_count > 0`, `expert_used_count <= 4`, peso $\le 13$ GB | **`-dev HTP0,GPUOpenCL -ts 80,20 -c 65536`** | Solo ~2B di parametri attivi per token. Lo split 80/20 sfrutta due canali bus paralleli (crossbar SoC) raggiungendo il picco assoluto di generazione (**~46 token/s**). |
-| **MoE con Sliding Window**<br>*(es. `Flint Preview`)* | `expert_count > 0`, `sliding_window > 0` | **`-dev HTP0,GPUOpenCL -ts 85,15 -c 131072`** | La finestra di attenzione a 513 token limita drasticamente la memoria KV; permette contesti fino a 131k token mantenendo velocità stabile (~6.7 t/s). |
-| **Dense Medio**<br>*(es. `Qwen 2.5 Coder 14B`)* | `expert_count == 0`, $7 \text{ GB} \le \text{peso} \le 13.5 \text{ GB}$ | **`-dev HTP0,GPUOpenCL -ts 75,25 -c 65536`** | Su contesti lunghi (>30k token) la sola NPU saturerebbe il bus DMA a 2.9 t/s; l'offload del 25% su GPU Adreno sblocca il collo di bottiglia della memoria. Contesto limitato a 64k per rispettare il tetto FastRPC di 1 GiB. |
-| **Dense Compatto**<br>*(es. `Spark 4B`, `Ornith 9B`)* | `expert_count == 0`, $\text{peso} \le 6 \text{ GB}$ | **`-dev HTP0 -c 65536`** | Pesi e KV entrano interamente nel dominio DMA della NPU Hexagon: massima efficienza (14–18W SoC) e prefill istantaneo (750–1550 t/s). |
-| **Giganti > 15 GB**<br>*(es. `Qwen 27B`, `Qwen 35B`)* | $\text{peso} > 14.5 \text{ GB}$ | **`-dev HTP0,GPUOpenCL -ts 50,50 -c 65536`** | Previene la saturazione del descrittore FastRPC e azzera il fallback termico della CPU (-25W sul sistema). |
+Il [benchmark storico](BENCHMARK.md) conserva i valori acquisiti, ma non è una prova riproducibile dell'origine dei rallentamenti. Campioni di potenza e throughput non erano necessariamente riferiti alla stessa fase. Il separatore `/` è previsto da `llama-bench` per `-dev` e `-ts`: è indicato dall'help locale e confermato dal [parser della revisione storica e467e5b](https://github.com/ggml-org/llama.cpp/blob/e467e5b/tools/llama-bench/llama-bench.cpp). Non costituisce un errore dello script; la sintassi va distinta da quella degli altri frontend. Comandi effettivi e log rimangono necessari per documentare l'offload, indipendentemente dai separatori. Le colonne `J/token` storiche non devono essere citate come misura energetica validata.
+
+Per stabilire la configurazione migliore servono, a parità di modello/quantizzazione/versione/contesto: log dei device e dell'offload, velocità prefill e decode separate, repliche, errori, temperatura, potenza di base e intervalli energetici sincronizzati.
+
+## Fonti primarie
+
+- [Qualcomm — GenieX Developer Preview (7 luglio 2026)](https://www.qualcomm.com/developer/blog/2026/06/geniex-developer-preview)
+- [GenieX SDK — due runtime distinti: llama_cpp e qairt](https://github.com/qualcomm/GenieX/blob/main/sdk/README.md)
+- [Qualcomm — How AI models reach Hexagon NPU (2 ottobre 2026)](https://www.qualcomm.com/developer/blog/2026/10/how-ai-models-reach-hexagon-npu-qairt-fastrpc-hexagon-explained)
+- [llama.cpp — Snapdragon backend](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/snapdragon/README.md)
+- [llama.cpp — Hexagon developer details](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/snapdragon/developer.md)
+- [llama.cpp — Windows, driver e firma](https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/snapdragon/windows.md)
+- [Microsoft — MCDM](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/mcdm)
