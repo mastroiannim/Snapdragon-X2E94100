@@ -40,3 +40,59 @@ jobs:
           $m = [regex]::Match($source, $pattern)
           if (-not $m.Success) { throw 'Embedded C# parser not found' }
           Add-Type -TypeDefinition $m.Groups[1].Value -ErrorAction Stop
+
+          function Write-GgufString([System.IO.BinaryWriter]$bw, [string]$value) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($value)
+            $bw.Write([uint64]$bytes.Length)
+            $bw.Write($bytes)
+          }
+
+          function Write-GgufFixture([string]$path, [uint32]$fileType) {
+            $bw = New-Object System.IO.BinaryWriter([System.IO.File]::Create($path))
+            try {
+              $bw.Write([System.Text.Encoding]::ASCII.GetBytes('GGUF'))
+              $bw.Write([uint32]3)  # version
+              $bw.Write([uint64]0)  # tensors
+              $bw.Write([uint64]3)  # KV entries
+              Write-GgufString $bw 'general.architecture'
+              $bw.Write([uint32]8)
+              Write-GgufString $bw 'qwen35'
+              Write-GgufString $bw 'qwen35.context_length'
+              $bw.Write([uint32]4)
+              $bw.Write([uint32]8192)
+              Write-GgufString $bw 'general.file_type'
+              $bw.Write([uint32]4)
+              $bw.Write($fileType)
+            } finally { $bw.Dispose() }
+          }
+
+          foreach ($case in @(
+            @{ FType = 7;  Expected = 'Q8_0' },
+            @{ FType = 15; Expected = 'K-Quants' },
+            @{ FType = 19; Expected = 'IQ-Quants' },
+            @{ FType = 32; Expected = 'BF16' }
+          )) {
+            $fixture = Join-Path $env:RUNNER_TEMP ("gguf-" + $case.FType + ".gguf")
+            Write-GgufFixture $fixture ([uint32]$case.FType)
+            try {
+              $meta = [GgufModelMeta]::Parse($fixture)
+              if ($meta.Architecture -ne 'qwen35' -or $meta.ContextLength -ne 8192 -or
+                  $meta.QuantName -ne $case.Expected) {
+                throw "GGUF parser mismatch: file_type $($case.FType), parsed $($meta.QuantName)"
+              }
+            } finally { Remove-Item $fixture -ErrorAction SilentlyContinue }
+          }
+
+          $bad = Join-Path $env:RUNNER_TEMP 'gguf-invalid-key.gguf'
+          $bw = New-Object System.IO.BinaryWriter([System.IO.File]::Create($bad))
+          try {
+            $bw.Write([System.Text.Encoding]::ASCII.GetBytes('GGUF'))
+            $bw.Write([uint32]3)
+            $bw.Write([uint64]0)
+            $bw.Write([uint64]1)
+            $bw.Write([uint64]600)  # invalid key length; must NOT return partial metadata
+          } finally { $bw.Dispose() }
+          $rejected = $false
+          try { [void][GgufModelMeta]::Parse($bad) } catch { $rejected = $true }
+          Remove-Item $bad -ErrorAction SilentlyContinue
+          if (-not $rejected) { throw 'Malformed GGUF key was silently accepted' }
