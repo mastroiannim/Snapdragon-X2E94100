@@ -309,7 +309,7 @@ class HexagonClawTUI:
         )
 
         header_text = (
-            f"[bold white]🦞 HEXAGON CLAW TUI[/bold white] │ "
+            f"[bold white]🐉 HEXAGON CLAW TUI[/bold white] │ "
             f"[bold magenta]Snapdragon X2 Elite Extreme (X2E94100)[/bold magenta] │ "
             f"NPU: [cyan]HTP0[/cyan] │ GPU: [blue]Adreno OpenCL[/blue]\n"
             f"Server: {status_badge}  │  "
@@ -364,7 +364,7 @@ class HexagonClawTUI:
         }
 
         self.console.print()
-        self.console.print(Rule(f"[bold cyan]🦞 {self.active_model}[/bold cyan]", style="dim"))
+        self.console.print(Rule(f"[bold cyan]🐉 {self.active_model}[/bold cyan]", style="dim"))
 
         assistant_full_text = ""
         think_text = ""
@@ -481,7 +481,7 @@ class HexagonClawTUI:
         args = parts[1].strip() if len(parts) > 1 else ""
 
         if cmd in ("/exit", "/quit", "/q"):
-            self.console.print("[yellow]Chiusura Hexagon Claw TUI. Arrivederci! 🦞[/yellow]")
+            self.console.print("[yellow]Chiusura Hexagon Claw TUI. Arrivederci! 🐉[/yellow]")
             return False
 
         elif cmd in ("/help", "/h", "/?"):
@@ -537,7 +537,7 @@ class HexagonClawTUI:
         return True
 
     def show_help(self):
-        t = Table(title="🦞 Comandi Slash - Hexagon Claw TUI", border_style="cyan", header_style="bold magenta")
+        t = Table(title="🐉 Comandi Slash - Hexagon Claw TUI", border_style="cyan", header_style="bold magenta")
         t.add_column("Comando", style="bold cyan", width=16)
         t.add_column("Argomenti", style="yellow", width=18)
         t.add_column("Descrizione", style="white")
@@ -606,7 +606,7 @@ class HexagonClawTUI:
         tot_ram, used_ram, ram_pct = get_system_ram()
         m_info = self.get_model_info(self.active_model)
 
-        t = Table(title="🦞 Dashboard Telemetria Hardware Snapdragon X2 Elite", border_style="cyan")
+        t = Table(title="🐉 Dashboard Telemetria Hardware Snapdragon X2 Elite", border_style="cyan")
         t.add_column("Parametro", style="bold cyan", width=24)
         t.add_column("Valore", style="white")
 
@@ -733,7 +733,7 @@ class HexagonClawTUI:
             tot_speed = (n_tokens / (t_end - t0)) if (t_end - t0) > 0 else 0.0
 
             m_info = self.get_model_info(self.active_model)
-            t = Table(title=f"🦞 Risultati Benchmark: {self.active_model}", border_style="green")
+            t = Table(title=f"🐉 Risultati Benchmark: {self.active_model}", border_style="green")
             t.add_column("Parametro", style="bold cyan")
             t.add_column("Misura", style="bold yellow")
 
@@ -813,17 +813,17 @@ class HexagonClawTUI:
 
         while True:
             try:
-                # Prompt stilizzato OpenClaw: 🦞 hexagon [Model] ›
+                # Prompt stilizzato OpenClaw: 🐉 hexagon [Model] ›
                 if self.prompt_session is not None:
                     prompt_text = HTML(
-                        f'<ansicyan><b>🦞 hexagon</b></ansicyan> '
+                        f'<ansicyan><b>🐉 hexagon</b></ansicyan> '
                         f'<ansigreen>[{self.active_model}]</ansigreen> '
                         f'<ansiyellow><b>›</b></ansiyellow> '
                     )
                     user_input = self.prompt_session.prompt(prompt_text).strip()
                 else:
                     self.console.print(
-                        f"[bold cyan]🦞 hexagon[/bold cyan] [green][{self.active_model}][/green] [bold yellow]›[/bold yellow] ",
+                        f"[bold cyan]🐉 hexagon[/bold cyan] [green][{self.active_model}][/green] [bold yellow]›[/bold yellow] ",
                         end="",
                     )
                     user_input = input().strip()
@@ -844,7 +844,7 @@ class HexagonClawTUI:
                 continue
             except EOFError:
                 # Ctrl+D esce
-                self.console.print("\n[yellow]Uscita in corso... 🦞[/yellow]")
+                self.console.print("\n[yellow]Uscita in corso... 🐉[/yellow]")
                 break
 
 

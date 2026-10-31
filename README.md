@@ -124,7 +124,7 @@ Il server espone un endpoint compatibile OpenAI sulla porta `18803`. Il binding 
 
 ## Hexagon Claw TUI (Interfaccia Terminale in Stile OpenClaw)
 
-È inclusa una **Text User Interface (TUI)** avanzata in stile **OpenClaw** (`🦞`), ottimizzata per interagire con `llama-server` e monitorare l'hardware Qualcomm Snapdragon X2 Elite Extreme direttamente da riga di comando.
+È inclusa una **Text User Interface (TUI)** avanzata in stile **OpenClaw** (`🐉`), ottimizzata per interagire con `llama-server` e monitorare l'hardware Qualcomm Snapdragon X2 Elite Extreme direttamente da riga di comando.
 
 ### Installazione Dipendenze
 ```bash
