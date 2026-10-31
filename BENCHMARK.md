@@ -1,6 +1,68 @@
 # Benchmark Report: Prestazioni ed Efficienza Energetica NPU (`HTP0`) vs GPU (`GPUOpenCL`) vs Ibrido (`HTP0,GPUOpenCL`)
 
-**Piattaforma di test:**
+> [!IMPORTANT]
+> **Registro storico, non benchmark energetico validato.** Questa tabella conserva i valori dichiarati dall'esperimento originale senza ricalcolarli. Le prove riportate non hanno tracciabilità sufficiente per dimostrare la riproducibilità dei relativi profili. I separatori `/` dello script sono previsti da `llama-bench` e non costituiscono un errore. Le potenze PMIC campionate e i t/s non erano sincronizzati alla stessa fase: le colonne `J/tok`, `tok/J` e gli incrementi energetici **non costituiscono misure convalidate**. Le spiegazioni su una soglia FastRPC di 14–15 GiB e sul fallback CPU sono **ipotesi**, non diagnosi confermate. Le tabelle restano disponibili per confronto storico, non per sostenere affermazioni causali o di superiorità hardware. Si veda [la matrice di compatibilità](docs/COMPATIBILITA.md).
+
+## Evidenza di esecuzione già acquisita
+
+**Compatibilità funzionale osservata nei percorsi esercitati; riproducibilità non ancora stabilita; universalità non dimostrata.** I benchmark storici riportano esecuzioni di `llama-bench.exe` con frontend `llama.cpp` e componenti runtime provenienti da GenieX sullo Snapdragon X2E94100. Sono evidenze di caricamento ed esecuzione del calcolo su modelli GGUF, oltre la sola enumerazione dei dispositivi. Un'esecuzione completata esclude un'incompatibilità ABI che impedisca quei percorsi, ma non certifica tutte le interfacce, la correttezza numerica degli output o il funzionamento di `llama-server.exe`.
+
+Il manifest SHA-256 serve a identificare e riprodurre l'insieme di binari che ha funzionato; la sua assenza non annulla l'evidenza di esecuzione riportata. Un manifest acquisito oggi identifica l'installazione attuale e non ricostruisce automaticamente quella storica.
+
+Esempi dal registro sottostante (profili dichiarati, prefill `pp512`):
+
+| Modello | Profilo dichiarato | Prefill (t/s) |
+| --- | --- | ---: |
+| LFM2.5-24B-A2B | HTP0 | 801,98 |
+| Ornith-1.5-9B | HTP0 | 750,87 |
+| Qwen3.8-27B | GPUOpenCL | 70,95 |
+| Qwen3.6-35B-A3B | GPUOpenCL | 152,17 |
+
+L'attribuzione ai dispositivi richiede i log di offload; i token/s da soli non provano correttezza numerica o ripartizione del lavoro. Il separatore `/` è previsto da `llama-bench` per `-dev` e `-ts`: è indicato dall'help locale e confermato dal [parser della revisione storica e467e5b](https://github.com/ggml-org/llama.cpp/blob/e467e5b/tools/llama-bench/llama-bench.cpp). Non costituisce un errore dello script; la sintassi va distinta da quella degli altri frontend. Comandi effettivi e log rimangono necessari per documentare l'offload, indipendentemente dai separatori. Le etichette “100% NPU/GPU” e le spiegazioni causali conservate sotto appartengono al registro originale e vanno lette con questi limiti. Il registro storico resta invariato; le prove brevi sul runtime corrente sono documentate separatamente qui sotto.
+
+## Verifica puntuale del runtime corrente — 31 ottobre 2026
+
+Queste prove brevi sono separate dal registro storico e usano una build diversa: `llama-bench` **11938 / 19cce6919**. Il test GPU è stato eseguito dalla sessione dell'assistente; il test HTP0 è stato eseguito dall'utente dalla propria PowerShell e documentato con l'output incollato nella conversazione.
+
+| Modello | Device richiesto | Prefill pp32 (t/s) | Generazione tg8 (t/s) |
+| --- | --- | ---: | ---: |
+| Qwen3.5-0.8B-Q4_0 (473,21 MiB) | GPUOpenCL | 936,33 | 100,61 |
+| Qwen3.5-0.8B-Q4_0 (473,21 MiB) | HTP0 | 1314,64 | 104,19 |
+
+Parametri del comando proposto per il test HTP0: `-ngl 99 -p 32 -n 8 -b 64 -ub 32 -t 4 -r 1 -fa off`, con `ADSP_LIBRARY_PATH` impostato sulla directory dei binari. L'output ricevuto riporta modello, device, ngl, thread, batch, ubatch, Flash Attention disabilitata, pp32, tg8 e build coerenti con quel comando. Una singola ripetizione non consente di stimare la variabilità; il valore visualizzato `± 0.00` non indica incertezza nulla. Le due sessioni non costituiscono un confronto prestazionale controllato.
+
+Nel test HTP0 il log riporta caricamento di `libcdsprpc.dll` dal DriverStore Qualcomm, architettura **v81**, **DMA64 abilitato** e device `HTP0 (phys=0, virt=0, domain=cdsp:3)`. Segue il completamento delle righe pp32 e tg8 sul device HTP0: evidenza funzionale del percorso selezionato, senza misurare la quota di operatori effettivamente eseguita su ciascun processore. La colonna `backend OpenCL,HTP` non dimostra uno split GPU/NPU: il device della prova è `HTP0`.
+
+L'avviso `FASTRPC_GET_DOMAINS query failed (0x6c), using static CDSP domains` è **non bloccante in questa prova**: il backend usa i domini CDSP statici e il benchmark completa le operazioni. Nella sessione ristretta dell'assistente l'inizializzazione si arrestava invece su `Failed to open SCManager. Error: 5`; quel risultato non descrive l'esecuzione dalla PowerShell dell'utente.
+
+Questa prova conferma il funzionamento del percorso HTP0 nel runtime corrente per il modello e i parametri indicati. Non verifica output numerici rispetto a una reference, lo split ibrido o la riproducibilità su una nuova installazione.
+
+## Verifica dello split HTP0 / GPUOpenCL — 31 ottobre 2026
+
+Test eseguito dall'utente dalla propria PowerShell sullo stesso Qwen3.5-0.8B-Q4_0. L'assistente ha letto il file completo `hexagon-ibrido-20261031-210101.log`, oltre all'estratto inviato nella conversazione.
+
+Parametri del comando fornito: `-dev HTP0/GPUOpenCL -sm layer -ts 50/50 -ngl 99 -p 128 -n 32 -b 128 -ub 64 -t 4 -r 3 -fa off -v`. La tabella del log conferma device, split, ngl, thread, batch, ubatch, FA e dimensioni delle prove; il log documenta l'assegnazione dei layer.
+
+| Backend | Indici assegnati | Buffer modello (MiB) | Buffer compute pp128 (MiB) | Buffer compute tg32 (MiB) |
+| --- | --- | ---: | ---: | ---: |
+| HTP0 | 0–12 | 150,97 | 7,88 | 4,73 |
+| OpenCL / GPUOpenCL | 13–24, incluso l'output (indice 24) | 323,87 | 60,88 | 30,44 |
+| CPU | Input e lavoro residuo; il log colloca token_embd.weight su CPU | 198,93 | 1,32 | 0,66 |
+
+Il modello dichiara 24 blocchi: gli indici 0–23 sono i blocchi, l'indice 24 è l'output. Lo split richiesto non garantisce identiche quantità di memoria o tempi sui due acceleratori. Il messaggio generico `offloaded 25/25 layers to GPU` va letto insieme all'assegnazione esplicita HTP0/OpenCL; non attribuisce tutti i layer all'Adreno.
+
+| Profilo | Prova | Throughput (t/s, come riportato) |
+| --- | --- | ---: |
+| HTP0/GPUOpenCL, 50/50 | pp128 | 1822,82 ± 57,86 |
+| HTP0/GPUOpenCL, 50/50 | tg32 | 97,62 ± 1,55 |
+
+Il log documenta assegnazione e buffer su entrambi i backend, completamento di entrambe le prove e rilascio dei contesti: **evidenza funzionale dell'esecuzione ibrida per layer di questo modello**. Il codice di uscita non è registrato nel file e non viene ricostruito per inferenza. La corretta esecuzione numerica e la sovrapposizione temporale dei kernel NPU/GPU rimangono verifiche distinte; non sono dimostrate da allocazioni e throughput. Queste misure non sono direttamente confrontabili con pp32/tg8 delle prove precedenti, che usavano parametri differenti.
+
+La voce PowerShell `NativeCommandError` all'inizio del file accompagna il messaggio informativo `ggml_opencl: selected platform` ricevuto su stderr; non costituisce, da sola, un errore fatale dell'inferenza. Anche l'avviso FastRPC sui domini statici è seguito dal completamento del benchmark.
+
+SHA-256 del file letto: `07e08ba9926d7d387b5d97eec3be2325b26593bd3d2af14c8887327be4405259`.
+
+**Piattaforma di test del registro storico:**
 * **SoC:** Qualcomm Snapdragon X2 Elite Extreme (`X2E94100`)
 * **NPU:** Hexagon `v81` (`HTP0`, DMA64 attivo, 8 HVX + 2 HMX)
 * **GPU:** Qualcomm Adreno X2-90 (`GPUOpenCL`, OpenCL 3.0)
