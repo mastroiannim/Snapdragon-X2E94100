@@ -20,6 +20,9 @@
 .PARAMETER DryRun
     Mostra i parametri calcolati e il comando CLI senza avviare il processo.
 
+.PARAMETER CheckRuntime
+    Verifica (sola lettura) l'allineamento del runtime a GenieX prima dell'avvio.
+
 .PARAMETER Mode
     "Direct" (default): avvia direttamente llama-server sul modello specificato.
     "Router": avvia llama-server con --models-dir applicando i default intelligenti globali.
@@ -33,7 +36,7 @@ param(
     [ValidateSet("Direct", "Router")]
     [string]$Mode = "Direct",
     [switch]$ListOnly,
-    [switch]$SyncRuntime
+    [switch]$CheckRuntime
 )
 
 $ErrorActionPreference = "Stop"
@@ -377,7 +380,7 @@ $cliArgs = @(
     "--jinja",
     "--agent",
     "-np", "1",
-    "-lm", "auto",
+    "-lm", "mlock",
     "-lv", "3",
     "-ngl", "999",
     "-c", $cfg.ContextSize,
@@ -406,8 +409,7 @@ if ($Mode -eq "Direct") {
 # -------------------------------------------------------------
 $env:ADSP_LIBRARY_PATH = $BinPath
 $env:GGML_HEXAGON_OPBATCH = "512"
-# Non forzare VTCM a 8M; lasciare decidere al driver.
-Remove-Item Env:GGML_HEXAGON_VTCM_SIZE -ErrorAction SilentlyContinue
+$env:GGML_HEXAGON_VTCM_SIZE = "8M"
 
 if ($DryRun) {
     Write-Host "[DRY RUN] Comando che verrebbe eseguito:" -ForegroundColor Yellow
@@ -415,13 +417,13 @@ if ($DryRun) {
     exit 0
 }
 
-# Sincronizzazione WHQL e driver se presente lo script
+# Verifica runtime su richiesta, senza modificare o scaricare binari.
 $syncScript = Join-Path $PSScriptRoot "sync-geniex.ps1"
-if ($SyncRuntime) {
+if ($CheckRuntime) {
     if (-not (Test-Path $syncScript)) { throw "sync-geniex.ps1 non trovato." }
-    Write-Host "Sincronizzazione runtime richiesta esplicitamente..." -ForegroundColor DarkGray
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $syncScript -BinPath $BinPath -AutoConfirm
-    if ($LASTEXITCODE -ne 0) { throw "sync-geniex.ps1 fallito (exit code $LASTEXITCODE); avvio annullato." }
+    Write-Host "Verifica read-only del runtime..." -ForegroundColor DarkGray
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $syncScript -BinPath $BinPath
+    if ($LASTEXITCODE -ne 0) { throw "Verifica runtime fallita (exit code $LASTEXITCODE); avvio annullato." }
 }
 
 Write-Host "Avvio llama-server.exe su porta $Port..." -ForegroundColor Green
