@@ -46,7 +46,7 @@ Il manifest SHA-256 serve a identificare e riprodurre l'insieme di binari che ha
 | Compatibilità di altre versioni o percorsi del server | Non dimostrata dai test di llama-bench |
 | J/token e soglia causale FastRPC | Ancora da verificare |
 
-I separatori `/` presenti in alcuni profili ibridi dello script storico rendono necessaria la verifica del comando realmente eseguito e dei log prima di attribuire una misura a quello split. Questo limite non annulla i benchmark riusciti dei profili singoli. Le etichette “100% NPU/GPU” del registro storico indicano il profilo dichiarato, non una misura dell'offload di tutti gli operatori.
+Il separatore `/` è previsto da `llama-bench` per `-dev` e `-ts`: è indicato dall'help locale e confermato dal [parser della revisione storica e467e5b](https://github.com/ggml-org/llama.cpp/blob/e467e5b/tools/llama-bench/llama-bench.cpp). Non costituisce un errore dello script; la sintassi va distinta da quella degli altri frontend. Comandi effettivi e log rimangono necessari per documentare l'offload, indipendentemente dai separatori. Le etichette “100% NPU/GPU” del registro storico indicano il profilo dichiarato, non una misura dell'offload di tutti gli operatori.
 
 ### Verifiche per identificare e riprodurre una composizione
 
