@@ -16,6 +16,8 @@
 | Offload reale | Log dell'inferenza con backend HTP/GPU e risultato coerente | `--list-devices` è soltanto enumerazione |
 | Riproducibilità | Hash SHA-256 di GGUF, eseguibili e DLL; driver, firmware, parametri e log | Non dimostra automaticamente superiorità prestazionale |
 
+**SDK vs runtime:** Hexagon SDK, OpenCL SDK, compilatore e toolchain sono prerequisiti per **compilare** una build con i relativi backend; non vanno confusi con i driver e le librerie runtime necessari per **eseguire una build già pronta e compatibile**. I nomi dei device (per esempio `HTP0`, `HTP0:0`, `GPUOpenCL`) dipendono dalla versione del backend: utilizzare quelli realmente restituiti da `--list-devices`, non forzare nomi ipotetici.
+
 ## Percorso dati e confini di responsabilità
 
 `llama-server.exe` orchestra il grafo GGML. Il backend host `ggml-hexagon` dialoga con i kernel dell'artefatto HTP `libggml-htp-vNN.so` tramite interfacce host/DSP, trasportate da FastRPC. Per QNN/QAIRT esiste un percorso distinto con proprie librerie stub/skel versionate. Non è corretto imporre **i vincoli di build di QAIRT a ogni modello GGUF**.
