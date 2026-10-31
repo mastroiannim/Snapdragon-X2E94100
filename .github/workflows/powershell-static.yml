@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - '*.ps1'
+      - 'tests/**'
       - '.github/workflows/powershell-static.yml'
   workflow_dispatch:
 
@@ -96,3 +97,7 @@ jobs:
           try { [void][GgufModelMeta]::Parse($bad) } catch { $rejected = $true }
           Remove-Item $bad -ErrorAction SilentlyContinue
           if (-not $rejected) { throw 'Malformed GGUF key was silently accepted' }
+      - name: Verify benchmark profiles and report
+        shell: powershell
+        run: .\tests\benchmark-profiles.ps1
+
