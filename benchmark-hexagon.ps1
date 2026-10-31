@@ -134,26 +134,26 @@ function Invoke-BenchWithPower {
         return $null
     }
 
-    # Filtra solo i campioni durante l'esecuzione attiva sull'acceleratore (escludendo il caricamento iniziale del GGUF)
-    # Stima dell'intero processo, incluso caricamento: non e' una misura
-    # sincronizzata della sola generazione. Non interpretare J/token come
-    # efficienza decode rigorosa fino all'aggiunta di marcatori di fase.
-    $active = @($samples | Select-Object -Skip 2)
-    if ($active.Count -eq 0) {
-        Write-Warning "Telemetria insufficiente: $ModelFile ($testType)"
-        return $null
+    # La telemetria PMIC puo' essere assente: la misura di throughput resta valida.
+    # I campioni coprono caricamento e benchmark: non isolano prefill/decode.
+    $active = @($samples)
+    $hasPower = ($active.Count -gt 0)
+    if (-not $hasPower) {
+        Write-Warning "PMIC non disponibile per $ModelFile ($testType): throughput conservato, potenza N/D."
     }
 
-    $avgNPU   = [math]::Round(($active | Measure-Object -Property NPU -Average).Average, 2)
-    $avgGPU   = [math]::Round(($active | Measure-Object -Property GPU -Average).Average, 2)
-    $avgCPU   = [math]::Round(($active | Measure-Object -Property CPU -Average).Average, 2)
-    $avgMEM   = [math]::Round(($active | Measure-Object -Property MEM -Average).Average, 2)
-    $avgINFRA = [math]::Round(($active | Measure-Object -Property INFRA -Average).Average, 2)
-    $avgSOC   = [math]::Round(($active | Measure-Object -Property SOC -Average).Average, 2)
-    $avgSYS   = [math]::Round(($active | Measure-Object -Property SYS -Average).Average, 2)
+    $avgNPU   = if ($hasPower) { [math]::Round(($active | Measure-Object -Property NPU -Average).Average, 2) } else { $null }
+    $avgGPU   = if ($hasPower) { [math]::Round(($active | Measure-Object -Property GPU -Average).Average, 2) } else { $null }
+    $avgCPU   = if ($hasPower) { [math]::Round(($active | Measure-Object -Property CPU -Average).Average, 2) } else { $null }
+    $avgMEM   = if ($hasPower) { [math]::Round(($active | Measure-Object -Property MEM -Average).Average, 2) } else { $null }
+    $avgINFRA = if ($hasPower) { [math]::Round(($active | Measure-Object -Property INFRA -Average).Average, 2) } else { $null }
+    $avgSOC   = if ($hasPower) { [math]::Round(($active | Measure-Object -Property SOC -Average).Average, 2) } else { $null }
+    $avgSYS   = if ($hasPower) { [math]::Round(($active | Measure-Object -Property SYS -Average).Average, 2) } else { $null }
 
-    $jPerTok = if ($tokPerSec -gt 0) { [math]::Round($avgSOC / $tokPerSec, 3) } else { 0 }
-    $tokPerJ = if ($avgSOC -gt 0) { [math]::Round($tokPerSec / $avgSOC, 3) } else { 0 }
+    # NON calcolare E/token da potenza media dell'intero processo e velocita' di sola inferenza.
+    # Intervalli differenti rendono il rapporto fisicamente non interpretabile.
+    $jPerTok = $null
+    $tokPerJ = $null
 
     return [PSCustomObject]@{
         Model     = $ModelFile
@@ -206,14 +206,14 @@ $allResults | Format-Table -AutoSize
 if (-not $SkipReportWrite -and $allResults.Count -gt 0) {
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.AppendLine("# Benchmark & PMIC Energy Report (Auto-Generated)")
-    [void]$sb.AppendLine("**Nota:** i dati energetici sono proxy di processo, non misure isolate di prefill/decode; la stima J/token e' preliminare.")
+    [void]$sb.AppendLine("**Nota:** potenze PMIC medie indicative dell'intero processo (caricamento incluso); nessuna misura di J/token e' disponibile senza sincronizzazione temporale delle fasi. N/D significa telemetria non disponibile.")
     [void]$sb.AppendLine("")
     [void]$sb.AppendLine("Generato il: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
     [void]$sb.AppendLine("")
-    [void]$sb.AppendLine("| Modello | Profilo | Test | Velocita' (t/s) | NPU (W) | GPU (W) | CPU (W) | RAM (W) | INFRA (W) | SoC Tot (W) | Sistema (W) | J/tok (SoC) | tok/J (SoC) |")
+    [void]$sb.AppendLine("| Modello | Profilo | Test | Velocita' (t/s) | NPU (W) | GPU (W) | CPU (W) | RAM (W) | INFRA (W) | SoC Tot (W) | Sistema (W) |")
     [void]$sb.AppendLine("| :--- | :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     foreach ($row in $allResults) {
-        [void]$sb.AppendLine("| `$($row.Model)` | **$($row.Profile)** | `$($row.Test)` | **$($row.TokPerSec)** ± $($row.StdDev) | $($row.NPU_W) | $($row.GPU_W) | $($row.CPU_W) | $($row.MEM_W) | $($row.INFRA_W) | **$($row.SOC_W)** | $($row.SYS_W) | **$($row.J_per_Tok)** | **$($row.Tok_per_J)** |")
+        [void]$sb.AppendLine("| `$($row.Model)` | **$($row.Profile)** | `$($row.Test)` | **$($row.TokPerSec)** ± $($row.StdDev) | $($row.NPU_W) | $($row.GPU_W) | $($row.CPU_W) | $($row.MEM_W) | $($row.INFRA_W) | **$($row.SOC_W)** | $($row.SYS_W) |")
     }
     [System.IO.File]::WriteAllText($ReportPath, $sb.ToString(), [System.Text.Encoding]::UTF8)
     Write-Host "[OK] Report salvato in: $ReportPath" -ForegroundColor Green
