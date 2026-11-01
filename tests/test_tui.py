@@ -146,13 +146,15 @@ class TUITests(unittest.TestCase):
         stop.assert_not_called()
         start.assert_not_called()
 
-    def test_disabled_stack_commands_do_not_call_updaters(self):
-        with patch.object(self.app.stack_mgr, 'sync_runtime_from_geniex') as sync, \
-             patch.object(self.app.stack_mgr, 'update_llamacpp_frontend') as update:
-            for command in ('sync', 'update-geniex', 'update-llama'):
-                self.app.handle_stack_command(command)
-        sync.assert_not_called()
-        update.assert_not_called()
+    def test_stack_commands_use_shared_updater_and_report_failures(self):
+        with patch.object(self.app.stack_mgr, 'sync_runtime_from_geniex', return_value=(True, 'aligned', [])) as sync, \
+             patch.object(self.app.stack_mgr, 'update_geniex_cli', return_value=(False, 'vendor failed')) as update:
+            self.app.handle_stack_command('sync')
+            self.app.handle_stack_command('update-llama')
+            self.app.handle_stack_command('update-geniex')
+        self.assertEqual(sync.call_count, 2)
+        update.assert_called_once_with()
+        self.assertIn('vendor failed', self.output.getvalue())
 
     def test_presets_reload_and_do_not_claim_unknown_hardware(self):
         (self.root / 'hexagon-models.ini').write_text(
@@ -174,6 +176,25 @@ class TUITests(unittest.TestCase):
         self.serve(json.dumps({'data': [{'id': 'MODEL'}, {'id': 'MODEL-extra'}]}).encode())
         self.app.switch_model('model')
         self.assertEqual(self.app.active_model, 'MODEL')
+
+    def test_offline_windows_loopback_auto_starts_router(self):
+        self.app.prompt_session = unittest.mock.Mock()
+        self.app.prompt_session.prompt.return_value = '/exit'
+        with patch.object(tui.sys, 'platform', 'win32'), \
+             patch.object(self.app, 'refresh_models', side_effect=[(False, 0, []), (True, 0, [])]), \
+             patch.object(self.app, 'handle_server_command') as control:
+            self.app.run()
+        control.assert_called_once_with('start')
+
+    def test_offline_remote_endpoint_does_not_auto_start_local_router(self):
+        self.app.base_url = 'http://remote.example/v1'
+        self.app.prompt_session = unittest.mock.Mock()
+        self.app.prompt_session.prompt.return_value = '/exit'
+        with patch.object(tui.sys, 'platform', 'win32'), \
+             patch.object(self.app, 'refresh_models', return_value=(False, 0, [])), \
+             patch.object(self.app, 'handle_server_command') as control:
+            self.app.run()
+        control.assert_not_called()
 
     def test_prompt_escapes_model_html(self):
         self.app.prompt_session = unittest.mock.Mock()
@@ -205,4 +226,4 @@ class ProtocolTests(unittest.TestCase):
     def test_trailing_space_completes_subcommands(self):
         completer = tui.OpenClawCompleter(lambda: ['model'])
         completions = list(completer.get_completions(Document('/stack '), None))
-        self.assertEqual([entry.text for entry in completions], ['status', 'check'])
+        self.assertEqual([entry.text for entry in completions], ['status', 'check', 'sync', 'update-geniex', 'update-llama'])

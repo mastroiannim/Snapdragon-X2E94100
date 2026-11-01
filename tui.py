@@ -40,7 +40,7 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.styles import Style as PtStyle
 from prompt_toolkit.formatted_text import HTML
 
-from stack_manager import DEFAULT_WORKSPACE, StackManager, UPDATE_DISABLED
+from stack_manager import DEFAULT_WORKSPACE, StackManager
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +199,7 @@ SLASH_COMMANDS = {
     "/model": "Cambia modello attivo o elenca i modelli disponibili sul router",
     "/models": "Elenca tutti i modelli registrati con dettagli hardware",
     "/status": "Visualizza stato server, RAM e configurazione dichiarata",
-    "/stack": "Ispeziona stack e release pubblicate (sola lettura)",
+    "/stack": "Verifica, installa e aggiorna lo stack tramite GenieX",
     "/bench": "Esegue un benchmark prestazionale in tempo reale (t/s e latenza)",
     "/clear": "Cancella la cronologia messaggi e azzera il contesto",
     "/new": "Sinonimo di /clear (avvia una nuova sessione)",
@@ -255,7 +255,7 @@ class OpenClawCompleter(Completer):
                         )
             elif cmd.lower() == "/stack":
                 arg = parts[1] if len(parts) > 1 else ""
-                for sub in ("status", "check"):
+                for sub in ("status", "check", "sync", "update-geniex", "update-llama"):
                     if sub.startswith(arg.lower()):
                         yield Completion(
                             sub,
@@ -568,7 +568,7 @@ class HexagonClawTUI:
         t.add_row("/models", "", "Elenca tutti i modelli GGUF disponibili sul router con dettagli hardware")
         t.add_row("/model", "<nome>", "Seleziona e cambia istantaneamente il modello attivo")
         t.add_row("/status", "", "Stato server, RAM misurata e preset dichiarato")
-        t.add_row("/stack", "status | check", "Inventario runtime e release pubblicate, in sola lettura")
+        t.add_row("/stack", "status|check|sync|update-*", "Verifica, installa e aggiorna lo stack da GenieX")
         t.add_row("/bench", "[n_tokens]", "Esegue un benchmark sintetico e misura prefill/generation t/s")
         t.add_row("/clear, /new", "", "Azzera la cronologia messaggi e riparte da zero")
         t.add_row("/system", "[nuovo prompt]", "Visualizza o ridefinisce il system prompt dell'assistente")
@@ -754,10 +754,16 @@ class HexagonClawTUI:
             self.stack_mgr.render_stack_dashboard(self.console)
         elif sub in ("check", "updates", "up"):
             self.stack_mgr.render_updates_dashboard(self.console)
-        elif sub in ("sync", "sincronizza", "update-geniex", "geniex", "update-llama", "llama", "update-llamacpp"):
-            self.console.print(Text(UPDATE_DISABLED, style="yellow"))
+        elif sub in ("sync", "sincronizza", "update-llama", "llama", "update-llamacpp"):
+            self.console.print("[cyan]Allineamento automatico al runtime GenieX...[/cyan]")
+            ok, message, _ = self.stack_mgr.sync_runtime_from_geniex()
+            self.console.print(Text(message, style="green" if ok else "red"))
+        elif sub in ("update-geniex", "geniex"):
+            self.console.print("[cyan]Aggiornamento GenieX e riallineamento dello stack...[/cyan]")
+            ok, message = self.stack_mgr.update_geniex_cli()
+            self.console.print(Text(message, style="green" if ok else "red"))
         else:
-            self.console.print("Uso: /stack [status | check]. Aggiornamenti automatici disabilitati.")
+            self.console.print("Uso: /stack [status | check | sync | update-geniex | update-llama]")
 
     # -----------------------------------------------------------------------
     # Loop Principale Interattivo REPL
@@ -766,6 +772,11 @@ class HexagonClawTUI:
     def run(self):
         self.console.clear()
         health = self.refresh_models()
+        # Il launcher locale include il bootstrap anche quando Python e' avviato direttamente.
+        url = urlsplit(self.base_url)
+        if not health[0] and sys.platform == "win32" and url.scheme == "http" and url.hostname in ("127.0.0.1", "localhost"):
+            self.handle_server_command("start")
+            health = self.refresh_models()
         self.print_banner(health)
 
         online, _, _ = health
