@@ -3,6 +3,7 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ('hexagon-update-tests-' + [guid]::
 [void][IO.Directory]::CreateDirectory($root)
 $modulePath = Join-Path (Split-Path $PSScriptRoot -Parent) 'runtime-update.psm1'
 $script:passed = 0
+Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 function Assert-True($Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
@@ -98,6 +99,12 @@ try {
     Assert-True (-not $again.Updated) 'Aligned runtime changed'
     Assert-True ((& $f.Module { $script:Downloads }) -eq 1) 'Aligned runtime downloaded again'
     Pass 'first install with only GenieX; second run offline/idempotent; paths with spaces'
+
+    Remove-Item -LiteralPath (Join-Path $f.Target 'llama-cli.exe')
+    $repair = Sync-HexagonRuntime -BinPath $f.Target -GenieXDir $f.Genie -Apply
+    Assert-True $repair.Updated 'Missing companion frontend was ignored'
+    Assert-True (Test-Path (Join-Path $f.Target 'llama-cli.exe')) 'Missing frontend was not repaired'
+    Pass 'partial installation with missing frontend is repaired automatically'
 
     $f = New-Fixture 'readonly'
     $before = Get-Snapshot $f.Directory

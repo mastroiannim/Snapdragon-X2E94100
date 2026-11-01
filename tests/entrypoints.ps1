@@ -13,6 +13,7 @@ $bin = Join-Path $profile 'llama-cpp\llama-bin-win-cpu-arm64'
 $models = Join-Path $profile '.cache\geniex\models'
 $savedProfile = $env:USERPROFILE; $savedAppData = $env:LOCALAPPDATA
 $savedMarker = $env:HEXAGON_TEST_MARKER; $savedPython = $env:HEXAGON_TEST_PYTHON
+$savedExit = $env:HEXAGON_TEST_EXIT; $savedFixture = $env:HEXAGON_TEST_FIXTURE
 $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
 foreach ($path in @($checkout,$runtime,$models)) { [void][IO.Directory]::CreateDirectory($path) }
 function Run-Entry([string]$Arguments) {
@@ -43,6 +44,7 @@ public class HexagonExecutableFixture {
             Console.WriteLine("HTP0 GPUOpenCL");
         } else {
             File.WriteAllText(Environment.GetEnvironmentVariable("HEXAGON_TEST_MARKER"), String.Join("\n", args));
+            if (Environment.GetEnvironmentVariable("HEXAGON_TEST_EXIT") == "7") return 7;
         }
         return 0;
     }
@@ -85,6 +87,12 @@ function Get-RuntimeProcesses($Directory) { return @() }
     if (-not (Test-Path (Join-Path $bin 'hexagon-runtime.json'))) { throw 'First launch skipped installation' }
     Write-Host 'PASS real launcher first boot with absent llama.cpp directory'
 
+    $env:HEXAGON_TEST_EXIT = '7'
+    $result = Run-Entry ('-NoProfile -File "' + (Join-Path $checkout 'launch-hexagon.ps1') + '" -Model fixture.gguf')
+    if ($result.Code -ne 7) { throw "Direct server exit code lost: $($result.Code) $($result.Output) $($result.Error)" }
+    $env:HEXAGON_TEST_EXIT = $savedExit
+    Write-Host 'PASS direct launcher propagates server exit code'
+
     # La TUI usa il bootstrap, conserva flag e spazi e restituisce il codice Python.
     $env:HEXAGON_TEST_PYTHON = (Get-Command python.exe -ErrorAction Stop).Source
     [IO.File]::WriteAllText((Join-Path $checkout 'tui-bootstrap.psm1'), 'function Resolve-HexagonTuiPython { param($Requirements) return $env:HEXAGON_TEST_PYTHON }; Export-ModuleMember -Function Resolve-HexagonTuiPython')
@@ -96,10 +104,10 @@ function Get-RuntimeProcesses($Directory) { return @() }
     $arguments = @($lastLine | ConvertFrom-Json)
     if ($arguments[$arguments.IndexOf('--model')+1] -ne 'Case With Spaces' -or $arguments[-1] -ne '32') { throw "CLI arguments lost: $lastLine" }
     Write-Host 'PASS TUI launcher reuses bootstrap, preserves CLI arguments and exit code'
-    Write-Host 'ENTRYPOINT_TESTS=PASS (2 Windows process scenarios)'
+    Write-Host 'ENTRYPOINT_TESTS=PASS (3 Windows process scenarios)'
 } finally {
     $env:USERPROFILE=$savedProfile; $env:LOCALAPPDATA=$savedAppData
     $env:HEXAGON_TEST_MARKER=$savedMarker; $env:HEXAGON_TEST_PYTHON=$savedPython
-    Remove-Item Env:HEXAGON_TEST_FIXTURE -ErrorAction SilentlyContinue
+    $env:HEXAGON_TEST_FIXTURE=$savedFixture; $env:HEXAGON_TEST_EXIT=$savedExit
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }

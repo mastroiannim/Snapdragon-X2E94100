@@ -167,6 +167,7 @@ function Assert-RuntimeArchive($Asset, [string]$Path) {
 }
 
 function Expand-RuntimeArchive([string]$Archive, [string]$Destination) {
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
     $seen = @{}
@@ -204,6 +205,15 @@ function Assert-Arm64Executable([string]$Path) {
         $reader.BaseStream.Position = $offset
         if ($reader.ReadUInt32() -ne 0x00004550 -or $reader.ReadUInt16() -ne 0xAA64) { throw "EXE non ARM64: $Path" }
     } finally { $reader.Dispose() }
+}
+
+function Test-FrontendFiles([string]$Directory) {
+    foreach ($name in @('llama-server.exe', 'llama-cli.exe', 'llama-bench.exe')) {
+        $path = Join-Path $Directory $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+        try { Assert-Arm64Executable $path } catch { return $false }
+    }
+    return $true
 }
 
 function Get-RuntimeProcesses([string]$Directory) {
@@ -260,7 +270,7 @@ function Sync-HexagonRuntime {
     }
     $genie = Get-GenieRuntime $GenieXDir
     $frontend = Get-FrontendRuntime $BinPath
-    $aligned = (Test-FrontendRuntime $frontend $genie.Commit) -and (Test-GenieFiles $genie $BinPath)
+    $aligned = (Test-FrontendRuntime $frontend $genie.Commit) -and (Test-FrontendFiles $BinPath) -and (Test-GenieFiles $genie $BinPath)
     if ($aligned -and -not $Force) {
         return [pscustomobject]@{ Updated = $false; Commit = $genie.Commit; Files = @($genie.Files.Name);
             Backup = ''; Message = 'Runtime gia'' allineato a GenieX; nessun download necessario.' }
@@ -280,7 +290,7 @@ function Sync-HexagonRuntime {
     $restartError = ''; $asset = $null
     try {
         [void][IO.Directory]::CreateDirectory($stage)
-        $reuse = $frontend -and (Test-CommitEqual $frontend.Commit $genie.Commit)
+        $reuse = $frontend -and (Test-CommitEqual $frontend.Commit $genie.Commit) -and (Test-FrontendFiles $BinPath)
         # Mantieni configurazioni e file aggiuntivi. Le copie di staging non condividono inode con il backup.
         if (Test-Path -LiteralPath $BinPath) {
             Get-ChildItem -LiteralPath $BinPath -Force | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $stage -Recurse -Force }

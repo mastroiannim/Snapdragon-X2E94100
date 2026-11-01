@@ -79,13 +79,14 @@ un lock impedisce provisioning concorrenti sulla stessa directory.
 ## Verifiche
 
 - 37 regressioni Python, compresa una prova HTTP/SSE reale su loopback.
-- `tests/runtime-update.ps1`: 21 scenari con installazione inizialmente assente,
+- `tests/runtime-update.ps1`: 22 scenari con installazione inizialmente assente,
   idempotenza senza rete, corrispondenza commit, tag annotati, SHA/ZIP, errori di staging,
   rinomina, controllo successivo e ripristino; backup e sorgenti confrontati per contenuto.
 - `tests/tui-bootstrap.ps1`: 4 scenari di provisioning senza Python, riuso, requirements
   modificate e recupero dopo errore pip. Installer e pip sono simulati in questa suite.
 - `tests/entrypoints.ps1`: processi Windows separati per il launcher reale da directory
-  llama.cpp assente e per il passaggio argomenti/codice d'uscita del launcher TUI.
+  llama.cpp assente, il codice d'uscita del server diretto e il passaggio
+  argomenti/codice d'uscita del launcher TUI.
   EXE e device sono fixture: questa prova non simula un'inferenza.
 - `tests/runtime-readonly.ps1`: controllo esplicito senza Apply, file e ambiente invariati.
 - Suite esistente dei cinque profili benchmark, parser GGUF C# e sintassi PowerShell.
