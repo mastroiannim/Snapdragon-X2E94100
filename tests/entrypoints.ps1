@@ -101,7 +101,7 @@ function Get-RuntimeProcesses($Directory) { return @() }
     $result = Run-Entry ('-NoProfile -File "' + (Join-Path $checkout 'launch-tui.ps1') + '" -FromBatch --url http://127.0.0.1:18803/v1 --model "Case With Spaces" --max-tokens 32')
     if ($result.Code -ne 7) { throw "Python exit code lost: $($result.Code) $($result.Output) $($result.Error)" }
     $lastLine = ($result.Output.Trim() -split '\r?\n')[-1]
-    $arguments = @($lastLine | ConvertFrom-Json)
+    $arguments = $lastLine | ConvertFrom-Json
     if ($arguments[$arguments.IndexOf('--model')+1] -ne 'Case With Spaces' -or $arguments[-1] -ne '32') { throw "CLI arguments lost: $lastLine" }
     Write-Host 'PASS TUI launcher reuses bootstrap, preserves CLI arguments and exit code'
     Write-Host 'ENTRYPOINT_TESTS=PASS (3 Windows process scenarios)'
