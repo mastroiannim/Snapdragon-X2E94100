@@ -6,9 +6,13 @@
 param(
     [string]$Url = "http://127.0.0.1:18803/v1",
     [string]$Model = "",
-    [string]$SystemPrompt = ""
+    [string]$SystemPrompt = "",
+    [string]$Workspace = $PSScriptRoot,
+    [ValidateRange(1, 2147483647)]
+    [int]$MaxTokens = 2048
 )
 
+$ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
 $env:PYTHONIOENCODING = "utf-8"
@@ -21,8 +25,9 @@ if (-not (Test-Path $tuiScript)) {
     exit 1
 }
 
-$argsList = @($tuiScript, "--url", $Url)
+$argsList = @($tuiScript, "--url", $Url, "--workspace", $Workspace, "--max-tokens", $MaxTokens)
 if ($Model) { $argsList += @("--model", $Model) }
 if ($SystemPrompt) { $argsList += @("--system", $SystemPrompt) }
 
 & python @argsList
+exit $LASTEXITCODE

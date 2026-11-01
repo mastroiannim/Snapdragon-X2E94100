@@ -124,42 +124,58 @@ Il server espone un endpoint compatibile OpenAI sulla porta `18803`. Il binding 
 
 ## Hexagon Claw TUI (Interfaccia Terminale in Stile OpenClaw)
 
-È inclusa una **Text User Interface (TUI)** avanzata in stile **OpenClaw** (`🐉`), ottimizzata per interagire con `llama-server` e monitorare l'hardware Qualcomm Snapdragon X2 Elite Extreme direttamente da riga di comando.
+Interfaccia testuale `🐉` per la chat con un endpoint `llama-server` compatibile OpenAI.
+Richiede **Python 3.10 o successivo**:
 
-### Installazione Dipendenze
-```bash
-pip install -r requirements.txt
-```
-
-### Avvio della TUI
-```cmd
-.\tui.bat                               # Avvio rapido con supporto UTF-8 per console Windows
-```
-*oppure tramite PowerShell o Python:*
 ```powershell
-.\launch-tui.ps1                        # Launcher PowerShell
-python tui.py --model "LFM2.5-24B"      # Con modello specifico iniziale
+python -m pip install -r requirements.txt
+.\tui.bat
+# Oppure:
+.\launch-tui.ps1
+python tui.py --model "LFM2.5-24B" --max-tokens 2048
 ```
 
-### Caratteristiche Principali
-* **Header & Telemetria Hardware:** Banner informativo persistente con stato del server (ping ms), modello attivo, accelerazione hardware (`HTP0`, `GPUOpenCL`, split vettoriale), consumo RAM LPDDR5X (ctypes nativo) e velocità di generazione ($t/s$).
-* **Streaming & Pensiero Deep Thought:** Streaming dei token in tempo reale con estrazione e formattazione distinta dei blocchi di ragionamento (`<think> ... </think>`).
-* **Autocompletamento Comandi Slash:** Suggerimenti interattivi durante la digitazione (`/`):
-  * `/models`: Elenco completo dei modelli disponibili sul router con strategie hardware.
-  * `/model <nome>`: Cambio istantaneo del modello attivo (caricato on-demand dal router).
-  * `/status`: Dashboard approfondita su architettura SoC, 18 core Oryon, NPU Hexagon e GPU Adreno.
-  * `/stack [status|check|sync|update-*]`: Gestione e manutenzione dello stack software e runtime:
-    * `/stack status`: Verifica integrità, versioni GenieX CLI (v0.10.0), QAIRT (2.50), commit llama.cpp e stato dei 16 file di runtime GGML e driver NPU WHQL.
-    * `/stack check`: Controllo online su GitHub Releases per nuove build Windows ARM64 e aggiornamenti Qualcomm.
-    * `/stack sync`: Sincronizzazione sicura delle DLL e degli artefatti DSP da GenieX a llama-bin con backup preventivo e gestione dei lock NTFS.
-    * `/stack update-geniex`: Esecuzione dell'aggiornamento ufficiale di GenieX CLI (`geniex update`).
-    * `/stack update-llama`: Aggiornamento selettivo dei binari frontend preservando categoricamente i driver NPU.
-  * `/bench [n_tokens]`: Benchmark prestazionale live con misurazione TTFT e velocità di decodifica ($t/s$).
-  * `/server [status|start|stop]`: Monitoraggio e controllo del processo `llama-server`.
-  * `/clear` o `/new`: Reset della conversazione e del contesto.
-  * `/system [prompt]`: Ispezione o modifica del system prompt.
-  * `/temp <val>`: Regolazione della temperatura di campionamento.
-  * `/tokens`: Analisi della finestra di contesto e occupazione stimata della KV cache.
+Il workspace predefinito è la directory del checkout, dove il launcher genera
+`hexagon-models.ini`. Per usare un'altra directory:
+
+```powershell
+python tui.py --workspace "C:\percorso\Snapdragon-X2E94100" --url http://127.0.0.1:18803/v1
+```
+
+- `/models`, `/model <nome>`: elenco e selezione del modello; i preset vengono riletti.
+- `/status`: stato HTTP, RAM misurata su Windows e configurazione dichiarata nel preset.
+  Device e tensor-split non sono misure di offload; i dati non disponibili sono `N/D`.
+- Chat: streaming con `reasoning_content` o tag `<think>` anche frammentati. La cronologia
+  inviata al turno successivo conserva la risposta finale; un turno interrotto o fallito
+  non viene salvato. Il limite predefinito è **2048 token di generazione**, configurabile
+  con `--max-tokens` (o `-MaxTokens` nel launcher PowerShell).
+- `/bench [n_tokens]`: benchmark HTTP con TTFT osservato dal client e tempi prefill/decode
+  separati quando il server li fornisce. I contatori provengono da `usage`/`timings`;
+  senza questi dati token e velocità restano `N/D`. I frammenti SSE non sono token.
+- `/stack status`: versioni, commit e confronto dei file tramite identità, dimensione
+  e SHA-256. Presenza dei file e commit uguali non verificano firma, ABI o inferenza.
+- `/stack check`: consulta le release pubblicate di llama.cpp e GenieX, senza eseguire
+  updater. Il confronto fra build llama.cpp è possibile solo quando entrambe sono note.
+- `/stack sync`, `/stack update-geniex`, `/stack update-llama`: **disabilitati prima di
+  modificare file o processi**, in coerenza con `sync-geniex.ps1`. La reintroduzione
+  dell'aggiornamento richiede la procedura separata descritta in
+  [docs/REVISIONE_TECNICA.md](docs/REVISIONE_TECNICA.md).
+- `/server status|start|stop|restart`: controllo HTTP e gestione del router Windows locale.
+  `stop` e `restart` arrestano tutti i processi locali chiamati `llama-server`.
+  Gli endpoint remoti supportano il solo controllo di stato.
+- `/clear`, `/new`, `/system`, `/temp`, `/tokens`, `/help`, `/exit`: gestione della sessione.
+
+La stima di contesto basata sui caratteri non misura la KV cache né verifica i limiti FastRPC.
+Il client HTTP riusa le connessioni e raggiunge direttamente gli endpoint loopback,
+senza passare dai proxy di ambiente. La TUI non misura l'utilizzo NPU/GPU.
+
+Verifiche riproducibili senza hardware Qualcomm:
+
+```powershell
+python -m unittest discover -s tests -p "test_*.py" -v
+```
+
+Dettagli della revisione: [docs/REVISIONE_TUI.md](docs/REVISIONE_TUI.md).
 
 ## Profilazione e risultati
 
