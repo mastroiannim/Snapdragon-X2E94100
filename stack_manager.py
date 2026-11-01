@@ -1,622 +1,298 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Stack Manager per Hexagon Claw TUI.
-Gestisce l'ispezione, la verifica, il controllo aggiornamenti e la sincronizzazione sicura
-dello stack software (GenieX CLI, librerie DSP Hexagon NPU, e frontend llama.cpp ARM64).
+"""Ispezione in sola lettura dello stack GenieX / llama.cpp.
+
+La presenza e l'identità dei file non verificano firma, ABI o offload reale.
+La politica sugli aggiornamenti è la stessa di sync-geniex.ps1.
 """
 
-import os
-import sys
-import shutil
 import hashlib
+import os
+import re
 import subprocess
-import json
+import sys
 import time
-import zipfile
-import tempfile
-from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from rich.table import Table
-from rich.panel import Panel
-from rich.text import Text
 from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
-# Configurazione UTF-8 per la console Windows
-if sys.platform == "win32":
-    try:
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
-
-# Percorsi predefiniti dell'ambiente Snapdragon X2 Elite
-LOCAL_APPDATA = Path(os.environ.get("LOCALAPPDATA", ""))
-USER_PROFILE = Path(os.environ.get("USERPROFILE", ""))
-
+USER_PROFILE = Path(os.environ.get("USERPROFILE") or Path.home())
+LOCAL_APPDATA = Path(os.environ.get("LOCALAPPDATA") or USER_PROFILE / "AppData" / "Local")
 DEFAULT_GENIEX_DIR = LOCAL_APPDATA / "GenieX CLI"
-DEFAULT_GENIEX_LLAMA_DIR = DEFAULT_GENIEX_DIR / "llama_cpp"
-DEFAULT_GENIEX_EXE = DEFAULT_GENIEX_DIR / "geniex.exe"
-
 DEFAULT_LLAMA_BIN_DIR = USER_PROFILE / "llama-cpp" / "llama-bin-win-cpu-arm64"
-DEFAULT_LLAMA_SERVER = DEFAULT_LLAMA_BIN_DIR / "llama-server.exe"
+DEFAULT_WORKSPACE = Path(__file__).resolve().parent
+UPDATE_DISABLED = (
+    "Aggiornamento automatico disabilitato, come in sync-geniex.ps1. "
+    "Nessun file o processo modificato. Usare /stack status e /stack check; "
+    "la procedura separata richiesta è descritta in docs/REVISIONE_TECNICA.md."
+)
 
 
 def calculate_sha256(path: Path) -> str:
-    """Calcola l'hash SHA-256 di un file."""
-    if not path.exists():
-        return ""
+    """Hash del contenuto corrente; gli errori di lettura restano espliciti."""
     h = hashlib.sha256()
-    with open(path, "rb") as f:
-        while chunk := f.read(65536):
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
             h.update(chunk)
-    return h.hexdigest().lower()
+    return h.hexdigest()
+
+
+def same_commit(left: str, right: str) -> bool:
+    return bool(
+        re.fullmatch(r"[0-9a-fA-F]{7,40}", left)
+        and re.fullmatch(r"[0-9a-fA-F]{7,40}", right)
+        and (left.lower().startswith(right.lower()) or right.lower().startswith(left.lower()))
+    )
 
 
 class StackManager:
-    def __init__(
-        self,
-        geniex_dir: Optional[Path] = None,
-        llama_bin_dir: Optional[Path] = None,
-        workspace_dir: Optional[Path] = None,
-    ):
-        self.geniex_dir = geniex_dir or DEFAULT_GENIEX_DIR
+    def __init__(self, geniex_dir: Optional[Path] = None,
+                 llama_bin_dir: Optional[Path] = None, workspace_dir: Optional[Path] = None):
+        self.geniex_dir = Path(geniex_dir or DEFAULT_GENIEX_DIR)
         self.geniex_exe = self.geniex_dir / "geniex.exe"
         self.geniex_llama_dir = self.geniex_dir / "llama_cpp"
-
-        self.llama_bin_dir = llama_bin_dir or DEFAULT_LLAMA_BIN_DIR
+        self.llama_bin_dir = Path(llama_bin_dir or DEFAULT_LLAMA_BIN_DIR)
         self.llama_server = self.llama_bin_dir / "llama-server.exe"
-        self.workspace_dir = workspace_dir or Path(r"c:\Users\ioxdu\workspace\Hexagon")
+        self.workspace_dir = Path(workspace_dir or DEFAULT_WORKSPACE)
 
-    # -----------------------------------------------------------------------
-    # Helper di Controllo Processi
-    # -----------------------------------------------------------------------
-    def is_server_running(self) -> bool:
-        """Verifica se llama-server.exe è attualmente in esecuzione."""
+    def is_server_running(self) -> Optional[bool]:
+        """None indica che il controllo processi non è disponibile."""
         if sys.platform == "win32":
             try:
-                out = subprocess.check_output(
+                proc = subprocess.run(
                     ["tasklist", "/fi", "imagename eq llama-server.exe", "/fo", "csv", "/nh"],
-                    text=True,
-                    stderr=subprocess.DEVNULL,
+                    capture_output=True, text=True, errors="replace", timeout=5, check=True,
                 )
-                return "llama-server.exe" in out.lower()
-            except Exception:
+                return "llama-server.exe" in proc.stdout.lower()
+            except (OSError, subprocess.SubprocessError):
                 pass
-        return False
+        return None
 
     def stop_server(self) -> bool:
-        """Arresta tutti i processi llama-server.exe per sbloccare le DLL."""
-        if sys.platform == "win32":
-            try:
-                subprocess.run(
-                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "Get-Process -Name llama-server -ErrorAction SilentlyContinue | Stop-Process -Force"],
-                    timeout=10,
-                )
-                for _ in range(10):
-                    time.sleep(0.5)
-                    if not self.is_server_running():
-                        time.sleep(1.0)  # buffer per il rilascio degli handle NTFS
-                        return True
-            except Exception:
-                pass
-        return False
-
-    def start_server_router(self) -> bool:
-        """Avvia llama-server in modalità Router."""
-        bat_path = self.workspace_dir / "llama-server-all.bat"
-        if bat_path.exists():
-            subprocess.Popen(
-                ["cmd.exe", "/c", str(bat_path)],
-                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0,
+        """Arresto esplicito di tutti i processi llama-server.exe locali."""
+        if sys.platform != "win32":
+            return False
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "$ErrorActionPreference='Stop'; "
+                 "Get-Process -Name llama-server -ErrorAction SilentlyContinue | Stop-Process -Force"],
+                capture_output=True, timeout=10, check=True,
             )
-            time.sleep(3)
-            return self.is_server_running()
+            for _ in range(10):
+                if self.is_server_running() is False:
+                    return True
+                time.sleep(0.2)
+        except (OSError, subprocess.SubprocessError):
+            pass
         return False
 
-    # -----------------------------------------------------------------------
-    # 1. Ispezione Dettagliata dello Stack Corrente
-    # -----------------------------------------------------------------------
-    def get_stack_status(self) -> Dict[str, Any]:
-        """Rileva le versioni, commit, file runtime e allineamento dello stack."""
+    def start_server_router(self, port: int = 18803, bind_host: str = "127.0.0.1") -> bool:
+        """Avvia il launcher del checkout corrente; la TUI verifica poi l'HTTP."""
+        script = self.workspace_dir / "launch-hexagon.ps1"
+        if sys.platform != "win32" or not script.is_file():
+            return False
+        try:
+            subprocess.Popen(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+                 "-Mode", "Router", "-Port", str(port), "-BindHost", bind_host],
+                cwd=self.workspace_dir, creationflags=subprocess.CREATE_NEW_CONSOLE,
+            )
+            return True
+        except OSError:
+            return False
+
+    def get_stack_status(self, include_runtime: bool = True) -> Dict[str, Any]:
         status = {
-            "geniex_installed": False,
-            "geniex_version": "Non rilevato",
-            "qairt_version": "N/A",
-            "geniex_llama_hash": "",
-            "llama_server_installed": False,
-            "llama_server_version": "Non rilevato",
-            "llama_server_commit": "",
-            "commit_aligned": False,
-            "runtime_files": [],
-            "all_files_aligned": False,
-            "mismatched_files": [],
-            "missing_files": [],
-            "npu_artifacts": {},
-            "server_running": self.is_server_running(),
+            "geniex_installed": self.geniex_exe.is_file(), "geniex_version": "Non rilevato",
+            "qairt_version": "N/A", "geniex_llama_hash": "",
+            "llama_server_installed": self.llama_server.is_file(),
+            "llama_server_version": "Non rilevato", "llama_server_commit": "",
+            "llama_server_build": None, "commit_aligned": False, "runtime_files": [],
+            "all_files_aligned": False, "mismatched_files": [], "missing_files": [],
+            "npu_artifacts": {}, "server_running": self.is_server_running(), "errors": [],
         }
-
-        # Ispezione GenieX CLI
-        if self.geniex_exe.exists():
-            status["geniex_installed"] = True
+        for exe, args, prefix in (
+            (self.geniex_exe, ["--version", "--skip-update"], "geniex"),
+            (self.llama_server, ["--version"], "llama_server"),
+        ):
+            if not exe.is_file():
+                continue
             try:
+                env = os.environ.copy()
+                if prefix == "llama_server":
+                    env["ADSP_LIBRARY_PATH"] = str(self.llama_bin_dir)
                 proc = subprocess.run(
-                    [str(self.geniex_exe), "--version", "--skip-update"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
+                    [str(exe), *args], cwd=exe.parent, env=env, capture_output=True,
+                    text=True, encoding="utf-8", errors="replace", timeout=5, check=True,
                 )
-                output = proc.stdout + proc.stderr
-                for line in output.splitlines():
-                    if "GenieX CLI Version:" in line:
-                        status["geniex_version"] = line.split(":", 1)[1].strip()
-                    elif "QAIRT Runtime Version:" in line:
-                        status["qairt_version"] = line.split(":", 1)[1].strip()
-                    elif "LlamaCPP Runtime Hash:" in line:
-                        status["geniex_llama_hash"] = line.split(":", 1)[1].strip()
-            except Exception as e:
-                status["geniex_version"] = f"Errore lettura ({e})"
-
-        # Ispezione llama-server.exe
-        if self.llama_server.exists():
-            status["llama_server_installed"] = True
-            try:
-                proc = subprocess.run(
-                    [str(self.llama_server), "--version"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                output = proc.stdout + proc.stderr
-                for line in output.splitlines():
-                    if "version:" in line:
-                        status["llama_server_version"] = line.strip()
-                        import re
-                        m = re.search(r"commit\s+([0-9a-fA-F]+)", line)
-                        if m:
-                            status["llama_server_commit"] = m.group(1).strip()
-            except Exception as e:
-                status["llama_server_version"] = f"Errore lettura ({e})"
-
-        # Verifica allineamento commit
-        gh = status["geniex_llama_hash"].lower()
-        lh = status["llama_server_commit"].lower()
-        if gh and lh and (gh.startswith(lh) or lh.startswith(gh)):
-            status["commit_aligned"] = True
-
-        # Verifica file runtime tra GenieX/llama_cpp e llama-bin
-        if self.geniex_llama_dir.exists() and self.llama_bin_dir.exists():
-            genie_files = list(self.geniex_llama_dir.glob("*"))
-            all_ok = True
-            for gf in sorted(genie_files, key=lambda p: p.name):
-                if gf.is_dir():
-                    continue
-                tf = self.llama_bin_dir / gf.name
-                file_info = {
-                    "name": gf.name,
-                    "genie_size": gf.stat().st_size,
-                    "target_exists": tf.exists(),
-                    "target_size": tf.stat().st_size if tf.exists() else 0,
-                    "match": False,
-                    "is_hardlink": False,
-                }
-                if tf.exists():
-                    try:
-                        file_info["is_hardlink"] = os.path.samefile(gf, tf)
-                    except Exception:
-                        file_info["is_hardlink"] = False
-
-                    if file_info["is_hardlink"]:
-                        file_info["match"] = True
-                    else:
-                        g_hash = calculate_sha256(gf)
-                        t_hash = calculate_sha256(tf)
-                        file_info["match"] = (g_hash == t_hash and g_hash != "")
-
-                    if not file_info["match"]:
-                        all_ok = False
-                        status["mismatched_files"].append(gf.name)
+                output = proc.stdout + "\n" + proc.stderr
+                if prefix == "geniex":
+                    for label, key in (("GenieX CLI Version", "geniex_version"),
+                                       ("QAIRT Runtime Version", "qairt_version"),
+                                       ("LlamaCPP Runtime Hash", "geniex_llama_hash")):
+                        match = re.search(re.escape(label) + r":\s*([^\r\n]+)", output)
+                        if match:
+                            status[key] = match.group(1).strip()
                 else:
-                    all_ok = False
-                    status["missing_files"].append(gf.name)
+                    match = re.search(r"\bversion:\s*([^\r\n]+)", output, re.I)
+                    if match:
+                        version = match.group(1).strip()
+                        status["llama_server_version"] = version
+                        build = re.match(r"b?(\d+)\b", version)
+                        if build:
+                            status["llama_server_build"] = int(build.group(1))
+                        commit = re.search(r"\bcommit\s+([0-9a-fA-F]{7,40})\b|\(([0-9a-fA-F]{7,40})\)", version)
+                        if commit:
+                            status["llama_server_commit"] = commit.group(1) or commit.group(2)
+            except (OSError, subprocess.SubprocessError) as exc:
+                status[prefix + "_version"] = "Errore lettura"
+                status["errors"].append(f"{exe.name}: {exc}")
 
-                status["runtime_files"].append(file_info)
+        status["commit_aligned"] = same_commit(status["geniex_llama_hash"], status["llama_server_commit"])
+        if not include_runtime:
+            return status
 
-            status["all_files_aligned"] = all_ok and len(status["missing_files"]) == 0
+        # Cache limitata a questa ispezione: niente hash persistenti o basati sui timestamp.
+        hashes = {}
 
-        # Verifica specifica artefatti critici Hexagon NPU
-        critical_npu = [
-            "libggml-htp-v81.so",
-            "libggml-htp.cat",
-            "ggml-hexagon.dll",
-            "ggml-opencl.dll",
-        ]
-        for c in critical_npu:
-            p = self.llama_bin_dir / c
-            status["npu_artifacts"][c] = {
-                "present": p.exists(),
-                "size": p.stat().st_size if p.exists() else 0,
-                "sha256": calculate_sha256(p)[:12] + "..." if p.exists() else "N/A",
-            }
+        def digest(path):
+            if path not in hashes:
+                hashes[path] = calculate_sha256(path)
+            return hashes[path]
 
+        try:
+            sources = sorted(p for p in self.geniex_llama_dir.iterdir() if p.is_file())
+            for source in sources:
+                target = self.llama_bin_dir / source.name
+                info = {
+                    "name": source.name, "genie_size": source.stat().st_size,
+                    "target_exists": target.is_file(), "target_size": 0,
+                    "match": False, "is_hardlink": False,
+                }
+                if target.is_file():
+                    try:
+                        info["target_size"] = target.stat().st_size
+                        info["is_hardlink"] = source.samefile(target)
+                        info["match"] = info["is_hardlink"] or (
+                            info["genie_size"] == info["target_size"] and digest(source) == digest(target)
+                        )
+                    except OSError as exc:
+                        status["errors"].append(f"{source.name}: {exc}")
+                    if not info["match"]:
+                        status["mismatched_files"].append(source.name)
+                else:
+                    status["missing_files"].append(source.name)
+                status["runtime_files"].append(info)
+            status["all_files_aligned"] = bool(sources) and all(f["match"] for f in status["runtime_files"])
+        except OSError as exc:
+            status["errors"].append(f"Inventario runtime non disponibile: {exc}")
+
+        for name in ("libggml-htp-v81.so", "libggml-htp.cat", "ggml-hexagon.dll", "ggml-opencl.dll"):
+            path = self.llama_bin_dir / name
+            artifact = {"present": path.is_file(), "size": 0, "sha256": "N/A"}
+            if artifact["present"]:
+                try:
+                    artifact.update(size=path.stat().st_size, sha256=digest(path)[:12] + "...")
+                except OSError as exc:
+                    status["errors"].append(f"{name}: {exc}")
+            status["npu_artifacts"][name] = artifact
         return status
 
-    # -----------------------------------------------------------------------
-    # 2. Controllo Aggiornamenti Disponibili (Online)
-    # -----------------------------------------------------------------------
     def check_updates(self) -> Dict[str, Any]:
-        """Interroga i repository e le API per verificare la disponibilità di nuove versioni."""
-        results = {
-            "current_geniex": "N/A",
-            "current_llamacpp_commit": "N/A",
-            "latest_llamacpp_build": "N/A",
-            "latest_llamacpp_published": "N/A",
-            "latest_llamacpp_url": "N/A",
-            "arm64_assets": [],
-            "arm64_asset_url": "",
-            "update_available_llamacpp": False,
-            "geniex_update_status": "N/A",
+        """Consulta release pubblicate senza eseguire updater o rileggere tutti gli hash."""
+        current = self.get_stack_status(include_runtime=False)
+        result = {
+            "current_geniex": current["geniex_version"],
+            "current_llamacpp_commit": current["llama_server_commit"] or "N/D",
+            "latest_llamacpp_build": "N/D", "latest_llamacpp_published": "",
+            "latest_llamacpp_url": "", "update_available_llamacpp": None,
+            "geniex_update_status": "Verifica non disponibile",
             "safe_update_advisory": (
-                "L'accelerazione Hexagon v81 HTP0 richiede le librerie host e gli artefatti DSP "
-                "distribuiti e firmati da Qualcomm (GenieX). Aggiornando il frontend llama.cpp, "
-                "vengono preservati intatti gli artefatti DSP (libggml-htp-v*.so, libggml-htp.cat "
-                "e ggml-hexagon.dll)."
-            ),
+                "Controllo in sola lettura. La pubblicazione di una release non dimostra "
+                "la compatibilità con lo stack locale; gli aggiornamenti automatici sono disabilitati."
+            ), "errors": [],
         }
-
-        cur_status = self.get_stack_status()
-        results["current_geniex"] = cur_status.get("geniex_version", "N/A")
-        results["current_llamacpp_commit"] = cur_status.get("llama_server_commit", "N/A")
-
-        # Query GitHub per ggml-org/llama.cpp
         try:
-            with httpx.Client(timeout=6.0) as client:
-                resp = client.get("https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=1")
-                if resp.status_code == 200:
-                    releases = resp.json()
-                    if releases:
-                        latest = releases[0]
-                        tag = latest.get("tag_name", "")
-                        results["latest_llamacpp_build"] = tag
-                        results["latest_llamacpp_published"] = latest.get("published_at", "")[:10]
-                        results["latest_llamacpp_url"] = latest.get("html_url", "")
+            client = httpx.Client(timeout=6.0, follow_redirects=True)
+        except (ImportError, ValueError) as exc:
+            result["errors"].append(f"Configurazione HTTP non disponibile: {exc}")
+            return result
+        with client:
+            for repo in ("ggml-org/llama.cpp", "qualcomm/GenieX"):
+                try:
+                    resp = client.get(f"https://api.github.com/repos/{repo}/releases/latest")
+                    resp.raise_for_status()
+                    release = resp.json()
+                    tag = release["tag_name"]
+                    if repo == "ggml-org/llama.cpp":
+                        result["latest_llamacpp_build"] = tag
+                        result["latest_llamacpp_published"] = (release.get("published_at") or "")[:10]
+                        result["latest_llamacpp_url"] = release.get("html_url", "")
+                        build = re.fullmatch(r"b(\d+)", tag)
+                        if build and current["llama_server_build"] is not None:
+                            result["update_available_llamacpp"] = int(build.group(1)) > current["llama_server_build"]
+                    else:
+                        result["geniex_update_status"] = f"Release pubblicata: {tag}; locale: {current['geniex_version']}"
+                except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+                    result["errors"].append(f"{repo}: {exc}")
+        return result
 
-                        assets = latest.get("assets", [])
-                        for a in assets:
-                            name = a.get("name", "")
-                            if "arm64" in name.lower() and "win" in name.lower() and "cpu" in name.lower():
-                                results["arm64_assets"].append(name)
-                                results["arm64_asset_url"] = a.get("browser_download_url", "")
-                            elif "arm64" in name.lower() and "win" in name.lower():
-                                results["arm64_assets"].append(name)
-
-                        if tag and tag != results["current_llamacpp_commit"]:
-                            results["update_available_llamacpp"] = True
-        except Exception as e:
-            results["latest_llamacpp_build"] = f"Errore connessione ({e})"
-
-        # Verifica aggiornamenti per GenieX CLI
-        if self.geniex_exe.exists():
-            try:
-                proc = subprocess.run(
-                    [str(self.geniex_exe), "version"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                output = proc.stdout + proc.stderr
-                if "update available" in output.lower():
-                    results["geniex_update_status"] = "Aggiornamento disponibile via 'geniex update'"
-                else:
-                    results["geniex_update_status"] = "GenieX CLI aggiornato all'ultima versione"
-            except Exception:
-                results["geniex_update_status"] = "Controllo GenieX non disponibile offline"
-
-        return results
-
-    # -----------------------------------------------------------------------
-    # 3. Sincronizzazione Sicura Runtime GenieX -> llama-bin
-    # -----------------------------------------------------------------------
+    # Conserva le API dei comandi precedenti, ma rifiuta prima di discovery e I/O.
     def sync_runtime_from_geniex(self, auto_stop_server: bool = True) -> Tuple[bool, str, List[str]]:
-        """
-        Sincronizza le DLL GGML e gli artefatti HTP DSP da GenieX CLI in llama-bin.
-        Riconosce i collegamenti hard-link esistenti evitando errori di file lock.
-        Crea un backup preventivo e riavvia il server se necessario.
-        """
-        if not self.geniex_llama_dir.exists():
-            return False, f"Cartella sorgente GenieX non trovata: {self.geniex_llama_dir}", []
-        if not self.llama_bin_dir.exists():
-            return False, f"Cartella destinazione llama-bin non trovata: {self.llama_bin_dir}", []
+        return False, UPDATE_DISABLED, []
 
-        genie_files = list(self.geniex_llama_dir.glob("*"))
-        if not genie_files:
-            return False, "Nessun file presente nella cartella GenieX llama_cpp.", []
+    def update_llamacpp_frontend(self, download_url: Optional[str] = None,
+                                auto_stop_server: bool = True) -> Tuple[bool, str]:
+        return False, UPDATE_DISABLED
 
-        # Controlla se i file sono già tutti sincronizzati/hardlinkati
-        needs_update = []
-        for gf in genie_files:
-            if gf.is_dir():
-                continue
-            tf = self.llama_bin_dir / gf.name
-            if not tf.exists():
-                needs_update.append(gf)
-            else:
-                try:
-                    if not os.path.samefile(gf, tf):
-                        if calculate_sha256(gf) != calculate_sha256(tf):
-                            needs_update.append(gf)
-                except Exception:
-                    needs_update.append(gf)
-
-        if not needs_update:
-            return True, "Tutti i 16 file di runtime GenieX sono già perfettamente sincronizzati e collegati.", [gf.name for gf in genie_files]
-
-        was_running = self.is_server_running()
-        if was_running:
-            if auto_stop_server:
-                stopped = self.stop_server()
-                if not stopped:
-                    return False, "Impossibile arrestare llama-server.exe per aggiornare le DLL in uso.", []
-            else:
-                return False, "llama-server.exe è in esecuzione. Ferma il server con /server stop prima di sincronizzare.", []
-
-        # Backup preventivo
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_dir = self.llama_bin_dir / "backups" / f"backup_{ts}"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-
-        synced_files = []
-        try:
-            for gf in needs_update:
-                target_file = self.llama_bin_dir / gf.name
-                if target_file.exists():
-                    shutil.copy2(target_file, backup_dir / gf.name)
-                    target_file.unlink()
-
-                # Tenta hard-link con fallback alla copia
-                try:
-                    os.link(gf, target_file)
-                except Exception:
-                    shutil.copy2(gf, target_file)
-
-                synced_files.append(gf.name)
-
-        except Exception as e:
-            # Ripristina da backup
-            for bf in backup_dir.glob("*"):
-                try:
-                    shutil.copy2(bf, self.llama_bin_dir / bf.name)
-                except Exception:
-                    pass
-            return False, f"Errore durante la sincronizzazione: {e}. Backup ripristinato.", []
-
-        if was_running and auto_stop_server:
-            self.start_server_router()
-
-        msg = f"Sincronizzati {len(synced_files)} file da GenieX."
-        if backup_dir:
-            msg += f" Backup salvato in: backups/{backup_dir.name}"
-        if was_running:
-            msg += " Server Router riavviato automaticamente."
-
-        return True, msg, synced_files
-
-    # -----------------------------------------------------------------------
-    # 4. Aggiornamento Frontend llama.cpp da GitHub (Safe Upgrade)
-    # -----------------------------------------------------------------------
-    def update_llamacpp_frontend(self, download_url: Optional[str] = None, auto_stop_server: bool = True) -> Tuple[bool, str]:
-        """
-        Scarica e aggiorna in sicurezza i binari frontend (llama-server.exe, llama-cli.exe, llama-bench.exe)
-        preservando categoricamente intatti tutti gli artefatti Qualcomm HTP e le DLL hardware firmate.
-        """
-        if not download_url:
-            updates = self.check_updates()
-            download_url = updates.get("arm64_asset_url")
-            if not download_url:
-                return False, "Nessun archivio Windows ARM64 reperibile automaticamente su GitHub Releases."
-
-        was_running = self.is_server_running()
-        if was_running:
-            if auto_stop_server:
-                stopped = self.stop_server()
-                if not stopped:
-                    return False, "Impossibile arrestare llama-server per l'aggiornamento."
-            else:
-                return False, "llama-server è attivo. Arrestalo prima di applicare l'aggiornamento."
-
-        # Backup dei soli frontend eseguibili
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_dir = self.llama_bin_dir / "backups" / f"frontend_backup_{ts}"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-
-        executables_to_update = [
-            "llama-server.exe",
-            "llama-cli.exe",
-            "llama-bench.exe",
-            "llama-batched-bench.exe",
-            "llama-quantize.exe",
-        ]
-        for exe in executables_to_update:
-            p = self.llama_bin_dir / exe
-            if p.exists():
-                shutil.copy2(p, backup_dir / exe)
-
-        try:
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                tmp_zip = Path(tmp_dir) / "llama-frontend.zip"
-                # Download dell'archivio
-                with httpx.Client(timeout=60.0, follow_redirects=True) as client:
-                    resp = client.get(download_url)
-                    if resp.status_code != 200:
-                        return False, f"Download fallito: HTTP {resp.status_code}"
-                    with open(tmp_zip, "wb") as f:
-                        f.write(resp.content)
-
-                # Estrazione selettiva dei soli eseguibili frontend
-                with zipfile.ZipFile(tmp_zip, "r") as z:
-                    for filename in z.namelist():
-                        basename = Path(filename).name
-                        if basename in executables_to_update:
-                            target_dest = self.llama_bin_dir / basename
-                            if target_dest.exists():
-                                target_dest.unlink()
-                            with z.open(filename) as src, open(target_dest, "wb") as dst:
-                                shutil.copyfileobj(src, dst)
-
-            # Verifica che il nuovo server si avvii correttamente
-            proc = subprocess.run(
-                [str(self.llama_server), "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            new_version_info = (proc.stdout + proc.stderr).strip()
-
-        except Exception as e:
-            # Rollback
-            for bf in backup_dir.glob("*"):
-                try:
-                    shutil.copy2(bf, self.llama_bin_dir / bf.name)
-                except Exception:
-                    pass
-            return False, f"Errore durante l'installazione del frontend: {e}. Rollback completato."
-
-        if was_running and auto_stop_server:
-            self.start_server_router()
-
-        return True, f"Frontend llama.cpp aggiornato con successo!\nNuova versione:\n{new_version_info}"
-
-    # -----------------------------------------------------------------------
-    # 5. Aggiornamento Ufficiale GenieX CLI
-    # -----------------------------------------------------------------------
     def update_geniex_cli(self) -> Tuple[bool, str]:
-        """Esegue l'aggiornamento ufficiale di GenieX CLI."""
-        if not self.geniex_exe.exists():
-            return False, "GenieX CLI non installato."
-        try:
-            proc = subprocess.run(
-                [str(self.geniex_exe), "update"],
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-            out = (proc.stdout + proc.stderr).strip()
-            if proc.returncode == 0:
-                # Sincronizza subito i nuovi file estratti da GenieX
-                self.sync_runtime_from_geniex(auto_stop_server=True)
-                return True, f"Aggiornamento GenieX completato:\n{out}"
-            else:
-                return False, f"Aggiornamento GenieX terminato con codice {proc.returncode}:\n{out}"
-        except Exception as e:
-            return False, f"Eccezione durante l'aggiornamento di GenieX: {e}"
+        return False, UPDATE_DISABLED
 
-    # -----------------------------------------------------------------------
-    # Rendering Tabelle per Rich Console
-    # -----------------------------------------------------------------------
     def render_stack_dashboard(self, console: Console):
-        """Disegna il dashboard completo di verifica dello stack."""
         st = self.get_stack_status()
-
-        t = Table(title="🐉 Verifica Stack Hardware & Runtime - Snapdragon X2 Elite", border_style="cyan")
-        t.add_column("Componente", style="bold cyan", width=24)
-        t.add_column("Versione / Dettaglio", style="white")
-        t.add_column("Stato Integrità", style="bold")
-
-        # GenieX CLI
-        g_badge = "[bold green]✓ INSTALLATO[/bold green]" if st["geniex_installed"] else "[bold red]✗ MANCANTE[/bold red]"
-        t.add_row(
-            "GenieX CLI",
-            f"{st['geniex_version']} (QAIRT {st['qairt_version']})",
-            g_badge,
-        )
-
-        # llama.cpp Frontend
-        l_badge = "[bold green]✓ INSTALLATO[/bold green]" if st["llama_server_installed"] else "[bold red]✗ MANCANTE[/bold red]"
-        t.add_row(
-            "llama.cpp Server",
-            f"{st['llama_server_version']}",
-            l_badge,
-        )
-
-        # Allineamento Commit
-        c_badge = (
-            f"[bold green]✓ ALLINEATO ({st['geniex_llama_hash'][:7]})[/bold green]"
-            if st["commit_aligned"]
-            else f"[yellow]⚠ DISALLINEATO (Genie: {st['geniex_llama_hash'][:7]} vs Llama: {st['llama_server_commit'][:7]})[/yellow]"
-        )
-        t.add_row("Allineamento Commit", f"GenieX [{st['geniex_llama_hash']}] vs Llama [{st['llama_server_commit']}]", c_badge)
-
-        # File Runtime
-        f_badge = (
-            f"[bold green]✓ 16/16 File Sincronizzati (Hard-link)[/bold green]"
-            if st["all_files_aligned"]
-            else f"[bold red]✗ {len(st['mismatched_files']) + len(st['missing_files'])} File da Sincronizzare[/bold red]"
-        )
-        t.add_row("Librerie Runtime GGML", f"{len(st['runtime_files'])} file monitorati in llama-bin", f_badge)
-
-        # Artefatti Hexagon NPU
-        npu_ok = all(v["present"] for v in st["npu_artifacts"].values())
-        n_badge = "[bold green]✓ WHQL Attivo (v81)[/bold green]" if npu_ok else "[bold red]✗ Driver Incompleto[/bold red]"
-        t.add_row(
-            "Hexagon NPU v81 DSP",
-            "libggml-htp-v81.so + libggml-htp.cat + ggml-hexagon.dll",
-            n_badge,
-        )
-
-        # Stato Server
-        s_badge = "[bold green]● IN ESECUZIONE[/bold green]" if st["server_running"] else "[dim]○ FERMO[/dim]"
-        t.add_row("Stato Router Server", "Porta 18803 (HTTP)", s_badge)
-
-        console.print(t)
-
-        if not st["all_files_aligned"]:
-            console.print("[yellow]Suggerimento: digita [bold cyan]/stack sync[/bold cyan] per sincronizzare le DLL di GenieX.[/yellow]\n")
+        table = Table(title="🐉 Inventario Stack GenieX / llama.cpp", border_style="cyan")
+        table.add_column("Componente", style="bold cyan")
+        table.add_column("Versione / Dettaglio")
+        table.add_column("Esito osservato")
+        table.add_row("GenieX CLI", Text(f"{st['geniex_version']} (QAIRT {st['qairt_version']})"),
+                      "Presente" if st["geniex_installed"] else "Mancante")
+        table.add_row("llama.cpp Server", Text(st["llama_server_version"]),
+                      "Presente" if st["llama_server_installed"] else "Mancante")
+        table.add_row("Commit", Text(f"GenieX: {st['geniex_llama_hash'] or 'N/D'}; "
+                                     f"llama.cpp: {st['llama_server_commit'] or 'N/D'}"),
+                      "Coincidono" if st["commit_aligned"] else "Differenti o non rilevati")
+        files = st["runtime_files"]
+        table.add_row("Runtime", f"{sum(f['match'] for f in files)}/{len(files)} file identici; "
+                      f"{sum(f['is_hardlink'] for f in files)} hard-link",
+                      "Identità verificata" if st["all_files_aligned"] else "Differenze o inventario incompleto")
+        for name, artifact in st["npu_artifacts"].items():
+            table.add_row(name, artifact["sha256"], "Presente" if artifact["present"] else "Mancante")
+        running = st["server_running"]
+        table.add_row("Processi llama-server", "Controllo locale per nome",
+                      "N/D" if running is None else "In esecuzione" if running else "Fermi")
+        console.print(table)
+        console.print("[dim]File presenti e commit uguali non verificano firma, ABI o offload reale.[/dim]")
+        for error in st["errors"]:
+            console.print(Text(error, style="yellow"))
 
     def render_updates_dashboard(self, console: Console):
-        """Disegna il report di disponibilità aggiornamenti online."""
-        console.print("[cyan]Controllo aggiornamenti online in corso (GitHub & Qualcomm)...[/cyan]")
         up = self.check_updates()
-
-        t = Table(title="🐉 Controllo Aggiornamenti Stack", border_style="green")
-        t.add_column("Software", style="bold cyan", width=22)
-        t.add_column("Versione Locale", style="yellow")
-        t.add_column("Ultima Versione Disponibile", style="bold green")
-        t.add_column("Stato", style="bold")
-
-        # llama.cpp
-        l_stat = (
-            "[bold yellow]AGGIORNAMENTO DISPONIBILE[/bold yellow]"
-            if up["update_available_llamacpp"]
-            else "[green]Allineato[/green]"
-        )
-        t.add_row(
-            "llama.cpp (ggml-org)",
-            up["current_llamacpp_commit"],
-            f"{up['latest_llamacpp_build']} ({up['latest_llamacpp_published']})",
-            l_stat,
-        )
-
-        # GenieX
-        t.add_row(
-            "GenieX CLI (Qualcomm)",
-            up["current_geniex"],
-            "Verifica automatica",
-            f"[green]{up['geniex_update_status']}[/green]",
-        )
-
-        console.print(t)
-
-        console.print(
-            Panel(
-                f"[yellow]{up['safe_update_advisory']}[/yellow]\n\n"
-                "[dim]Comandi di gestione disponibili:\n"
-                "  • [cyan]/stack sync[/cyan]          : Sincronizza e riallinea le DLL e i file HTP da GenieX\n"
-                "  • [cyan]/stack update-geniex[/cyan] : Esegue l'aggiornamento di GenieX CLI\n"
-                "  • [cyan]/stack update-llama[/cyan]  : Aggiorna il frontend llama-server preservando i driver NPU[/dim]",
-                title="🛡️ Politica di Aggiornamento Sicuro Hexagon",
-                border_style="yellow",
-            )
-        )
+        available = up["update_available_llamacpp"]
+        state = "Non determinabile" if available is None else "Build più recente pubblicata" if available else "Nessuna build più recente"
+        table = Table(title="🐉 Release pubblicate", border_style="cyan")
+        table.add_column("Software")
+        table.add_column("Versione locale")
+        table.add_column("Release / Esito")
+        table.add_row("llama.cpp", Text(up["current_llamacpp_commit"]),
+                      Text(f"{up['latest_llamacpp_build']} ({up['latest_llamacpp_published']}): {state}"))
+        table.add_row("GenieX", Text(up["current_geniex"]), Text(up["geniex_update_status"]))
+        console.print(table)
+        console.print(Panel(Text(up["safe_update_advisory"]), border_style="yellow"))
+        for error in up["errors"]:
+            console.print(Text(error, style="yellow"))

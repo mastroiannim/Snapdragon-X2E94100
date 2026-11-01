@@ -8,13 +8,14 @@ per llama.cpp su Snapdragon X2 Elite Extreme (Qualcomm Hexagon NPU / Adreno GPU 
 import sys
 import os
 import time
-import re
 import json
 import ctypes
 import argparse
-import subprocess
+import math
+from html import escape as escape_html
+from urllib.parse import urlsplit
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Optional, Tuple
 
 # Configurazione UTF-8 per la console Windows
 if sys.platform == "win32":
@@ -30,11 +31,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-from rich.markdown import Markdown
-from rich.live import Live
-from rich.columns import Columns
-from rich.progress import BarColumn, Progress, TextColumn
-from rich.align import Align
 from rich.rule import Rule
 
 from prompt_toolkit import PromptSession
@@ -44,7 +40,7 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.styles import Style as PtStyle
 from prompt_toolkit.formatted_text import HTML
 
-from stack_manager import StackManager
+from stack_manager import DEFAULT_WORKSPACE, StackManager, UPDATE_DISABLED
 
 
 # ---------------------------------------------------------------------------
@@ -52,8 +48,8 @@ from stack_manager import StackManager
 # ---------------------------------------------------------------------------
 class MEMORYSTATUSEX(ctypes.Structure):
     _fields_ = [
-        ("dwLength", ctypes.c_ulong),
-        ("dwMemoryLoad", ctypes.c_ulong),
+        ("dwLength", ctypes.c_uint32),
+        ("dwMemoryLoad", ctypes.c_uint32),
         ("ullTotalPhys", ctypes.c_ulonglong),
         ("ullAvailPhys", ctypes.c_ulonglong),
         ("ullTotalPageFile", ctypes.c_ulonglong),
@@ -64,7 +60,7 @@ class MEMORYSTATUSEX(ctypes.Structure):
     ]
 
 
-def get_system_ram() -> Tuple[float, float, int]:
+def get_system_ram() -> Optional[Tuple[float, float, int]]:
     """Restituisce (total_gb, used_gb, percent_used)"""
     try:
         stat = MEMORYSTATUSEX()
@@ -75,7 +71,7 @@ def get_system_ram() -> Tuple[float, float, int]:
             return round(total, 1), round(used, 1), stat.dwMemoryLoad
     except Exception:
         pass
-    return 48.0, 0.0, 0
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -88,20 +84,111 @@ def load_ini_presets(ini_path: Path) -> Dict[str, Dict[str, str]]:
         return presets
 
     current_section = None
-    with open(ini_path, "r", encoding="utf-8", errors="ignore") as f:
+    with open(ini_path, "r", encoding="utf-8-sig") as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith("#"):
+            if not line or line.startswith(("#", ";")):
                 continue
             if line.startswith("[") and line.endswith("]"):
                 current_section = line[1:-1].strip()
-                if current_section != "*":
-                    presets[current_section] = {}
-            elif current_section and current_section != "*" and "=" in line:
+                presets.setdefault(current_section, {})
+            elif current_section and "=" in line:
                 key, val = line.split("=", 1)
                 presets[current_section][key.strip()] = val.strip()
 
-    return presets
+    defaults = presets.pop("*", {})
+    return {name: {**defaults, **values} for name, values in presets.items()}
+
+
+def iter_sse_events(lines):
+    """Legge eventi SSE, inclusi data: senza spazio e payload su più righe."""
+    data = []
+    ended = False
+    for line in lines:
+        if ended:
+            continue  # Consuma il corpo HTTP per poter riusare la connessione.
+        if line == "":
+            if not data:
+                continue
+            payload = "\n".join(data)
+            data.clear()
+            if payload.strip() == "[DONE]":
+                ended = True
+                yield None
+                continue
+            event = json.loads(payload)
+            if not isinstance(event, dict):
+                raise ValueError("Evento SSE non valido")
+            yield event
+        elif line.startswith("data:"):
+            value = line[5:]
+            data.append(value[1:] if value.startswith(" ") else value)
+    if data:
+        # Alcuni endpoint omettono la riga vuota conclusiva.
+        yield from iter_sse_events([*('data:' + value for value in data), ""])
+
+
+class ReasoningFilter:
+    """Separa tag think anche quando il delimitatore attraversa più frammenti."""
+    def __init__(self):
+        self.pending = ""
+        self.thinking = False
+
+    def feed(self, piece: str):
+        self.pending += piece
+        while self.pending:
+            tag = "</think>" if self.thinking else "<think>"
+            index = self.pending.find(tag)
+            if index >= 0:
+                if index:
+                    yield self.thinking, self.pending[:index]
+                self.pending = self.pending[index + len(tag):]
+                self.thinking = not self.thinking
+                continue
+            keep = 0
+            for size in range(1, min(len(tag), len(self.pending) + 1)):
+                if self.pending.endswith(tag[:size]):
+                    keep = size
+            ready = self.pending[:-keep] if keep else self.pending
+            self.pending = self.pending[-keep:] if keep else ""
+            if ready:
+                yield self.thinking, ready
+            break
+
+    def flush(self):
+        if self.pending:
+            yield self.thinking, self.pending
+            self.pending = ""
+
+
+def measured_number(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
+        return value
+    return None
+
+
+def generation_metrics(timings, usage):
+    """Non interpreta i frammenti SSE come token; usa solo contatori del server."""
+    tokens = measured_number(timings.get("predicted_n"))
+    if tokens is None:
+        tokens = measured_number(usage.get("completion_tokens"))
+    if tokens is not None and tokens != int(tokens):
+        tokens = None
+    milliseconds = measured_number(timings.get("predicted_ms"))
+    seconds = milliseconds / 1000 if milliseconds is not None else None
+    speed = measured_number(timings.get("predicted_per_second"))
+    if speed is None and tokens is not None and seconds:
+        speed = tokens / seconds
+    return int(tokens) if tokens is not None else None, speed, seconds
+
+
+def speed_label(speed):
+    return f"{speed:.1f} t/s" if speed is not None else "N/D"
+
+
+def ram_label():
+    ram = get_system_ram()
+    return f"{ram[1]:.1f}/{ram[0]:.1f} GiB ({ram[2]}%)" if ram else "N/D"
 
 
 # ---------------------------------------------------------------------------
@@ -111,8 +198,8 @@ SLASH_COMMANDS = {
     "/help": "Mostra tutti i comandi disponibili e i tasti di scelta rapida",
     "/model": "Cambia modello attivo o elenca i modelli disponibili sul router",
     "/models": "Elenca tutti i modelli registrati con dettagli hardware",
-    "/status": "Visualizza dashboard telemetria (NPU, GPU, RAM, Server)",
-    "/stack": "Verifica stack, versioni GenieX/llama-cpp, aggiornamenti e sync",
+    "/status": "Visualizza stato server, RAM e configurazione dichiarata",
+    "/stack": "Ispeziona stack e release pubblicate (sola lettura)",
     "/bench": "Esegue un benchmark prestazionale in tempo reale (t/s e latenza)",
     "/clear": "Cancella la cronologia messaggi e azzera il contesto",
     "/new": "Sinonimo di /clear (avvia una nuova sessione)",
@@ -131,7 +218,7 @@ class OpenClawCompleter(Completer):
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
-        stripped = text.strip()
+        stripped = text.lstrip()
 
         # Completamento per comandi slash
         if stripped.startswith("/"):
@@ -168,7 +255,7 @@ class OpenClawCompleter(Completer):
                         )
             elif cmd.lower() == "/stack":
                 arg = parts[1] if len(parts) > 1 else ""
-                for sub in ("status", "check", "sync", "update-geniex", "update-llama"):
+                for sub in ("status", "check"):
                     if sub.startswith(arg.lower()):
                         yield Completion(
                             sub,
@@ -187,31 +274,40 @@ class HexagonClawTUI:
         model: Optional[str] = None,
         system_prompt: Optional[str] = None,
         workspace_dir: Optional[Path] = None,
+        max_tokens: int = 2048,
     ):
         self.base_url = base_url.rstrip("/")
-        self.server_host = self.base_url.replace("/v1", "")
-        self.workspace_dir = workspace_dir or Path(r"c:\Users\ioxdu\workspace\Hexagon")
+        url = urlsplit(self.base_url)
+        if url.scheme not in ("http", "https") or not url.hostname:
+            raise ValueError("URL HTTP(S) non valido")
+        _ = url.port  # Rifiuta porte non valide prima del loop interattivo.
+        if max_tokens <= 0:
+            raise ValueError("max_tokens deve essere positivo")
+        self.max_tokens = max_tokens
+        self.workspace_dir = Path(workspace_dir or DEFAULT_WORKSPACE).resolve()
         self.ini_path = self.workspace_dir / "hexagon-models.ini"
 
         self.console = Console(legacy_windows=False)
-        self.presets = load_ini_presets(self.ini_path)
+        self.presets = {}
         self.stack_mgr = StackManager(workspace_dir=self.workspace_dir)
         self.available_models: List[str] = []
         self.active_model = model or "LFM2.5-24B-A2B-QAD-Q4_0"
 
-        self.system_prompt = system_prompt or (
+        self.system_prompt = system_prompt if system_prompt is not None else (
             "Sei un assistente AI specializzato in ingegneria del software e calcolo accelerato, "
-            "in esecuzione locale su architettura Qualcomm Snapdragon X2 Elite Extreme con accelerazione "
-            "NPU Hexagon v81 e GPU Adreno. Rispondi in italiano in modo conciso, tecnico e preciso."
+            "per un ambiente target Qualcomm Snapdragon X2 Elite Extreme. "
+            "Rispondi in italiano in modo conciso, tecnico e preciso."
         )
         self.temperature = 0.7
         self.messages: List[Dict[str, str]] = []
 
         # Metriche dell'ultima generazione
-        self.last_gen_speed: float = 0.0
-        self.last_gen_tokens: int = 0
-        self.last_gen_time: float = 0.0
+        self.last_gen_speed: Optional[float] = None
+        self.last_gen_tokens: Optional[int] = None
+        self.last_gen_time: Optional[float] = None
         self.total_tokens_session: int = 0
+        self.http = httpx.Client(timeout=httpx.Timeout(180.0, connect=2.0),
+                                 trust_env=url.hostname not in ("127.0.0.1", "localhost", "::1"))
 
         # Inizializza sessione prompt_toolkit con fallback per ambienti non-interattivi
         history_file = Path.home() / ".hexagon_claw_history"
@@ -230,118 +326,75 @@ class HexagonClawTUI:
         except Exception:
             self.prompt_session = None
 
+    def close(self):
+        self.http.close()
+
     def get_available_model_ids(self) -> List[str]:
         if self.available_models:
             return self.available_models
         if self.presets:
             return list(self.presets.keys())
-        return ["LFM2.5-24B-A2B-QAD-Q4_0"]
+        return []
 
     # -----------------------------------------------------------------------
     # Connessione al Server & Verifica Health
     # -----------------------------------------------------------------------
     def check_server_health(self) -> Tuple[bool, float, List[str]]:
-        """Verifica se il server llama-server risponde e restituisce (is_online, latency_ms, models)"""
-        t0 = time.time()
+        t0 = time.perf_counter()
         try:
-            with httpx.Client(timeout=2.0) as client:
-                resp = client.get(f"{self.base_url}/models")
-                if resp.status_code == 200:
-                    data = resp.json()
-                    models = [m.get("id", "") for m in data.get("data", [])]
-                    latency = (time.time() - t0) * 1000
-                    return True, latency, models
-        except Exception:
-            pass
-        return False, 0.0, []
+            response = self.http.get(f"{self.base_url}/models", timeout=2.0)
+            response.raise_for_status()
+            models = [m["id"] for m in response.json().get("data", [])
+                      if isinstance(m.get("id"), str) and m["id"]]
+            return True, (time.perf_counter() - t0) * 1000, models
+        except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+            return False, 0.0, []
 
     def refresh_models(self):
-        online, _, models = self.check_server_health()
-        if online and models:
-            self.available_models = models
-            if self.active_model not in self.available_models and self.available_models:
-                # Seleziona LFM se disponibile, altrimenti il primo
-                preferred = next((m for m in self.available_models if "LFM" in m), self.available_models[0])
-                self.active_model = preferred
+        try:
+            self.presets = load_ini_presets(self.ini_path)
+        except (OSError, UnicodeError) as exc:
+            self.console.print(Text(f"Preset non leggibili: {exc}", style="yellow"))
+            self.presets = {}
+        health = self.check_server_health()
+        online, _, models = health
+        self.available_models = models if online else []
+        if models and self.active_model not in models:
+            self.active_model = next((m for m in models if "LFM" in m), models[0])
+        return health
 
     def get_model_info(self, model_id: str) -> Dict[str, str]:
-        """Restituisce le informazioni hardware del modello da hexagon-models.ini"""
-        info = {
-            "device": "HTP0",
-            "split": "100%",
-            "ctx": "65536",
-            "strategy": "Accelerazione Hardware Snapdragon",
-        }
-        if model_id in self.presets:
-            p = self.presets[model_id]
-            dev = p.get("device", "HTP0")
-            ts = p.get("tensor-split")
-            info["device"] = dev
-            info["split"] = f"{ts}" if ts else "100%"
-            info["ctx"] = p.get("ctx-size", "65536")
-
-            if "GPU" in dev:
-                if ts == "80,20":
-                    info["strategy"] = "Ibrido NPU 80% + GPU 20% (Banda RAM sbloccata)"
-                elif ts == "75,25":
-                    info["strategy"] = "Ibrido NPU 75% + GPU 25% (No saturazione DMA)"
-                elif ts == "50,50":
-                    info["strategy"] = "Ibrido Bilanciato 50/50 NPU/GPU"
-                else:
-                    info["strategy"] = f"Ibrido {ts} NPU/GPU"
-            else:
-                info["strategy"] = "Pure NPU Hexagon v81 (100% On-Die SIMD)"
-
-        return info
+        """Riporta il preset dichiarato; non misura l'offload effettivo."""
+        preset = self.presets.get(model_id, {})
+        try:
+            context = max(0, int(preset.get("ctx-size", "0")))
+        except ValueError:
+            context = 0
+        device = preset.get("device", "N/D")
+        split = preset.get("tensor-split", "N/D")
+        return {"device": device, "split": split, "ctx": str(context),
+                "strategy": "Preset locale" if preset else "Preset non disponibile"}
 
     # -----------------------------------------------------------------------
     # Rendering Header OpenClaw
     # -----------------------------------------------------------------------
-    def print_banner(self):
-        online, latency, _ = self.check_server_health()
-        m_info = self.get_model_info(self.active_model)
-        tot_ram, used_ram, ram_pct = get_system_ram()
 
-        ctx_limit = int(m_info["ctx"])
-        ctx_used = self.estimate_context_tokens()
-        ctx_pct = min(100.0, (ctx_used / max(1, ctx_limit)) * 100)
-
-        # Barra di riempimento contesto in stile OpenClaw
-        bar_len = 16
-        filled = int((ctx_pct / 100.0) * bar_len)
-        bar_str = "█" * filled + "░" * (bar_len - filled)
-
-        status_badge = (
-            f"[bold green]● ONLINE[/bold green] ({latency:.1f}ms)"
-            if online
-            else "[bold red]● OFFLINE[/bold red]"
-        )
-
-        device_badge = (
-            f"[bold cyan]{m_info['device']}[/bold cyan] [yellow][{m_info['split']}][/yellow]"
-        )
-
-        header_text = (
-            f"[bold white]🐉 HEXAGON CLAW TUI[/bold white] │ "
-            f"[bold magenta]Snapdragon X2 Elite Extreme (X2E94100)[/bold magenta] │ "
-            f"NPU: [cyan]HTP0[/cyan] │ GPU: [blue]Adreno OpenCL[/blue]\n"
-            f"Server: {status_badge}  │  "
-            f"Modello: [bold green]{self.active_model}[/bold green]  │  "
-            f"Offload: {device_badge}\n"
-            f"Contesto: [cyan][{bar_str}][/cyan] {ctx_used:,} / {ctx_limit:,} tok ({ctx_pct:.1f}%)  │  "
-            f"RAM: [yellow]{used_ram:.1f}/{tot_ram:.1f} GB[/yellow] ({ram_pct}%)  │  "
-            f"Speed: [bold yellow]{self.last_gen_speed:.1f} t/s[/bold yellow]"
-        )
-
-        self.console.print(
-            Panel(
-                header_text,
-                border_style="cyan",
-                padding=(0, 1),
-                subtitle="[dim]Digita /help per i comandi  │  Ctrl+C cancella generazione  │  /exit per uscire[/dim]",
-                subtitle_align="right",
-            )
-        )
+    def print_banner(self, health=None):
+        online, latency, _ = health if health is not None else self.check_server_health()
+        info = self.get_model_info(self.active_model)
+        limit = int(info["ctx"])
+        used = self.estimate_context_tokens()
+        context = f"~{used:,} / {limit:,} token" if limit else f"~{used:,} token / limite N/D"
+        header = Text("🐉 HEXAGON CLAW TUI", style="bold cyan")
+        header.append(" │ Target: Snapdragon X2 Elite Extreme\n")
+        header.append(f"Server: {'ONLINE' if online else 'OFFLINE'}", style="green" if online else "red")
+        if online:
+            header.append(f" ({latency:.1f} ms)")
+        header.append(f" │ Modello: {self.active_model}\n")
+        header.append(f"Preset dichiarato: {info['device']} │ tensor-split: {info['split']}\n")
+        header.append(f"Contesto stimato: {context} │ RAM: {ram_label()} │ Speed: {speed_label(self.last_gen_speed)}")
+        self.console.print(Panel(header, border_style="cyan", padding=(0, 1),
+                                 subtitle="/help comandi │ Ctrl+C interrompe │ /exit esce"))
 
     def estimate_context_tokens(self) -> int:
         """Stima approssimativa dei token correnti nella cronologia"""
@@ -352,141 +405,94 @@ class HexagonClawTUI:
     # -----------------------------------------------------------------------
     # Streaming Inferenziale con Parsing Ragionamento OpenClaw
     # -----------------------------------------------------------------------
+    def _chat_events(self, body):
+        body = {**body, "stream": True, "stream_options": {"include_usage": True}}
+        with self.http.stream("POST", f"{self.base_url}/chat/completions", json=body) as response:
+            if response.status_code != 200:
+                detail = response.read().decode("utf-8", errors="replace")
+                raise ValueError(f"HTTP {response.status_code}: {detail}")
+            finished = False
+            for event in iter_sse_events(response.iter_lines()):
+                if event is None:
+                    finished = True
+                    continue
+                if event.get("error"):
+                    raise ValueError(str(event["error"]))
+                choices = event.get("choices") or []
+                if choices and choices[0].get("finish_reason") is not None:
+                    finished = True
+                yield event
+            if not finished:
+                raise ValueError("Stream terminato senza conferma di completamento")
+
     def stream_chat(self, user_prompt: str):
-        online, _, _ = self.check_server_health()
-        if not online:
-            self.console.print(
-                "\n[bold red]❌ Errore:[/bold red] Il server llama-server su "
-                f"[yellow]{self.base_url}[/yellow] non risponde.\n"
-                "Avvialo con [cyan]/server start[/cyan] oppure esegui [cyan].\\llama-server-all.bat[/cyan].\n"
-            )
-            return
-
-        # Aggiungi messaggio utente alla cronologia
-        self.messages.append({"role": "user", "content": user_prompt})
-
-        # Costruisci payload OpenAI compatibile
-        payload_messages = [{"role": "system", "content": self.system_prompt}]
-        payload_messages.extend(self.messages)
-
-        req_body = {
+        user_message = {"role": "user", "content": user_prompt}
+        body = {
             "model": self.active_model,
-            "messages": payload_messages,
-            "temperature": self.temperature,
-            "stream": True,
+            "messages": [{"role": "system", "content": self.system_prompt}, *self.messages, user_message],
+            "temperature": self.temperature, "max_tokens": self.max_tokens,
         }
-
         self.console.print()
-        self.console.print(Rule(f"[bold cyan]🐉 {self.active_model}[/bold cyan]", style="dim"))
+        self.console.print(Rule(Text(f"🐉 {self.active_model}", style="bold cyan"), style="dim"))
+        answer_parts = []
+        reasoning = ReasoningFilter()
+        timings, usage = {}, {}
+        finish_reason = None
+        display_thinking = False
+        t0 = time.perf_counter()
 
-        assistant_full_text = ""
-        think_text = ""
-        in_think_block = False
-        t_start = time.time()
-        token_count = 0
+        def display(thinking, piece):
+            nonlocal display_thinking
+            if thinking != display_thinking:
+                self.console.print("\n🧠 Ragionamento:" if thinking else "\nRisposta:", style="dim")
+                display_thinking = thinking
+            self.console.print(Text(piece, style="dim italic" if thinking else ""), end="", soft_wrap=True)
+            if not thinking:
+                answer_parts.append(piece)
 
         try:
-            with httpx.Client(timeout=180.0) as client:
-                with client.stream(
-                    "POST",
-                    f"{self.base_url}/chat/completions",
-                    json=req_body,
-                    headers={"Content-Type": "application/json"},
-                ) as response:
-                    if response.status_code != 200:
-                        err_body = response.read().decode("utf-8", errors="ignore")
-                        self.console.print(f"[bold red]Errore dal server ({response.status_code}):[/bold red] {err_body}")
-                        self.messages.pop()  # Rimuovi messaggio non risposto
-                        return
-
-                    server_timings = None
-                    # Streaming attivo
-                    for chunk_line in response.iter_lines():
-                        if not chunk_line:
-                            continue
-                        if chunk_line.startswith("data: "):
-                            data_str = chunk_line[6:].strip()
-                            if data_str == "[DONE]":
-                                break
-                            try:
-                                chunk_json = json.loads(data_str)
-                                if "timings" in chunk_json:
-                                    server_timings = chunk_json["timings"]
-
-                                choices = chunk_json.get("choices", [])
-                                if not choices:
-                                    continue
-                                delta = choices[0].get("delta", {})
-                                content_piece = delta.get("content") or ""
-                                reasoning_piece = delta.get("reasoning_content") or ""
-
-                                if reasoning_piece:
-                                    token_count += 1
-                                    assistant_full_text += reasoning_piece
-                                    if not in_think_block:
-                                        in_think_block = True
-                                        self.console.print("\n[dim italic]🧠 Pensiero (Reasoning):[/dim italic]")
-                                    # Stampa il pensiero in grigio sfumato
-                                    sys.stdout.write(f"\033[90m{reasoning_piece}\033[0m")
-                                    sys.stdout.flush()
-
-                                elif content_piece:
-                                    token_count += 1
-                                    assistant_full_text += content_piece
-                                    if in_think_block:
-                                        in_think_block = False
-                                        self.console.print("\n")
-
-                                    # Rilevamento tag inline <think> per modelli che non usano reasoning_content
-                                    if "<think>" in assistant_full_text and not in_think_block and "</think>" not in assistant_full_text:
-                                        in_think_block = True
-                                        self.console.print("[dim italic]🧠 Pensiero (Deep Thought)...[/dim italic]")
-
-                                    # Stampa diretta in streaming
-                                    sys.stdout.write(content_piece)
-                                    sys.stdout.flush()
-
-                            except json.JSONDecodeError:
-                                pass
-
+            for event in self._chat_events(body):
+                timings.update(event.get("timings") or {})
+                usage.update(event.get("usage") or {})
+                choices = event.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                finish_reason = choices[0].get("finish_reason") or finish_reason
+                # Entrambi i campi possono essere presenti nello stesso evento.
+                if delta.get("reasoning_content"):
+                    display(True, delta["reasoning_content"])
+                for thinking, piece in reasoning.feed(delta.get("content") or ""):
+                    display(thinking, piece)
+            for thinking, piece in reasoning.flush():
+                display(thinking, piece)
         except KeyboardInterrupt:
-            self.console.print("\n[yellow]⚠️ Generazione interrotta dall'utente.[/yellow]")
-        except Exception as e:
-            self.console.print(f"\n[bold red]❌ Errore durante lo streaming:[/bold red] {e}")
-            self.messages.pop()
+            self.console.print("\n[yellow]Generazione interrotta; turno non salvato.[/yellow]")
+            return
+        except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            self.console.print(Text(f"\nErrore durante lo streaming: {exc}", style="red"))
             return
 
-        t_elapsed = time.time() - t_start
-
-        if server_timings:
-            speed = server_timings.get("predicted_per_second", (token_count / t_elapsed) if t_elapsed > 0 else 0.0)
-            token_count = server_timings.get("predicted_n", token_count)
-            t_elapsed = (server_timings.get("predicted_ms", 0.0) / 1000.0) or t_elapsed
-        else:
-            speed = (token_count / t_elapsed) if t_elapsed > 0 else 0.0
-
+        elapsed = time.perf_counter() - t0
+        tokens, speed, seconds = generation_metrics(timings, usage)
         self.last_gen_speed = speed
-        self.last_gen_tokens = token_count
-        self.last_gen_time = t_elapsed
-        self.total_tokens_session += token_count
-
-        # Aggiungi risposta finale alla cronologia
-        self.messages.append({"role": "assistant", "content": assistant_full_text})
-
-        # Footer prestazionale OpenClaw
-        m_info = self.get_model_info(self.active_model)
-        self.console.print()
-        footer_badge = (
-            f"[dim]⚡ [bold yellow]{speed:.1f} t/s[/bold yellow] │ "
-            f"{token_count} token in {t_elapsed:.2f}s │ "
-            f"Offload: {m_info['device']} ({m_info['split']})[/dim]"
-        )
-        self.console.print(footer_badge)
-        self.console.print()
+        self.last_gen_tokens = tokens
+        self.last_gen_time = seconds
+        self.total_tokens_session += tokens or 0
+        answer = "".join(answer_parts)
+        if answer:
+            self.messages.extend([user_message, {"role": "assistant", "content": answer}])
+        else:
+            self.console.print("\n[yellow]Nessuna risposta finale ricevuta; turno non salvato.[/yellow]")
+        if finish_reason == "length":
+            self.console.print("\n[yellow]Raggiunto il limite di generazione.[/yellow]")
+        self.console.print(Text(f"\n⚡ {speed_label(speed)} │ token: {tokens if tokens is not None else 'N/D'} "
+                                f"│ tempo totale: {elapsed:.2f}s\n", style="dim"))
 
     # -----------------------------------------------------------------------
     # Gestione Comandi Slash
     # -----------------------------------------------------------------------
+
     def handle_slash_command(self, cmd_line: str) -> bool:
         """Restituisce False se il comando richiede l'uscita dalla TUI, True altrimenti"""
         parts = cmd_line.strip().split(" ", 1)
@@ -517,9 +523,9 @@ class HexagonClawTUI:
             if args:
                 self.system_prompt = args
                 self.console.print("[green]✓ System prompt aggiornato:[/green]")
-                self.console.print(Panel(self.system_prompt, border_style="green"))
+                self.console.print(Panel(Text(self.system_prompt), border_style="green"))
             else:
-                self.console.print(Panel(self.system_prompt, title="System Prompt Attuale", border_style="cyan"))
+                self.console.print(Panel(Text(self.system_prompt), title="System Prompt Attuale", border_style="cyan"))
 
         elif cmd == "/temp":
             if args:
@@ -548,7 +554,7 @@ class HexagonClawTUI:
             self.handle_stack_command(args)
 
         else:
-            self.console.print(f"[red]Comando sconosciuto: {cmd}. Digita [bold]/help[/bold] per la lista comandi.[/red]")
+            self.console.print(Text(f"Comando sconosciuto: {cmd}. Digita /help per la lista comandi.", style="red"))
 
         return True
 
@@ -561,14 +567,14 @@ class HexagonClawTUI:
         t.add_row("/help", "", "Mostra questa guida ai comandi")
         t.add_row("/models", "", "Elenca tutti i modelli GGUF disponibili sul router con dettagli hardware")
         t.add_row("/model", "<nome>", "Seleziona e cambia istantaneamente il modello attivo")
-        t.add_row("/status", "", "Dashboard telemetria SoC Snapdragon (NPU HTP0, GPU Adreno, RAM)")
-        t.add_row("/stack", "[status|check|sync|update-*]", "Verifica e aggiorna lo stack software (GenieX, llama.cpp, DSP NPU)")
+        t.add_row("/status", "", "Stato server, RAM misurata e preset dichiarato")
+        t.add_row("/stack", "status | check", "Inventario runtime e release pubblicate, in sola lettura")
         t.add_row("/bench", "[n_tokens]", "Esegue un benchmark sintetico e misura prefill/generation t/s")
         t.add_row("/clear, /new", "", "Azzera la cronologia messaggi e riparte da zero")
         t.add_row("/system", "[nuovo prompt]", "Visualizza o ridefinisce il system prompt dell'assistente")
         t.add_row("/temp", "<0.0 - 2.0>", "Modifica la temperatura di campionamento (default: 0.7)")
         t.add_row("/tokens", "", "Stima il consumo di token corrente e l'impegno della KV cache")
-        t.add_row("/server", "status|start|stop", "Controlla lo stato o avvia llama-server in background")
+        t.add_row("/server", "status|start|stop|restart", "Controlla il router; stop arresta tutti i llama-server locali")
         t.add_row("/exit, /quit", "", "Termina la TUI ed esce al terminale")
 
         self.console.print(t)
@@ -578,18 +584,17 @@ class HexagonClawTUI:
         t = Table(title="Modelli Disponibili nel Router Hexagon", border_style="cyan", header_style="bold magenta")
         t.add_column("ID Modello", style="bold green")
         t.add_column("Device", style="cyan")
-        t.add_column("Split NPU/GPU", style="yellow")
-        t.add_column("Max Ctx", style="magenta")
-        t.add_column("Strategia Hardware", style="white")
+        t.add_column("Tensor-split dichiarato", style="yellow")
+        t.add_column("Ctx dichiarato", style="magenta")
+        t.add_column("Fonte", style="white")
 
         for m in self.get_available_model_ids():
             info = self.get_model_info(m)
-            marker = " [bold green]★ ATTIVO[/bold green]" if m == self.active_model else ""
             t.add_row(
-                f"{m}{marker}",
-                info["device"],
-                info["split"],
-                f"{int(info['ctx']) // 1024}k",
+                Text(m + (" ★ ATTIVO" if m == self.active_model else "")),
+                Text(info["device"]),
+                Text(info["split"]),
+                info['ctx'] if int(info['ctx']) else "N/D",
                 info["strategy"],
             )
 
@@ -598,301 +603,175 @@ class HexagonClawTUI:
 
     def switch_model(self, model_query: str):
         self.refresh_models()
-        candidates = [m for m in self.get_available_model_ids() if model_query.lower() in m.lower()]
+        models = self.get_available_model_ids()
+        exact = [m for m in models if model_query.casefold() == m.casefold()]
+        candidates = exact or [m for m in models if model_query.casefold() in m.casefold()]
 
         if not candidates:
-            self.console.print(f"[red]Nessun modello trovato corrispondente a '{model_query}'. Usa /models per l'elenco.[/red]")
+            self.console.print(Text(f"Nessun modello trovato per '{model_query}'. Usa /models per l'elenco.", style="red"))
             return
 
-        if len(candidates) > 1 and model_query not in candidates:
-            self.console.print(f"[yellow]Modello ambiguo. Candidati trovati:[/yellow]")
+        if len(candidates) > 1:
+            self.console.print("[yellow]Modello ambiguo. Candidati trovati:[/yellow]")
             for c in candidates:
-                self.console.print(f"  • {c}")
+                self.console.print(Text(f"  • {c}"))
             return
 
-        chosen = candidates[0] if model_query not in candidates else model_query
+        chosen = candidates[0]
         self.active_model = chosen
         info = self.get_model_info(chosen)
-        self.console.print(f"[bold green]✓ Modello attivo cambiato in:[/bold green] [bold cyan]{chosen}[/bold cyan]")
-        self.console.print(f"  • Backend: [cyan]{info['device']}[/cyan] ({info['split']})")
-        self.console.print(f"  • Contesto massimo: [magenta]{int(info['ctx']) // 1024}k token[/magenta]")
-        self.console.print(f"  • Strategia: [white]{info['strategy']}[/white]\n")
+        self.console.print(Text(f"✓ Modello attivo: {chosen}", style="bold green"))
+        self.console.print(Text(f"  Preset: {info['device']}; tensor-split: {info['split']}; "
+                                f"contesto: {info['ctx'] if int(info['ctx']) else 'N/D'}"))
 
     def show_status_dashboard(self):
         online, latency, _ = self.check_server_health()
-        tot_ram, used_ram, ram_pct = get_system_ram()
-        m_info = self.get_model_info(self.active_model)
-
-        t = Table(title="🐉 Dashboard Telemetria Hardware Snapdragon X2 Elite", border_style="cyan")
-        t.add_column("Parametro", style="bold cyan", width=24)
-        t.add_column("Valore", style="white")
-
-        t.add_row("Piattaforma SoC", "Qualcomm Snapdragon X2 Elite Extreme (X2E94100)")
-        t.add_row("CPU Oryon", "18 Core (12 dedicati a LLM, 6 riservati a Windows/IDE)")
-        t.add_row("NPU Hexagon", "Hexagon v81 HTP0 (DMA64, VTCM 8M, OpBatch 512)")
-        t.add_row("GPU Adreno", "Adreno X2-90 OpenCL (GPUOpenCL)")
-        t.add_row("Memoria Fisica RAM", f"{used_ram:.1f} / {tot_ram:.1f} GB ({ram_pct}%) LPDDR5X")
-        t.add_row("Server Router URL", f"{self.base_url}")
-        t.add_row("Stato Connessione", "[bold green]ONLINE[/bold green]" if online else "[bold red]OFFLINE[/bold red]")
-        t.add_row("Latenza Ping Router", f"{latency:.2f} ms" if online else "N/A")
-        t.add_row("Modello Corrente", f"[bold green]{self.active_model}[/bold green]")
-        t.add_row("Accelerazione Selezionata", f"{m_info['device']} [ts {m_info['split']}]")
-        t.add_row("Finestra di Contesto", f"{int(m_info['ctx']):,} token ({int(m_info['ctx']) // 1024}k)")
-        t.add_row("Token Sessione Totali", f"{self.total_tokens_session:,}")
-        t.add_row("Velocità Ultimo Run", f"[bold yellow]{self.last_gen_speed:.1f} t/s[/bold yellow]")
-
-        self.console.print(t)
+        info = self.get_model_info(self.active_model)
+        table = Table(title="🐉 Stato TUI / server", border_style="cyan")
+        table.add_column("Parametro", style="bold cyan")
+        table.add_column("Valore")
+        table.add_row("Piattaforma target", "Snapdragon X2 Elite Extreme (X2E94100)")
+        table.add_row("CPU logiche rilevate", str(os.cpu_count() or "N/D"))
+        table.add_row("RAM misurata", ram_label())
+        table.add_row("Server URL", Text(self.base_url))
+        table.add_row("Connessione", "ONLINE" if online else "OFFLINE")
+        table.add_row("Latenza HTTP router", f"{latency:.2f} ms" if online else "N/D")
+        table.add_row("Modello", Text(self.active_model))
+        table.add_row("Device nel preset", Text(info["device"]))
+        table.add_row("Tensor-split nel preset", Text(info["split"]))
+        table.add_row("Contesto nel preset", info["ctx"] if int(info["ctx"]) else "N/D")
+        table.add_row("Token generati misurati nella sessione", str(self.total_tokens_session))
+        table.add_row("Velocità ultimo run (server)", speed_label(self.last_gen_speed))
+        self.console.print(table)
 
     def show_tokens_info(self):
-        ctx_used = self.estimate_context_tokens()
-        m_info = self.get_model_info(self.active_model)
-        ctx_limit = int(m_info["ctx"])
-        pct = (ctx_used / max(1, ctx_limit)) * 100
-
-        t = Table(title="Utilizzo Token e Cache", border_style="cyan")
-        t.add_column("Metrica", style="bold cyan")
-        t.add_column("Valore", style="white")
-
-        t.add_row("Messaggi nella Cronologia", str(len(self.messages)))
-        t.add_row("Token Stimati Attivi", f"{ctx_used:,} token")
-        t.add_row("Finestra Massima Modello", f"{ctx_limit:,} token")
-        t.add_row("Percentuale di Riempimento", f"{pct:.2f}%")
-        t.add_row("Limite FastRPC Buffer", "Rispettato (< 1 GiB per descrittore)")
-
-        self.console.print(t)
+        used = self.estimate_context_tokens()
+        limit = int(self.get_model_info(self.active_model)["ctx"])
+        table = Table(title="Contesto stimato", border_style="cyan")
+        table.add_column("Metrica", style="bold cyan")
+        table.add_column("Valore")
+        table.add_row("Messaggi nella cronologia", str(len(self.messages)))
+        table.add_row("Token attivi stimati (caratteri / 3.6)", f"~{used:,}")
+        table.add_row("Limite dichiarato nel preset", f"{limit:,}" if limit else "N/D")
+        table.add_row("Riempimento stimato", f"{100 * used / limit:.2f}%" if limit else "N/D")
+        self.console.print(table)
 
     def run_benchmark(self, args_str: str):
-        max_tokens = 100
-        if args_str:
-            try:
-                max_tokens = int(args_str)
-            except ValueError:
-                pass
-
-        online, _, _ = self.check_server_health()
-        if not online:
-            self.console.print("[red]Server non in linea. Impossibile eseguire il benchmark.[/red]")
+        try:
+            max_tokens = int(args_str) if args_str else 100
+            if max_tokens <= 0:
+                raise ValueError
+        except ValueError:
+            self.console.print("[red]Uso: /bench <numero intero positivo di token>[/red]")
             return
-
-        self.console.print(f"\n[cyan]Avvio benchmark sintetico su [bold]{self.active_model}[/bold] ({max_tokens} token richiesti)...[/cyan]")
-
-        prompt = (
-            "Spiega brevemente il principio di funzionamento del meccanismo di Attention "
-            "nei Transformer e come le Mixture of Experts (MoE) ottimizzano il throughput."
-        )
-
-        req_body = {
-            "model": self.active_model,
+        body = {
+            "model": self.active_model, "max_tokens": max_tokens, "temperature": 0.0,
             "messages": [
                 {"role": "system", "content": "Sei un assistente per benchmark prestazionali."},
-                {"role": "user", "content": prompt},
+                {"role": "user", "content": "Spiega brevemente il meccanismo di Attention nei Transformer."},
             ],
-            "max_tokens": max_tokens,
-            "temperature": 0.0,
-            "stream": True,
         }
-
-        t0 = time.time()
-        first_token_time = None
-        n_tokens = 0
-
+        self.console.print(Text(f"Benchmark su {self.active_model}: massimo {max_tokens} token"))
+        t0 = time.perf_counter()
+        first_piece = None
+        timings, usage = {}, {}
         try:
-            with httpx.Client(timeout=120.0) as client:
-                with client.stream(
-                    "POST",
-                    f"{self.base_url}/chat/completions",
-                    json=req_body,
-                ) as resp:
-                    if resp.status_code != 200:
-                        err_body = resp.read().decode("utf-8", errors="ignore")
-                        self.console.print(f"[bold red]Errore dal server ({resp.status_code}):[/bold red] {err_body}")
-                        return
-
-                    server_timings = None
-                    for line in resp.iter_lines():
-                        if line.startswith("data: "):
-                            d = line[6:].strip()
-                            if d == "[DONE]":
-                                break
-                            try:
-                                j = json.loads(d)
-                                if "timings" in j:
-                                    server_timings = j["timings"]
-
-                                choices = j.get("choices", [])
-                                if choices:
-                                    delta = choices[0].get("delta", {})
-                                    piece = (delta.get("content") or "") + (delta.get("reasoning_content") or "")
-                                    if piece:
-                                        if first_token_time is None:
-                                            first_token_time = time.time()
-                                        n_tokens += 1
-                                        sys.stdout.write("▓")
-                                        sys.stdout.flush()
-                            except Exception:
-                                pass
-
-            t_end = time.time()
-            sys.stdout.write("\n")
-
-            if server_timings:
-                ttft = server_timings.get("prompt_ms", (first_token_time - t0) * 1000 if first_token_time else 0.0)
-                gen_speed = server_timings.get("predicted_per_second", 0.0)
-                n_tokens = server_timings.get("predicted_n", n_tokens)
-                gen_time = (server_timings.get("predicted_ms", 0.0) / 1000.0) or (t_end - (first_token_time or t0))
-                prefill_speed = server_timings.get("prompt_per_second", 0.0)
-            else:
-                ttft = (first_token_time - t0) * 1000 if first_token_time else 0.0
-                gen_time = t_end - (first_token_time or t0)
-                gen_speed = (n_tokens / gen_time) if gen_time > 0 else 0.0
-                prefill_speed = 0.0
-
-            tot_speed = (n_tokens / (t_end - t0)) if (t_end - t0) > 0 else 0.0
-
-            m_info = self.get_model_info(self.active_model)
-            t = Table(title=f"🐉 Risultati Benchmark: {self.active_model}", border_style="green")
-            t.add_column("Parametro", style="bold cyan")
-            t.add_column("Misura", style="bold yellow")
-
-            t.add_row("Hardware Accelerators", f"{m_info['device']} ({m_info['split']})")
-            t.add_row("Time To First Token (TTFT)", f"{ttft:.2f} ms")
-            if prefill_speed > 0:
-                t.add_row("Throughput di Prefill", f"{prefill_speed:.2f} tokens/sec")
-            t.add_row("Token Generati", f"{n_tokens} token")
-            t.add_row("Tempo di Generazione", f"{gen_time:.2f} s")
-            t.add_row("Throughput di Generazione", f"[bold green]{gen_speed:.2f} tokens/sec[/bold green]")
-            t.add_row("Throughput End-to-End", f"{tot_speed:.2f} tokens/sec")
-
-            self.console.print(t)
-
-        except Exception as e:
-            self.console.print(f"[red]Benchmark fallito:[/red] {e}")
+            for event in self._chat_events(body):
+                timings.update(event.get("timings") or {})
+                usage.update(event.get("usage") or {})
+                choices = event.get("choices") or []
+                if choices:
+                    delta = choices[0].get("delta") or {}
+                    if delta.get("content") or delta.get("reasoning_content"):
+                        if first_piece is None:
+                            first_piece = time.perf_counter()
+            elapsed = time.perf_counter() - t0
+        except KeyboardInterrupt:
+            self.console.print("[yellow]Benchmark interrotto.[/yellow]")
+            return
+        except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            self.console.print(Text(f"Benchmark fallito: {exc}", style="red"))
+            return
+        tokens, speed, seconds = generation_metrics(timings, usage)
+        ttft = (first_piece - t0) * 1000 if first_piece is not None else None
+        table = Table(title=Text(f"🐉 Benchmark: {self.active_model}"), border_style="green")
+        table.add_column("Parametro")
+        table.add_column("Misura")
+        table.add_row("TTFT osservato dal client", f"{ttft:.2f} ms" if ttft is not None else "N/D")
+        prompt_ms = measured_number(timings.get("prompt_ms"))
+        if prompt_ms is not None:
+            table.add_row("Tempo prefill (server)", f"{prompt_ms:.2f} ms")
+        prefill = measured_number(timings.get("prompt_per_second"))
+        if prefill is not None:
+            table.add_row("Throughput prefill (server)", f"{prefill:.2f} t/s")
+        table.add_row("Token generati (server)", str(tokens) if tokens is not None else "N/D")
+        table.add_row("Tempo generazione (server)", f"{seconds:.2f} s" if seconds is not None else "N/D")
+        table.add_row("Throughput generazione (server)", speed_label(speed))
+        table.add_row("Tempo totale client", f"{elapsed:.2f} s")
+        table.add_row("Throughput end-to-end", speed_label(tokens / elapsed) if tokens is not None and elapsed > 0 else "N/D")
+        self.console.print(table)
 
     def handle_server_command(self, action: str):
-        action = action.lower() if action else "status"
-
+        action = action.strip().lower() if action else "status"
         if action == "status":
-            online, lat, models = self.check_server_health()
-            if online:
-                self.console.print(f"[green]✓ Server llama-server attivo su {self.base_url}[/green] (Ping: {lat:.1f}ms)")
-                self.console.print(f"Modelli registrati: [cyan]{len(models)}[/cyan]")
-            else:
-                self.console.print(f"[red]✗ Server offline su {self.base_url}[/red]")
-
-        elif action == "start":
-            online, _, _ = self.check_server_health()
-            if online:
-                self.console.print("[yellow]Il server è già attivo.[/yellow]")
+            online, latency, models = self.check_server_health()
+            self.console.print(Text(f"{'ONLINE' if online else 'OFFLINE'}: {self.base_url}; "
+                                    f"latenza {latency:.1f} ms; modelli {len(models)}"))
+            return
+        if action not in ("start", "stop", "restart"):
+            self.console.print("Uso: /server [status | start | stop | restart]")
+            return
+        # Il controllo processi locale non può amministrare un endpoint remoto.
+        url = urlsplit(self.base_url)
+        if url.scheme != "http" or url.hostname not in ("127.0.0.1", "localhost") or sys.platform != "win32":
+            self.console.print("[yellow]Controllo processi disponibile per endpoint Windows locali.[/yellow]")
+            return
+        if action in ("stop", "restart"):
+            if not self.stack_mgr.stop_server():
+                self.console.print("[red]Arresto dei processi llama-server non confermato.[/red]")
                 return
-
-            self.console.print("[cyan]Avvio server Router Hexagon in background...[/cyan]")
-            bat_path = self.workspace_dir / "llama-server-all.bat"
-            if bat_path.exists():
-                subprocess.Popen(
-                    ["cmd.exe", "/c", str(bat_path)],
-                    creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0,
-                )
-                self.console.print("[green]Processo lanciato. Attesa disponibilità endpoint (5s)...[/green]")
-                for _ in range(10):
-                    time.sleep(1)
-                    on, _, _ = self.check_server_health()
-                    if on:
-                        self.console.print("[bold green]✓ Server pronto e operativo![/bold green]")
-                        self.refresh_models()
-                        return
-                self.console.print("[yellow]Il server si sta avviando, riprova tra qualche istante.[/yellow]")
-            else:
-                self.console.print(f"[red]File {bat_path} non trovato.[/red]")
-
-        elif action == "stop":
-            self.console.print("[cyan]Terminazione di tutti i processi llama-server in corso...[/cyan]")
-            if sys.platform == "win32":
-                subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Process -Name llama-server -ErrorAction SilentlyContinue | Stop-Process -Force"])
-            self.console.print("[green]✓ Processi interrotti.[/green]")
-
-        else:
-            self.console.print("Uso: [cyan]/server [status | start | stop][/cyan]")
+            self.console.print("[green]Processi llama-server locali arrestati.[/green]")
+            if action == "stop":
+                return
+        if self.check_server_health()[0]:
+            self.console.print("[yellow]Endpoint già attivo.[/yellow]")
+            return
+        if not self.stack_mgr.start_server_router(port=url.port or (443 if url.scheme == "https" else 80)):
+            self.console.print("[red]Impossibile avviare launch-hexagon.ps1 dal workspace.[/red]")
+            return
+        self.console.print("[cyan]Avvio Router; attesa endpoint fino a 10 secondi...[/cyan]")
+        for _ in range(10):
+            time.sleep(1)
+            if self.check_server_health()[0]:
+                self.refresh_models()
+                self.console.print("[green]Server pronto.[/green]")
+                return
+        self.console.print("[yellow]Endpoint non ancora disponibile; verificare la console del server.[/yellow]")
 
     def handle_stack_command(self, args_str: str):
         sub = args_str.strip().lower() if args_str else "status"
-
         if sub in ("status", "verify", "v"):
             self.stack_mgr.render_stack_dashboard(self.console)
-
         elif sub in ("check", "updates", "up"):
             self.stack_mgr.render_updates_dashboard(self.console)
-
-        elif sub in ("sync", "sincronizza"):
-            self.console.print("\n[cyan]Sincronizzazione runtime GenieX -> llama-bin in corso...[/cyan]")
-            ok, msg, files = self.stack_mgr.sync_runtime_from_geniex(auto_stop_server=True)
-            if ok:
-                self.console.print(f"[bold green]✓ Sincronizzazione completata:[/bold green]\n{msg}\n")
-            else:
-                self.console.print(f"[bold red]✗ Sincronizzazione fallita:[/bold red]\n{msg}\n")
-
-        elif sub in ("update-geniex", "geniex"):
-            self.console.print("\n[cyan]Esecuzione aggiornamento ufficiale GenieX CLI ('geniex update')...[/cyan]")
-            ok, msg = self.stack_mgr.update_geniex_cli()
-            if ok:
-                self.console.print(f"[bold green]✓ {msg}[/bold green]\n")
-            else:
-                self.console.print(f"[bold red]✗ {msg}[/bold red]\n")
-
-        elif sub in ("update-llama", "llama", "update-llamacpp"):
-            self.console.print("\n[cyan]Controllo disponibilità archivio Windows ARM64 per llama.cpp...[/cyan]")
-            updates = self.stack_mgr.check_updates()
-            if not updates.get("arm64_asset_url"):
-                self.console.print("[yellow]Nessun archivio binario Windows ARM64 disponibile per l'aggiornamento automatico.[/yellow]")
-                return
-
-            tag = updates.get("latest_llamacpp_build", "")
-            self.console.print(
-                f"[bold yellow]⚠️ Attenzione:[/bold yellow] Verranno aggiornati solo gli eseguibili frontend ({tag}).\n"
-                "Gli artefatti DSP Hexagon NPU WHQL (libggml-htp*.so, ggml-hexagon.dll) verranno preservati intatti.\n"
-            )
-            confirm = "y"
-            if self.prompt_session is not None:
-                try:
-                    confirm = self.prompt_session.prompt("Procedere con l'aggiornamento del frontend? [Y/n]: ").strip().lower()
-                except Exception:
-                    confirm = "y"
-            else:
-                self.console.print("Procedere con l'aggiornamento del frontend? [Y/n]: ", end="")
-                confirm = input().strip().lower()
-
-            if confirm in ("", "y", "s", "si", "yes"):
-                self.console.print("\n[cyan]Download ed estrazione sicura del frontend in corso...[/cyan]")
-                ok, msg = self.stack_mgr.update_llamacpp_frontend(auto_stop_server=True)
-                if ok:
-                    self.console.print(f"[bold green]✓ {msg}[/bold green]\n")
-                else:
-                    self.console.print(f"[bold red]✗ {msg}[/bold red]\n")
-            else:
-                self.console.print("[dim]Operazione annullata dall'utente.[/dim]\n")
-
+        elif sub in ("sync", "sincronizza", "update-geniex", "geniex", "update-llama", "llama", "update-llamacpp"):
+            self.console.print(Text(UPDATE_DISABLED, style="yellow"))
         else:
-            self.console.print(
-                "Uso comando [bold cyan]/stack[/bold cyan]:\n"
-                "  • [cyan]/stack status[/cyan]        : Verifica integrità versioni e file runtime\n"
-                "  • [cyan]/stack check[/cyan]         : Controlla aggiornamenti online (GitHub / Qualcomm)\n"
-                "  • [cyan]/stack sync[/cyan]          : Sincronizza e riallinea le DLL da GenieX\n"
-                "  • [cyan]/stack update-geniex[/cyan] : Aggiorna GenieX CLI\n"
-                "  • [cyan]/stack update-llama[/cyan]  : Aggiorna frontend llama.cpp preservando i driver NPU\n"
-            )
+            self.console.print("Uso: /stack [status | check]. Aggiornamenti automatici disabilitati.")
 
     # -----------------------------------------------------------------------
     # Loop Principale Interattivo REPL
     # -----------------------------------------------------------------------
+
     def run(self):
         self.console.clear()
-        self.refresh_models()
-        self.print_banner()
+        health = self.refresh_models()
+        self.print_banner(health)
 
-        online, _, _ = self.check_server_health()
+        online, _, _ = health
         if not online:
             self.console.print(
-                "[yellow]Nota: Server offline su 127.0.0.1:18803. "
-                "Digita [bold cyan]/server start[/bold cyan] per avviarlo automaticamente.[/yellow]\n"
+                Text(f"Server offline su {self.base_url}. /server start avvia il router locale.", style="yellow")
             )
 
         while True:
@@ -901,15 +780,12 @@ class HexagonClawTUI:
                 if self.prompt_session is not None:
                     prompt_text = HTML(
                         f'<ansicyan><b>🐉 hexagon</b></ansicyan> '
-                        f'<ansigreen>[{self.active_model}]</ansigreen> '
+                        f'<ansigreen>[{escape_html(self.active_model)}]</ansigreen> '
                         f'<ansiyellow><b>›</b></ansiyellow> '
                     )
                     user_input = self.prompt_session.prompt(prompt_text).strip()
                 else:
-                    self.console.print(
-                        f"[bold cyan]🐉 hexagon[/bold cyan] [green][{self.active_model}][/green] [bold yellow]›[/bold yellow] ",
-                        end="",
-                    )
+                    self.console.print(Text(f"🐉 hexagon [{self.active_model}] › ", style="cyan"), end="")
                     user_input = input().strip()
 
                 if not user_input:
@@ -942,14 +818,18 @@ def main():
     parser.add_argument("--url", default="http://127.0.0.1:18803/v1", help="URL endpoint OpenAI compatibile")
     parser.add_argument("--model", default=None, help="Modello iniziale da selezionare")
     parser.add_argument("--system", default=None, help="System prompt personalizzato")
+    parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE, help="Directory launcher e preset INI")
+    parser.add_argument("--max-tokens", type=int, default=2048, help="Limite di generazione per risposta (default: 2048)")
     args = parser.parse_args()
-
-    tui = HexagonClawTUI(
-        base_url=args.url,
-        model=args.model,
-        system_prompt=args.system,
-    )
-    tui.run()
+    try:
+        tui = HexagonClawTUI(base_url=args.url, model=args.model, system_prompt=args.system,
+                             workspace_dir=args.workspace, max_tokens=args.max_tokens)
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
+        tui.run()
+    finally:
+        tui.close()
 
 
 if __name__ == "__main__":

@@ -16,8 +16,10 @@ if not exist "%TUI_SCRIPT%" (
 )
 
 python "%TUI_SCRIPT%" %*
+set "TUI_EXIT_CODE=%ERRORLEVEL%"
 
-if %ERRORLEVEL% neq 0 (
+if %TUI_EXIT_CODE% neq 0 (
     echo.
     echo TUI terminata.
 )
+exit /b %TUI_EXIT_CODE%
