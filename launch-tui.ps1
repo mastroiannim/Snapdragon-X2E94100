@@ -7,7 +7,7 @@ param(
     [string]$Url = 'http://127.0.0.1:18803/v1',
     [string]$Model = '',
     [string]$SystemPrompt = '',
-    [string]$Workspace = $PSScriptRoot,
+    [string]$Workspace = '',
     [ValidateRange(1, 2147483647)][int]$MaxTokens = 2048,
     [switch]$FromBatch,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$TuiArguments
@@ -19,7 +19,9 @@ $env:PYTHONIOENCODING = 'utf-8'
 $env:PYTHONUTF8 = '1'
 
 try {
-    $scriptPath = Join-Path $PSScriptRoot 'tui.py'
+    $launcherRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+    if ([string]::IsNullOrWhiteSpace($Workspace)) { $Workspace = $launcherRoot }
+    $scriptPath = Join-Path $launcherRoot 'tui.py'
     if (-not (Test-Path -LiteralPath $scriptPath)) { throw "tui.py non trovato in $PSScriptRoot" }
     # La CLI batch conserva la sintassi Python --url/--model/--workspace.
     if ($FromBatch) {
@@ -34,8 +36,8 @@ try {
         & (Join-Path $Workspace 'sync-geniex.ps1') -Apply
         if ($LASTEXITCODE -ne 0) { throw 'Preparazione automatica runtime fallita.' }
     }
-    Import-Module (Join-Path $PSScriptRoot 'tui-bootstrap.psm1') -Force
-    $python = Resolve-HexagonTuiPython -Requirements (Join-Path $PSScriptRoot 'requirements.txt')
+    Import-Module (Join-Path $launcherRoot 'tui-bootstrap.psm1') -Force
+    $python = Resolve-HexagonTuiPython -Requirements (Join-Path $launcherRoot 'requirements.txt')
     $arguments = @($scriptPath, '--url', $Url, '--workspace', $Workspace, '--max-tokens', $MaxTokens)
     if ($Model) { $arguments += @('--model', $Model) }
     if ($SystemPrompt) { $arguments += @('--system', $SystemPrompt) }
@@ -45,6 +47,6 @@ try {
     & $python @arguments
     exit $LASTEXITCODE
 } catch {
-    Write-Error $_.Exception.Message -ErrorAction Continue
+    Write-Error $_ -ErrorAction Continue
     exit 1
 }

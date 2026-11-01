@@ -52,7 +52,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 python tui.py --help
 ```
 
-Eseguiti localmente su Linux, Python 3.12: **37 test superati**, compilazione Python,
+Eseguiti localmente su Linux, Python 3.12: **38 test superati**, compilazione Python,
 controllo statico `ruff check --select F` e `git diff --check`.
 La suite include una prova HTTP/SSE reale su loopback: due POST sulla stessa connessione
 TCP, cronologia della seconda richiesta senza ragionamento e metriche del server.

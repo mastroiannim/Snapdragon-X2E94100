@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -27,7 +28,6 @@ LOCAL_APPDATA = Path(os.environ.get("LOCALAPPDATA") or USER_PROFILE / "AppData" 
 DEFAULT_GENIEX_DIR = LOCAL_APPDATA / "GenieX CLI"
 DEFAULT_LLAMA_BIN_DIR = USER_PROFILE / "llama-cpp" / "llama-bin-win-cpu-arm64"
 DEFAULT_WORKSPACE = Path(__file__).resolve().parent
-
 
 
 def calculate_sha256(path: Path) -> str:
@@ -51,6 +51,10 @@ class StackManager:
     def __init__(self, geniex_dir: Optional[Path] = None,
                  llama_bin_dir: Optional[Path] = None, workspace_dir: Optional[Path] = None):
         self.geniex_dir = Path(geniex_dir or DEFAULT_GENIEX_DIR)
+        if geniex_dir is None and not (self.geniex_dir / "geniex.exe").is_file():
+            executable = shutil.which("geniex.exe")
+            if executable:
+                self.geniex_dir = Path(executable).parent
         self.geniex_exe = self.geniex_dir / "geniex.exe"
         self.geniex_llama_dir = self.geniex_dir / "llama_cpp"
         self.llama_bin_dir = Path(llama_bin_dir or DEFAULT_LLAMA_BIN_DIR)

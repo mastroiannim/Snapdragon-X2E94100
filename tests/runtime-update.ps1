@@ -190,6 +190,16 @@ try {
     Pass 'exclusive update lock'
 
     $m = Import-Module $modulePath -Force -PassThru
+    $count = & $m {
+        function script:Invoke-RestMethod($Uri, $Headers, $TimeoutSec) {
+            Write-Output -NoEnumerate @([pscustomobject]@{ tag_name = 'b12032' }, [pscustomobject]@{ tag_name = 'b12031' })
+        }
+        @(Get-RuntimeJson 'fixture').Count
+    }
+    Assert-True ($count -eq 2) 'REST array was treated as one release'
+    Pass 'REST JSON arrays are enumerated before release selection'
+
+    $m = Import-Module $modulePath -Force -PassThru
     & $m {
         function script:Get-RuntimeJson([string]$Url) {
             if ($Url -like '*/commits/*') { return @{ sha = '19cce6919992fdffd92e0ac152caaf1e2b8f254e' } }
