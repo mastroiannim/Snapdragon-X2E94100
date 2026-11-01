@@ -558,3 +558,4 @@ Write-Host "Endpoint OpenAI compatibile per Cline: http://127.0.0.1:$Port/v1`n" 
 
 Set-Location -Path $BinPath
 & $ServerExe @cliArgs
+exit $LASTEXITCODE
