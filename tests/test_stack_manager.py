@@ -103,15 +103,37 @@ class StackTests(unittest.TestCase):
         self.assertFalse(result['commit_aligned'])
         self.assertTrue(result['errors'])
 
-    def test_all_mutators_reject_before_io_or_processes(self):
-        with patch('stack_manager.subprocess.run', side_effect=AssertionError('process')), \
-             patch('stack_manager.httpx.Client', side_effect=AssertionError('network')), \
-             patch.object(Path, 'is_file', side_effect=AssertionError('filesystem')), \
-             patch.object(Path, 'mkdir', side_effect=AssertionError('filesystem')):
-            self.assertFalse(self.manager.sync_runtime_from_geniex()[0])
-            self.assertFalse(self.manager.sync_runtime_from_geniex(auto_stop_server=False)[0])
-            self.assertFalse(self.manager.update_llamacpp_frontend('https://example.test/file.zip')[0])
-            self.assertFalse(self.manager.update_geniex_cli()[0])
+    def test_sync_delegates_to_powershell_and_preserves_arguments(self):
+        script = self.root / 'sync-geniex.ps1'
+        script.write_text('# fixture')
+        completed = subprocess.CompletedProcess([], 0, stdout='{"Message":"aligned","Files":["ggml.dll"],"Backup":"previous"}', stderr='')
+        with patch.object(stack.sys, 'platform', 'win32'), \
+             patch('stack_manager.subprocess.run', return_value=completed) as run:
+            ok, message, files = self.manager.sync_runtime_from_geniex(auto_stop_server=False)
+        self.assertTrue(ok)
+        self.assertEqual(files, ['ggml.dll'])
+        self.assertIn('previous', message)
+        command = run.call_args.args[0]
+        self.assertIn('-Apply', command)
+        self.assertIn('-NoStopServer', command)
+        self.assertEqual(command[command.index('-GenieXDir') + 1], str(self.genie))
+        self.assertEqual(command[command.index('-BinPath') + 1], str(self.target))
+
+    def test_vendor_update_failure_is_propagated(self):
+        (self.root / 'sync-geniex.ps1').write_text('# fixture')
+        completed = subprocess.CompletedProcess([], 1, stdout='{"Error":"vendor update failed"}', stderr='')
+        with patch.object(stack.sys, 'platform', 'win32'), \
+             patch('stack_manager.subprocess.run', return_value=completed) as run:
+            ok, message = self.manager.update_geniex_cli()
+        self.assertFalse(ok)
+        self.assertEqual(message, 'vendor update failed')
+        self.assertIn('-UpdateGenieX', run.call_args.args[0])
+
+    def test_arbitrary_frontend_url_does_not_bypass_commit_selection(self):
+        with patch('stack_manager.subprocess.run') as run:
+            ok, _ = self.manager.update_llamacpp_frontend('https://example.test/latest.zip')
+        self.assertFalse(ok)
+        run.assert_not_called()
 
     def test_commit_prefixes_require_valid_hashes(self):
         for left, right in (('a', 'abcdef123'), ('N/A', 'N/A'), ('', ''), ('123456z', '123456z')):

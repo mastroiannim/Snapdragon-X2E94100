@@ -1,9 +1,13 @@
 name: PowerShell static checks
 
 on:
+  push:
+    branches: [main, feat/tui-openclaw]
+    paths: ['*.ps1', '*.psm1', 'tests/**', '.github/workflows/powershell-static.yml']
   pull_request:
     paths:
       - '*.ps1'
+      - '*.psm1'
       - 'tests/**'
       - '.github/workflows/powershell-static.yml'
   workflow_dispatch:
@@ -20,7 +24,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $scripts = @(Get-ChildItem -Path . -Filter '*.ps1' -Recurse -File)
+          $scripts = @(Get-ChildItem -Path . -Recurse -File | Where-Object { $_.Extension -in @('.ps1', '.psm1') })
           if ($scripts.Count -eq 0) { throw 'No PowerShell scripts found' }
           foreach ($script in $scripts) {
             $tokens = $null
@@ -100,7 +104,19 @@ jobs:
       - name: Verify benchmark profiles and report
         shell: powershell
         run: .\tests\benchmark-profiles.ps1
-      - name: Verify read-only runtime and disabled Apply
+      - name: Verify explicit read-only runtime check
         shell: powershell
         run: .\tests\runtime-readonly.ps1
 
+      - name: Verify bootstrap, update, integrity and rollback
+        shell: powershell
+        run: .\tests\runtime-update.ps1
+      - name: Verify automatic Python and dependency setup
+        shell: powershell
+        run: .\tests\tui-bootstrap.ps1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Verify Windows launcher entry points from an empty installation
+        shell: powershell
+        run: .\tests\entrypoints.ps1

@@ -1,15 +1,17 @@
 # Revisione di feat/tui-openclaw
 
-Revisione del branch al commit `c297afe993d0ef2eadd8044c025e851d703a394f`.
+Prima revisione del branch al commit `c297afe993d0ef2eadd8044c025e851d703a394f`.
 Obiettivo: correggere errori riproducibili e ridurre il lavoro ridondante del client,
-senza modificare le euristiche NPU/GPU del launcher.
+senza modificare le euristiche NPU/GPU del launcher. La successiva richiesta di
+conservare l'aggiornamento automatico al primo avvio prevale sul precedente blocco: lo
+stato corrente del bootstrap e' descritto in [REVISIONE_TECNICA.md](REVISIONE_TECNICA.md).
 
 ## Problemi riscontrati e correzioni
 
 | Priorità | Problema nel branch esaminato | Correzione |
 | --- | --- | --- |
-| Alta | I comandi Python reintroducevano copia/hard-link e aggiornamenti automatici rimossi da main. L'updater selezionava una release diversa dalla revisione del runtime, sostituiva solo gli EXE e ignorava il codice d'uscita di `--version`. | Rimossi downloader, installazione e rollback. I metodi di modifica rifiutano prima di discovery, processi o scritture, come `sync-geniex.ps1`. |
-| Alta | Il rollback poteva scrivere attraverso hard-link, ignorava errori di ripristino, lasciava file nuovi e non garantiva il riavvio dopo un fallimento. L'aggiornamento GenieX ignorava l'esito della sincronizzazione. | Eliminati questi percorsi eseguibili. Un installer resta una modifica separata con staging, integrità e prove di guasto/ripristino, secondo la revisione già approvata in main. |
+| Alta | I comandi Python reintroducevano copia/hard-link e aggiornamenti automatici rimossi da main. L'updater selezionava una release diversa dalla revisione del runtime, sostituiva solo gli EXE e ignorava il codice d'uscita di `--version`. | Unificati launcher e TUI nel motore PowerShell: release dello stesso commit GenieX, ZIP con SHA-256, staging e sostituzione controllata. |
+| Alta | Il rollback poteva scrivere attraverso hard-link, ignorava errori di ripristino, lasciava file nuovi e non garantiva il riavvio dopo un fallimento. L'aggiornamento GenieX ignorava l'esito della sincronizzazione. | Ripristino tramite directory precedente, senza copiare attraverso hard-link; backup conservato anche se il ripristino fallisce. Prove di guasto aggiunte. |
 | Media | Un evento con `reasoning_content` e `content` perdeva la risposta per l'uso di `elif`; il pensiero era memorizzato come risposta. | Entrambi i campi vengono letti; filtro incrementale dei tag `<think>`, anche spezzati fra eventi. La cronologia conserva la risposta finale. |
 | Media | Cancellazione o errori potevano lasciare turni incompleti; Ctrl+C prima dell'inizializzazione dei timing poteva generare un ulteriore errore. | Cronologia aggiornata solo dopo un turno completato con risposta; connessioni chiuse anche su errore/interruzione. |
 | Media | Frammenti SSE contati come token, TTFT sostituito dal tempo di prefill. | Token da `timings`/`usage`; TTFT del client separato da prefill e decode del server. Metriche mancanti: `N/D`. |
@@ -50,12 +52,13 @@ python -m unittest discover -s tests -p "test_*.py" -v
 python tui.py --help
 ```
 
-Eseguiti localmente su Linux, Python 3.12: **33 test superati**, compilazione Python,
+Eseguiti localmente su Linux, Python 3.12: **37 test superati**, compilazione Python,
 controllo statico `ruff check --select F` e `git diff --check`.
 La suite include una prova HTTP/SSE reale su loopback: due POST sulla stessa connessione
 TCP, cronologia della seconda richiesta senza ragionamento e metriche del server.
 Le altre prove isolano errori HTTP, stream troncati, Ctrl+C, tag frammentati, metriche
-assenti, letture negate, copie/hard-link, inventario vuoto e rifiuto degli updater.
+assenti, letture negate, copie/hard-link, inventario vuoto e delega degli updater al motore condiviso. Il bootstrap e il rollback
+sono verificati dalle suite PowerShell indicate nella revisione tecnica.
 
 Il workflow `Python TUI checks` esegue la suite su Windows e Linux con Python 3.10 e
 3.14, e controlla la sintassi del launcher in Windows PowerShell. Sono verifiche del

@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Ispezione in sola lettura dello stack GenieX / llama.cpp.
+"""Ispezione e aggiornamento dello stack GenieX / llama.cpp.
 
 La presenza e l'identità dei file non verificano firma, ABI o offload reale.
-La politica sugli aggiornamenti è la stessa di sync-geniex.ps1.
+Installazione e aggiornamento delegano a sync-geniex.ps1, condiviso con il launcher.
 """
 
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -26,11 +27,7 @@ LOCAL_APPDATA = Path(os.environ.get("LOCALAPPDATA") or USER_PROFILE / "AppData" 
 DEFAULT_GENIEX_DIR = LOCAL_APPDATA / "GenieX CLI"
 DEFAULT_LLAMA_BIN_DIR = USER_PROFILE / "llama-cpp" / "llama-bin-win-cpu-arm64"
 DEFAULT_WORKSPACE = Path(__file__).resolve().parent
-UPDATE_DISABLED = (
-    "Aggiornamento automatico disabilitato, come in sync-geniex.ps1. "
-    "Nessun file o processo modificato. Usare /stack status e /stack check; "
-    "la procedura separata richiesta è descritta in docs/REVISIONE_TECNICA.md."
-)
+
 
 
 def calculate_sha256(path: Path) -> str:
@@ -100,7 +97,8 @@ class StackManager:
         try:
             subprocess.Popen(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
-                 "-Mode", "Router", "-Port", str(port), "-BindHost", bind_host],
+                 "-Mode", "Router", "-Port", str(port), "-BindHost", bind_host,
+                 "-BinPath", str(self.llama_bin_dir), "-GenieXDir", str(self.geniex_dir)],
                 cwd=self.workspace_dir, creationflags=subprocess.CREATE_NEW_CONSOLE,
             )
             return True
@@ -215,7 +213,8 @@ class StackManager:
             "geniex_update_status": "Verifica non disponibile",
             "safe_update_advisory": (
                 "Controllo in sola lettura. La pubblicazione di una release non dimostra "
-                "la compatibilità con lo stack locale; gli aggiornamenti automatici sono disabilitati."
+                "la compatibilità con lo stack locale. /stack sync allinea al commit GenieX; "
+                "/stack update-geniex aggiorna prima GenieX e poi il runtime."
             ), "errors": [],
         }
         try:
@@ -243,16 +242,48 @@ class StackManager:
                     result["errors"].append(f"{repo}: {exc}")
         return result
 
-    # Conserva le API dei comandi precedenti, ma rifiuta prima di discovery e I/O.
+    def _run_runtime_update(self, *options) -> Tuple[bool, Dict[str, Any]]:
+        if sys.platform != "win32":
+            return False, {"Error": "Aggiornamento disponibile su Windows ARM64."}
+        script = self.workspace_dir / "sync-geniex.ps1"
+        if not script.is_file():
+            return False, {"Error": f"Script non trovato: {script}"}
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+                 "-BinPath", str(self.llama_bin_dir), "-GenieXDir", str(self.geniex_dir),
+                 "-Apply", "-Json", *options],
+                cwd=self.workspace_dir, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=900,
+            )
+            # Una diagnostica PowerShell puo' precedere l'ultima riga JSON.
+            result = json.loads(proc.stdout.strip().splitlines()[-1]) if proc.stdout.strip() else {}
+            if proc.returncode != 0:
+                return False, {"Error": result.get("Error") or proc.stderr.strip() or "Aggiornamento fallito"}
+            if not isinstance(result.get("Message"), str):
+                return False, {"Error": "Risposta del sincronizzatore non valida."}
+            return True, result
+        except (OSError, subprocess.SubprocessError, ValueError, AttributeError) as exc:
+            return False, {"Error": str(exc)}
+
     def sync_runtime_from_geniex(self, auto_stop_server: bool = True) -> Tuple[bool, str, List[str]]:
-        return False, UPDATE_DISABLED, []
+        options = [] if auto_stop_server else ["-NoStopServer"]
+        ok, result = self._run_runtime_update(*options)
+        message = result.get("Message", "") if ok else result.get("Error", "")
+        if ok and result.get("Backup"):
+            message += f" Backup: {result['Backup']}"
+        return ok, message, result.get("Files", []) if ok else []
 
     def update_llamacpp_frontend(self, download_url: Optional[str] = None,
                                 auto_stop_server: bool = True) -> Tuple[bool, str]:
-        return False, UPDATE_DISABLED
+        if download_url:
+            return False, "Il frontend viene selezionato dal commit GenieX; usare /stack sync."
+        ok, message, _ = self.sync_runtime_from_geniex(auto_stop_server)
+        return ok, message
 
     def update_geniex_cli(self) -> Tuple[bool, str]:
-        return False, UPDATE_DISABLED
+        ok, result = self._run_runtime_update("-UpdateGenieX")
+        return ok, result.get("Message", "") if ok else result.get("Error", "")
 
     def render_stack_dashboard(self, console: Console):
         st = self.get_stack_status()

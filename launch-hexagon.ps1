@@ -22,7 +22,7 @@
     Mostra i parametri calcolati e il comando CLI senza avviare il processo.
 
 .PARAMETER CheckRuntime
-    Verifica (sola lettura) l'allineamento del runtime a GenieX prima dell'avvio.
+    Verifica soltanto, senza aggiornare. Per default l'avvio installa/allinea il runtime a GenieX.
 
 .PARAMETER Mode
     "Direct" (default): avvia direttamente llama-server sul modello specificato.
@@ -44,19 +44,24 @@ param(
     [string]$Mode = "Direct",
     [switch]$ListOnly,
     [switch]$CheckRuntime,
-    [int]$ModelsMax = 2
+    [int]$ModelsMax = 2,
+    [string]$BinPath = (Join-Path $env:USERPROFILE "llama-cpp\llama-bin-win-cpu-arm64"),
+    [string]$ModelsDir = (Join-Path $env:USERPROFILE ".cache\geniex\models"),
+    [string]$GenieXDir = (Join-Path $env:LOCALAPPDATA "GenieX CLI")
 )
 
 $ErrorActionPreference = "Stop"
 
 # Percorsi base
-$BinPath = Join-Path $env:USERPROFILE "llama-cpp\llama-bin-win-cpu-arm64"
-$ModelsDir = Join-Path $env:USERPROFILE ".cache\geniex\models"
 $ServerExe = Join-Path $BinPath "llama-server.exe"
 
-if (-not (Test-Path $ServerExe)) {
-    Write-Error "llama-server.exe non trovato in: $BinPath"
-    exit 1
+# Prima preparazione inclusa: non richiede un llama-server gia' installato.
+# Inventario e anteprima non installano il runtime e non richiedono l'eseguibile.
+if (-not $ListOnly -and -not $DryRun) {
+    $syncScript = Join-Path $PSScriptRoot "sync-geniex.ps1"
+    & $syncScript -BinPath $BinPath -GenieXDir $GenieXDir -Apply:(-not $CheckRuntime)
+    if ($LASTEXITCODE -ne 0) { throw "Preparazione runtime fallita (exit $LASTEXITCODE)." }
+    if (-not (Test-Path -LiteralPath $ServerExe -PathType Leaf)) { throw "llama-server.exe non trovato dopo il bootstrap." }
 }
 
 # -------------------------------------------------------------
@@ -278,6 +283,9 @@ function Get-HexagonOptimalConfig([GgufModelMeta]$meta) {
 # Scansione Modelli Disponibili e Auto-Linking
 # -------------------------------------------------------------
 # Esponi i .gguf dei sotto-repo (LiquidAI, Qwen, ecc.) nella root con hard-link a 0 byte
+if (-not (Test-Path -LiteralPath $ModelsDir -PathType Container)) {
+    throw "Cache modelli assente: $ModelsDir. Scaricare un GGUF con GenieX (geniex pull) oppure indicare -ModelsDir."
+}
 Get-ChildItem -Path $ModelsDir -Filter "*.gguf" -Recurse -File | ForEach-Object {
     if ($_.DirectoryName -ne $ModelsDir -and $_.Name -notlike "mmproj*") {
         $linkTarget = Join-Path $ModelsDir $_.Name
@@ -421,15 +429,6 @@ if ($Mode -eq "Router") {
         exit 0
     }
 
-    # Verifica runtime su richiesta
-    $syncScript = Join-Path $PSScriptRoot "sync-geniex.ps1"
-    if ($CheckRuntime) {
-        if (-not (Test-Path $syncScript)) { throw "sync-geniex.ps1 non trovato." }
-        Write-Host "Verifica read-only del runtime..." -ForegroundColor DarkGray
-        & powershell -NoProfile -ExecutionPolicy Bypass -File $syncScript -BinPath $BinPath
-        if ($LASTEXITCODE -ne 0) { throw "Verifica runtime fallita (exit code $LASTEXITCODE); avvio annullato." }
-    }
-
     Write-Host "Avvio llama-server.exe ROUTER su porta $Port con $modelCount modelli..." -ForegroundColor Green
     Write-Host "Endpoint OpenAI compatibile: http://127.0.0.1:$Port/v1" -ForegroundColor Cyan
     Write-Host "I modelli vengono caricati on-demand alla prima richiesta.`n" -ForegroundColor Cyan
@@ -552,15 +551,6 @@ if ($DryRun) {
     Write-Host "[DRY RUN] Comando che verrebbe eseguito:" -ForegroundColor Yellow
     Write-Host "& `"$ServerExe`" $($cliArgs -join ' ')" -ForegroundColor White
     exit 0
-}
-
-# Verifica runtime su richiesta, senza modificare o scaricare binari.
-$syncScript = Join-Path $PSScriptRoot "sync-geniex.ps1"
-if ($CheckRuntime) {
-    if (-not (Test-Path $syncScript)) { throw "sync-geniex.ps1 non trovato." }
-    Write-Host "Verifica read-only del runtime..." -ForegroundColor DarkGray
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $syncScript -BinPath $BinPath
-    if ($LASTEXITCODE -ne 0) { throw "Verifica runtime fallita (exit code $LASTEXITCODE); avvio annullato." }
 }
 
 Write-Host "Avvio llama-server.exe su porta $Port..." -ForegroundColor Green

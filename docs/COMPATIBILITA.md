@@ -60,9 +60,23 @@ Il separatore `/` è previsto da `llama-bench` per `-dev` e `-ts`: è indicato d
 
 **Versioni del sincronizzatore:** il `main` originario (`dbbb499`) selezionava release con fallback approssimativi, estraeva ZIP via HTTP Range e sostituiva i file dell'installazione. Quei passaggi non certificavano integrita', ABI o riproducibilita'.
 
-Il [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1) **rimuove il downloader, l'installazione e il rollback** da `sync-geniex.ps1`. Lo script aggiornato confronta versioni/hash ed enumera i dispositivi; non installa componenti. `-Apply`, anche con `-AutoConfirm`, termina con errore prima di discovery, processi figli, cambiamenti all'ambiente o operazioni sui file. Questa protezione richiede la versione aggiornata: non e' una proprieta' del vecchio script.
+Il [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1) aveva rimosso
+l'installazione. Nel branch `feat/tui-openclaw` l'aggiornamento automatico e' ripristinato:
+`runtime-update.psm1` prepara una directory separata, verifica lo ZIP completo con
+SHA-256, sovrappone i file GenieX, controlla commit e device, e conserva la directory
+precedente durante la sostituzione. Un errore di ripristino non elimina il backup e
+non viene dichiarato un successo.
 
-Un fallimento del controllo non modifica i binari e non tenta di ripararli. La verifica scrive soltanto log temporanei di diagnostica e non cambia la variabile utente persistente `ADSP_LIBRARY_PATH`. Non sostituisce un test di inferenza o un inventario completo dei moduli caricati. L'eventuale reintroduzione dell'aggiornamento richiede una modifica separata, con integrita', staging e ripristino verificati.
+Il controllo senza `-Apply`/`-AutoConfirm` resta in sola lettura dei binari.
+L'avvio normale del launcher applica automaticamente il setup anche senza una directory
+llama.cpp precedente; `-CheckRuntime` richiede il solo controllo. Non viene modificata
+la variabile utente persistente `ADSP_LIBRARY_PATH`: il percorso e' impostato nei
+processi figli. Le copie sono il default; `-UseHardLinks` e' un'opzione esplicita.
+
+Prerequisito software manuale del setup: GenieX Qualcomm installato su Windows ARM64.
+Internet e' necessario per i frontend mancanti e per il primo provisioning TUI;
+modelli GGUF e driver OEM funzionanti restano input e condizioni dell'host. Nessun
+SDK, compilatore esterno o Python gia' installato e' richiesto dai launcher.
 
 ## Percorso dati e confini di responsabilità
 
@@ -102,7 +116,9 @@ La verifica con `signtool` conferma la firma del catalogo nelle condizioni dell'
 1. **Identificare** SO/architettura host, SoC, HTP `vNN`, driver NPU, FastRPC, firmware, OpenCL, eseguibili e DLL.
 2. **Acquisire manifest verificabile** con file, SHA-256, versione/commit e provenienza. Lo stesso commit è un controllo parziale, non un attestato di compatibilità.
 3. **Verificare catalogo e corrispondenza HTP** con i requisiti Windows; non usare un catalogo per “sanare” un artefatto di provenienza diversa.
-4. **Evitare sincronizzazioni implicite.** Il vecchio script (`dbbb499`) poteva modificare l'installazione. Nella versione del [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1), il controllo e' in sola lettura dei binari e `-Apply` e' disabilitato; non esiste un ramo di aggiornamento utilizzabile.
+4. **Allineamento automatico documentato.** Il launcher prepara il runtime prima
+   dell'avvio con lo stesso motore usato dalla TUI. Per il solo controllo usare
+   `sync-geniex.ps1` senza Apply o il launcher con `-CheckRuntime`.
 5. **Richiedere prova di inferenza**, non fermarsi a `--version` e `--list-devices`. Documentare offload, throughput, stato errore e impronta software.
 
 ## Diagnosi senza attribuzione causale automatica

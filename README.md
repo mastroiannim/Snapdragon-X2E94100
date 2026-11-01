@@ -8,31 +8,48 @@ Il progetto nasce da un **innesto di componenti binari già distribuiti con Geni
 
 Il [post ufficiale GenieX Developer Preview, pubblicato il 7 luglio 2026](https://www.qualcomm.com/developer/blog/2026/06/geniex-developer-preview) chiarisce che GenieX **include già `llama.cpp`** e offre **anche un proprio server locale compatibile OpenAI**. GenieX espone separatamente un runtime `llama_cpp` per GGUF (CPU/GPU/HTP) e un runtime `qairt` per i pacchetti QAIRT precompilati; il nostro innesto riguarda il **primo**, non sostituisce né riutilizza automaticamente i kernel del secondo.
 
-### Come e' stato realizzato l'innesto storico
+### Primo avvio e aggiornamento automatico
 
-Il sincronizzatore originario (`main` al commit `dbbb499`) operava cosi':
+Su **Windows 11 ARM64**, l'unico prerequisito software da installare manualmente e'
+**GenieX CLI di Qualcomm**, con il runtime `llama_cpp`. Il primo setup usa Internet;
+non richiede Git, CMake, Visual Studio, SDK Hexagon/QNN o una precedente installazione
+llama.cpp. I modelli GGUF sono contenuti di input: il launcher usa quelli presenti
+nella cache di GenieX (`geniex pull`), oppure la directory specificata con `-ModelsDir`.
 
-1. Ispezionava `%LOCALAPPDATA%\GenieX CLI\llama_cpp` e interrogava `geniex.exe --version --skip-update` per ottenere `LlamaCPP Runtime Hash`.
-2. Tentava di selezionare una release Windows ARM64 di `ggml-org/llama.cpp` per recuperare i frontend. La ricerca includeva fallback approssimativi, senza certificare la corrispondenza del commit o dell'ABI.
-3. Collegava tramite hard-link, con fallback alla copia, i componenti di `GenieX CLI\llama_cpp` nella cartella dei frontend.
-4. Il launcher impostava `ADSP_LIBRARY_PATH` e avviava `llama-server.exe`.
-
-**Con la modifica del [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1), il sincronizzatore diventa un controllo in sola lettura dei binari runtime.** Il downloader, la sostituzione dei file e il rollback sono rimossi. `-Apply` viene rifiutato prima di ogni controllo, anche con `-AutoConfirm`. La preparazione di una nuova composizione richiede una procedura separata; lo script aggiornato non installa il runtime.
-
-```text
-GenieX CLI installato                      Release llama.cpp (Windows ARM64)
-    |                                                |
-    +-- llama_cpp: DLL GGML, backend,                +-- frontend eseguibili
-    |   artefatti HTP .so e catalogo .cat                 |
-    |                                                |
-    +--------- collegamento/copia ---------------------+
-                         |
-                  cartella llama-bin
-                         |
-                llama-server.exe + GGML
-                         |
-            GPUOpenCL / FastRPC / HTP0
+```powershell
+.\llama-server-all.bat   # prepara il runtime e avvia il router
+.\llama-server.bat       # prepara il runtime e avvia un singolo modello
+.\tui.bat                # prepara anche Python/dipendenze TUI, poi il router locale
 ```
+
+La stessa procedura e' usata al primo avvio e quando cambia il runtime GenieX:
+
+1. Legge `LlamaCPP Runtime Hash` da GenieX e controlla i file installati.
+   Se il runtime e' gia' allineato, non scarica nulla.
+2. Quando occorrono i frontend, risolve una release Windows ARM64 con lo **stesso
+   commit**. La stima del numero b* serve alla ricerca; nessuna build vicina viene
+   accettata al posto di quella richiesta.
+3. Scarica lo ZIP completo e ne verifica dimensione e SHA-256 pubblicato da GitHub.
+   Per GenieX 0.10.0, la release b11938 corrisponde a `19cce6919` e lo ZIP CPU ARM64
+   pesa circa 13 MB. L'estrazione usa le librerie ZIP standard di .NET.
+4. Prepara una directory separata con frontend e copie del runtime GenieX; verifica
+   eseguibili ARM64, hash, versione ed enumerazione HTP0/GPUOpenCL. Registra il
+   manifest `hexagon-runtime.json`. Questi controlli non sostituiscono l'inferenza.
+5. Solo dopo la preparazione sostituisce la directory installata, conservando quella
+   precedente come backup. Errori di preparazione lasciano intatta l'installazione;
+   errori dopo la sostituzione attivano il ripristino. Un ripristino fallito viene
+   segnalato e conserva il backup.
+
+I launcher aggiornano automaticamente prima dell'avvio. `sync-geniex.ps1` senza
+opzioni resta un controllo; `-Apply` e l'alias legacy `-AutoConfirm` abilitano il setup.
+`-CheckRuntime` sul launcher richiede il solo controllo. `-ListOnly` e `-DryRun` non
+installano il runtime e funzionano anche senza `llama-server.exe`.
+
+Le copie sono il default per isolare i file da successive scritture di GenieX.
+`sync-geniex.ps1 -Apply -UseHardLinks` mantiene l'opzione hard-link con fallback alla
+copia: in quel caso origine e destinazione condividono i dati. Un aggiornamento
+arresta e riavvia soltanto i processi `llama-server.exe` della directory interessata;
+`-NoStopServer` consente invece di rifiutare la sostituzione se sono attivi.
 
 **Il risultato è una composizione sperimentale, non un pacchetto ufficiale né una compatibilità garantita da Qualcomm.** La firma e il catalogo del DSP non sanano un'incompatibilità fra DLL e frontend. La licenza BSD-3-Clause del *progetto open source GenieX* non dimostra, da sola, il diritto di ridistribuire ogni artefatto SDK, runtime o catalogo incluso in un installer: vanno esaminati provenienza e termini di ciascun componente. Il repository descrive l'impiego locale dei componenti; non deve presentare un bundle misto come certificato o supportato ufficialmente.
 
@@ -116,24 +133,34 @@ La modalità Router sfrutta il routing nativo di `llama-server` (`--models-dir`,
 3. **Caricamento On-Demand & Budget RAM:** I modelli vengono caricati solo quando invocati dai client API (es. Cline). Il parametro `-ModelsMax` (default: `2`) mantiene in memoria contemporaneamente al massimo $N$ modelli, scaricando i meno recenti (LRU) per rimanere sempre all'interno del budget di 48 GB di RAM fisica LPDDR5X.
 4. **Endpoint OpenAI compatibile:** Esponendo `/v1/models` e `/v1/chat/completions`, qualsiasi client o estensione (Cline, Continue, Roo Code) può passare da un modello all'altro semplicemente specificandone l'alias.
 
-**Distinguere le versioni:** nel `main` originario (`dbbb499`) il launcher invocava automaticamente il sincronizzatore con `-AutoConfirm`, potendo sostituire binari e DLL. Il PR #1 rimuove quella chiamata: l'opzione `-CheckRuntime` richiede soltanto un controllo, e interrompe l'avvio se fallisce. Verificare di usare la versione aggiornata prima di affidarsi a questo comportamento.
+**Cronologia:** il PR #1 aveva rimosso l'installazione automatica. Nel branch
+`feat/tui-openclaw` e' ripristinata con un motore condiviso (`runtime-update.psm1`),
+preparazione separata e prove di errore/ripristino. I test del solo blocco `-Apply`
+non sono piu' il criterio di verifica dell'updater.
 
-Anche dopo questa modifica, `-ListOnly` e `-DryRun` possono creare hard-link dei modelli durante la scansione: non sono operazioni completamente read-only. La sola lettura del controllore riguarda i binari runtime.
+`-ListOnly` e `-DryRun` possono ancora creare hard-link dei modelli durante la scansione;
+la loro esclusione dal bootstrap riguarda il runtime, non tutti gli effetti del launcher.
 
 Il server espone un endpoint compatibile OpenAI sulla porta `18803`. Il binding predefinito è `127.0.0.1`. L'accesso LAN richiede `-BindHost` esplicito; **non esporre l'endpoint senza autenticazione su una rete non attendibile**.
 
 ## Hexagon Claw TUI (Interfaccia Terminale in Stile OpenClaw)
 
 Interfaccia testuale `🐉` per la chat con un endpoint `llama-server` compatibile OpenAI.
-Richiede **Python 3.10 o successivo**:
+Su Windows basta avviare `tui.bat` o `launch-tui.ps1`: il launcher riusa Python 3.10+
+se disponibile; altrimenti installa Python per utente e prepara un ambiente dedicato
+in `%LOCALAPPDATA%\HexagonClaw`. Le dipendenze vengono installate automaticamente
+senza modificare i pacchetti del Python dell'utente. Nessun passaggio manuale con pip.
+Il fallback usa CPython 3.13.13 da python.org, con SHA-256 fissato nel codice.
 
 ```powershell
-python -m pip install -r requirements.txt
-.\tui.bat
+.\tui.bat --model "LFM2.5-24B" --max-tokens 2048
 # Oppure:
-.\launch-tui.ps1
-python tui.py --model "LFM2.5-24B" --max-tokens 2048
+.\launch-tui.ps1 -Model "LFM2.5-24B" -MaxTokens 2048
 ```
+
+Per l'avvio diretto con un Python gia' predisposto rimane disponibile `python tui.py`.
+Se l'endpoint HTTP locale e' offline, la TUI avvia il router, il cui launcher comprende
+il bootstrap. Un URL remoto non avvia o aggiorna processi locali.
 
 Il workspace predefinito è la directory del checkout, dove il launcher genera
 `hexagon-models.ini`. Per usare un'altra directory:
@@ -156,10 +183,10 @@ python tui.py --workspace "C:\percorso\Snapdragon-X2E94100" --url http://127.0.0
   e SHA-256. Presenza dei file e commit uguali non verificano firma, ABI o inferenza.
 - `/stack check`: consulta le release pubblicate di llama.cpp e GenieX, senza eseguire
   updater. Il confronto fra build llama.cpp è possibile solo quando entrambe sono note.
-- `/stack sync`, `/stack update-geniex`, `/stack update-llama`: **disabilitati prima di
-  modificare file o processi**, in coerenza con `sync-geniex.ps1`. La reintroduzione
-  dell'aggiornamento richiede la procedura separata descritta in
-  [docs/REVISIONE_TECNICA.md](docs/REVISIONE_TECNICA.md).
+- `/stack sync`, `/stack update-llama`: installazione/allineamento automatico alla
+  revisione indicata dal runtime GenieX tramite lo stesso motore PowerShell.
+- `/stack update-geniex`: aggiorna GenieX con il comando ufficiale, poi riallinea il
+  runtime. Prima separa eventuali hard-link legacy per preservare la copia installata.
 - `/server status|start|stop|restart`: controllo HTTP e gestione del router Windows locale.
   `stop` e `restart` arrestano tutti i processi locali chiamati `llama-server`.
   Gli endpoint remoti supportano il solo controllo di stato.

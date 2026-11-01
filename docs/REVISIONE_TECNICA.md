@@ -1,54 +1,108 @@
-# Revisione tecnica — PR #1
+# Revisione tecnica: bootstrap e aggiornamento automatico
 
-## Ambito valutato per il merge
+## Obiettivo e comportamento
 
-Questa PR migliora il comportamento del launcher e i report di benchmark su un runtime gia' installato. **L'aggiornamento automatico e' escluso dall'ambito:** il downloader HTTP Range, l'installazione tramite hard-link/copia e il rollback sono rimossi da `sync-geniex.ps1`. Il codice precedente resta consultabile nella cronologia Git.
+L'aggiornamento automatico e' conservato, incluso il primo avvio senza llama.cpp.
+Su Windows ARM64 l'unico software da installare manualmente e' GenieX Qualcomm.
+I launcher preparano il runtime e la TUI prepara anche Python e i pacchetti necessari.
+I modelli GGUF nella cache GenieX sono contenuti di input, non vengono sostituiti dal setup.
 
-`sync-geniex.ps1` esegue soltanto confronti di versioni e SHA-256 ed enumerazione dei dispositivi. Mantiene `-Apply` come opzione riconoscibile, ma la rifiuta prima di discovery, processi figli, modifiche all'ambiente o operazioni sui file. `-AutoConfirm` e' ignorata e non puo' aggirare il blocco. Un esito negativo non suggerisce di usare Apply e non tenta riparazioni.
+Il blocco introdotto nel PR #1 e nel commit TUI `031b480` e' superato da questa revisione.
+Quella rimozione era una scelta di perimetro, non la dimostrazione che gli aggiornamenti
+riusciti nell'installazione originale fossero errati.
 
-Il launcher non richiama piu' automaticamente il vecchio aggiornamento. Con `-CheckRuntime` esegue il controllo e interrompe l'avvio se questo fallisce. Il controllo non certifica l'ABI completa o la correttezza numerica dell'inferenza.
+## Implementazione condivisa
 
-## Correzioni incluse
+- `runtime-update.psm1`: unica implementazione dell'installazione e del ripristino.
+- `sync-geniex.ps1`: entry point PowerShell con risultato JSON e codice d'uscita.
+- `launch-hexagon.ps1`: Apply automatico prima di richiedere `llama-server.exe`;
+  `-CheckRuntime` mantiene il solo controllo. ListOnly/DryRun saltano il bootstrap.
+- `stack_manager.py`: delega sync e update alla stessa procedura PowerShell.
+- `launch-tui.ps1` / `tui.bat`: bootstrap runtime, Python e ambiente dedicato; URL remoti
+  esclusi dall'amministrazione locale. La TUI avvia il router locale se offline.
 
-- Bind HTTP predefinito `127.0.0.1`; accesso LAN soltanto con parametro esplicito.
-- Benchmark: `/` separa device e pesi dello stesso test, mentre `,` seleziona varianti. Sono presenti HTP0, GPUOpenCL e gli split HTP0/GPUOpenCL 75/25, 50/50 e 25/75, con `-sm layer` esplicito.
-- Accettata una sola riga JSON per invocazione, con device nell'ordine richiesto, pesi, split-mode, prompt/generazione/profondita' coerenti e statistiche valide. I risultati multipli o incoerenti sono segnalati ed esclusi dal report.
-- Tabella Markdown con 11 colonne e valori modello/test interpolati correttamente. Report predefinito BENCHMARK_AUTO.md, separato dal registro storico.
-- Throughput conservato senza PMIC; potenze mancanti N/D. Nessun rapporto J/token ricavato da finestre temporali incompatibili.
-- Parser GGUF: corretta l'enumerazione llama_ftype, controlli su chiavi/stringhe e limite di contesto del modello. Le euristiche e i parametri originari di caricamento/VTCM sono conservati senza presentarli come ottimali.
+La sorgente dei backend resta `GenieX CLI\llama_cpp`; `geniex.exe` viene cercato anche
+nel PATH. La versione installata determina il commit frontend: non si installa la release
+piu' recente di llama.cpp indipendentemente da GenieX. `/stack update-geniex` invoca il
+comando ufficiale di aggiornamento, poi riallinea la copia locale.
 
-## Verifiche effettuate
+## Download ed estrazione
 
-| Controllo | Evidenza |
-| --- | --- |
-| Sintassi PowerShell, C# GGUF e fixture | Suite locale e workflow Windows PowerShell 5.1 |
-| Cinque profili, prefill/decode e report | Test deterministici positivi/negativi, inclusa la mancata pubblicazione dei JSON rifiutati |
-| Regressione delle virgole | Il binario reale b11938 / 19cce6919 genera quattro varianti; il controllo corretto le rifiuta |
-| Sintassi con slash | GPUOpenCL/GPUOpenCL, split 50/50 e ngl 0: una sola riga JSON coerente; prova del parser, non test ibrido hardware |
-| GPU reale | Qwen3.5-0.8B-Q4_0 con GPUOpenCL e ngl 99: una riga JSON accettata |
-| Apply disabilitato | Test in processo separato con Apply, Apply+AutoConfirm e percorsi mancanti: rifiuto anticipato, nessun file fixture modificato o backup creato |
-| Controllo senza GenieX | Errore esplicito con e senza AutoConfirm; nessuna modifica alle fixture |
-| Runtime locale in sola lettura | Nel contesto ristretto il controllo fallisce; hash dei 47 file runtime confrontati e variabile utente ADSP_LIBRARY_PATH invariati |
+La ricerca usa la vecchia stima del numero b* solo come ottimizzazione; ogni candidato
+viene risolto a SHA completo, inclusi tag annotati. Il fallback cerca tag dello stesso
+commit, senza accettare build vicine o risultati non verificati dopo errori API.
 
-I test di rifiuto dell'aggiornamento sono in [tests/runtime-readonly.ps1](../tests/runtime-readonly.ps1); quelli di profili e report in [tests/benchmark-profiles.ps1](../tests/benchmark-profiles.ps1). Entrambi sono eseguiti dal workflow Windows.
+Lo ZIP CPU Windows ARM64 viene scaricato interamente: la release b11938, corrispondente
+al runtime `19cce6919` di GenieX 0.10.0, pesa circa 13 MB. Questa scelta riduce il codice
+rispetto al parser ZIP su HTTP Range originale e permette di verificare il digest completo
+pubblicato da GitHub. Non e' un rifiuto dell'HTTP Range come tecnica.
 
-Le prove reali GPU, HTP0 e HTP0/GPUOpenCL 50/50 sono documentate nel [PR #2](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/2). Non costituiscono test di tutte le opzioni del launcher o del benchmark automatico. Non sono stati eseguiti nuovi test NPU 75/25 o 25/75 dalla sessione ristretta.
+Prima dell'installazione: dimensione e SHA-256, estrazione .NET, rifiuto di nomi duplicati
+o percorsi anomali, presenza dei tre frontend, architettura PE ARM64, hash dei file GenieX,
+versione e device HTP0/GPUOpenCL. Il manifest registra i componenti effettivi.
 
-## Limiti residui dell'uso sperimentale
+## Sostituzione e ripristino
 
-- Le euristiche dimensionali, gli split e il contesto non sono ottimali dimostrati; il router applica default globali che possono essere inadatti ad altri modelli nella directory.
-- Il parser GGUF non e' un validatore completo di array, nesting, metadata avversari o tensori. Ha letto i metadata degli 11 modelli locali durante la revisione; questa evidenza non equivale a validazione completa del formato.
-- ListOnly e DryRun possono ancora creare hard-link dei modelli durante la scansione. La sola lettura qui garantita riguarda i binari runtime del controllore, non tutti gli effetti del launcher.
-- L'enumerazione non prova l'offload. Correttezza numerica, superiorita' prestazionale, sovrapposizione temporale dei kernel NPU/GPU e misure energetiche sincronizzate restano verifiche distinte.
+1. Preparazione in una directory adiacente con nome unico, protetta da lock esclusivo.
+2. Copia della configurazione esistente e preparazione dei nuovi componenti.
+3. Verifiche in staging prima di toccare la directory attiva.
+4. Arresto dei soli processi della destinazione, se presenti; `-NoStopServer` rifiuta
+   invece l'aggiornamento. Per il riavvio sono conservati gli argomenti originali;
+   il router ricrea i propri figli.
+5. Rinomina dell'installazione precedente come backup e promozione dello staging.
+6. Verifica del frontend nella posizione definitiva; ripristino su errore.
 
-Questi limiti delimitano le funzionalita' sperimentali incluse. Le prove del downloader e del rollback non sono piu' una precondizione per il merge di questa PR, perche' quei percorsi non sono eseguibili ne' presenti nello script aggiornato.
+Un fallimento prima della sostituzione lascia intatti i file installati. Un backup
+non viene ottenuto con una copia che potrebbe risultare parziale: e' la directory
+precedente rinominata. Se anche il ripristino fallisce, la procedura restituisce errore
+e conserva il percorso del backup. Il primo setup fallito non lascia una destinazione
+parzialmente installata. Anche i fallimenti di riavvio sono riportati.
 
-## Reintroduzione futura dell'aggiornamento
+Le copie sono predefinite per isolare successive scritture del vendor. L'opzione
+`-UseHardLinks` conserva hard-link con fallback alla copia; ogni sostituzione dello
+staging rimuove prima il vecchio nome. Prima di `/stack update-geniex` vengono separate
+le copie da eventuali collegamenti legacy. Le variabili ambiente utente non sono modificate.
 
-Richiede un intervento separato con download ed estrazione standard, verifica di integrita' e provenienza, staging verificato, sostituzione controllata e test di guasto/ripristino. Un aggiornamento non dovra' essere riattivato soltanto perche' --list-devices termina con successo.
+## Provisioning della TUI
 
-## Riferimenti
+Riusa Python 3.10+ se trovato nell'installazione gestita, nel PATH o nei percorsi Python
+registrati. Altrimenti scarica l'installer ufficiale CPython 3.13.13 ARM64 (AMD64 per
+host x64), ne verifica lo SHA-256 fissato e lo installa per l'utente, senza launcher,
+associazioni o modifiche al PATH. I digest provengono dai file `.exe.sigstore` pubblicati
+su [python.org](https://www.python.org/ftp/python/3.13.13/).
 
-- [llama-bench: parser della revisione usata](https://github.com/ggml-org/llama.cpp/blob/19cce6919/tools/llama-bench/llama-bench.cpp)
-- [Backend Snapdragon](https://github.com/ggml-org/llama.cpp/blob/19cce6919/docs/backend/snapdragon/README.md)
+Crea `%LOCALAPPDATA%\HexagonClaw\tui-env`, installa solo wheel senza richiedere compilatori
+e conserva il fingerprint delle requirements soltanto dopo il successo e la verifica degli
+import. Avvii successivi evitano pip se non serve. Un fallimento resta riprovabile;
+un lock impedisce provisioning concorrenti sulla stessa directory.
 
+## Verifiche
+
+- 37 regressioni Python, compresa una prova HTTP/SSE reale su loopback.
+- `tests/runtime-update.ps1`: 21 scenari con installazione inizialmente assente,
+  idempotenza senza rete, corrispondenza commit, tag annotati, SHA/ZIP, errori di staging,
+  rinomina, controllo successivo e ripristino; backup e sorgenti confrontati per contenuto.
+- `tests/tui-bootstrap.ps1`: 4 scenari di provisioning senza Python, riuso, requirements
+  modificate e recupero dopo errore pip. Installer e pip sono simulati in questa suite.
+- `tests/entrypoints.ps1`: processi Windows separati per il launcher reale da directory
+  llama.cpp assente e per il passaggio argomenti/codice d'uscita del launcher TUI.
+  EXE e device sono fixture: questa prova non simula un'inferenza.
+- `tests/runtime-readonly.ps1`: controllo esplicito senza Apply, file e ambiente invariati.
+- Suite esistente dei cinque profili benchmark, parser GGUF C# e sintassi PowerShell.
+- Download reale b11938: verificati dimensione, SHA-256, estrazione e architettura ARM64
+  di `llama-server.exe`, `llama-cli.exe` e `llama-bench.exe`.
+
+Le suite del bootstrap e del rollback sono eseguite anche dal workflow Windows PowerShell
+5.1. I test Python sono eseguiti su Windows/Linux con Python 3.10 e 3.14.
+
+## Limiti dell'evidenza
+
+Non e' stata eseguita una nuova inferenza su Snapdragon in questa revisione. Stesso commit,
+hash e device enumerati non certificano ABI completa, firma/catalogo o correttezza numerica.
+Le prove storiche GPU, HTP0 e split 50/50 restano documentate nel PR #2.
+
+Occorrono Internet e una release ARM64 pubblicata per il commit richiesto al primo setup;
+se questa non esiste o non ha digest, il programma segnala il problema conservando lo stack
+precedente. Un runtime gia' allineato viene riusato senza rete. Driver e firmware OEM devono
+essere funzionanti sull'host. Le euristiche, gli split e il contesto del launcher rimangono
+sperimentali; questa modifica non dichiara miglioramenti delle prestazioni NPU/GPU.
