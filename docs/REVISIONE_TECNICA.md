@@ -66,10 +66,10 @@ le copie da eventuali collegamenti legacy. Le variabili ambiente utente non sono
 ## Provisioning della TUI
 
 Riusa Python 3.10+ se trovato nell'installazione gestita, nel PATH o nei percorsi Python
-registrati. Altrimenti scarica l'installer ufficiale CPython 3.13.13 ARM64 (AMD64 per
+registrati. Altrimenti scarica l'installer ufficiale CPython 3.13.17 ARM64 (AMD64 per
 host x64), ne verifica lo SHA-256 fissato e lo installa per l'utente, senza launcher,
 associazioni o modifiche al PATH. I digest provengono dai file `.exe.sigstore` pubblicati
-su [python.org](https://www.python.org/ftp/python/3.13.13/).
+su [python.org](https://www.python.org/ftp/python/3.13.17/).
 
 Crea `%LOCALAPPDATA%\HexagonClaw\tui-env`, installa solo wheel senza richiedere compilatori
 e conserva il fingerprint delle requirements soltanto dopo il successo e la verifica degli
@@ -78,8 +78,8 @@ un lock impedisce provisioning concorrenti sulla stessa directory.
 
 ## Verifiche
 
-- 37 regressioni Python, compresa una prova HTTP/SSE reale su loopback.
-- `tests/runtime-update.ps1`: 22 scenari con installazione inizialmente assente,
+- 38 regressioni Python, compresa una prova HTTP/SSE reale su loopback.
+- `tests/runtime-update.ps1`: 23 scenari con installazione inizialmente assente,
   idempotenza senza rete, corrispondenza commit, tag annotati, SHA/ZIP, errori di staging,
   rinomina, controllo successivo e ripristino; backup e sorgenti confrontati per contenuto.
 - `tests/tui-bootstrap.ps1`: 4 scenari di provisioning senza Python, riuso, requirements

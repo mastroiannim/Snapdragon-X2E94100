@@ -164,5 +164,13 @@ class StackTests(unittest.TestCase):
         self.assertIsNone(result['update_available_llamacpp'])
         self.assertEqual(len(result['errors']), 2)
 
+    def test_nondefault_geniex_installation_is_discovered_from_path(self):
+        executable = self.genie / 'geniex.exe'
+        executable.touch()
+        with patch('stack_manager.DEFAULT_GENIEX_DIR', self.root / 'absent'), \
+             patch('stack_manager.shutil.which', return_value=str(executable)):
+            manager = stack.StackManager()
+        self.assertEqual(manager.geniex_dir, self.genie)
+
     def test_default_workspace_is_checkout(self):
         self.assertEqual(stack.StackManager().workspace_dir, Path(stack.__file__).resolve().parent)

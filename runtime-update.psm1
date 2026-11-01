@@ -85,7 +85,10 @@ function Test-FrontendRuntime($Frontend, [string]$Commit) {
 }
 
 function Get-RuntimeJson([string]$Url) {
-    return Invoke-RestMethod -Uri $Url -Headers @{ 'User-Agent' = 'Snapdragon-X2E94100'; Accept = 'application/vnd.github+json' } -TimeoutSec 30
+    # Invoke-RestMethod puo' emettere un array JSON come un solo oggetto di pipeline.
+    # Assegna prima il risultato: il return della variabile ne enumera gli elementi.
+    $data = Invoke-RestMethod -Uri $Url -Headers @{ 'User-Agent' = 'Snapdragon-X2E94100'; Accept = 'application/vnd.github+json' } -TimeoutSec 30
+    return $data
 }
 
 function Get-TagCommit([string]$Tag) {

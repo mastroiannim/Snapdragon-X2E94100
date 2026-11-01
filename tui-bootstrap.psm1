@@ -27,10 +27,10 @@ function Find-TuiPython([string]$ManagedRoot) {
 
 function Install-TuiPython([string]$Destination, [string]$Architecture) {
     # Release e SHA-256 da python.org, file *.exe.sigstore (messageSignature.messageDigest).
-    $version = '3.13.13'
+    $version = '3.13.17'
     $hashes = @{
-        arm64 = '7925fc1d40dc75379ae70ede7a6217faf5549bb93ca89a3ea519185d8bc657bf'
-        amd64 = '3c9c81d80f91c002ced86d645422d81432c68c7d9b6b0e974768ca2e449a4d00'
+        arm64 = '3089a1977c32b26f5078e5a7d0285b7a861b8c96250c5dac3b6af59fbe9e9a75'
+        amd64 = '5da012101ba2e17113a9a1cd901e9ce1441086f2b7ecb5de06ec94163899a190'
     }
     if (-not $hashes.ContainsKey($Architecture)) { throw "Architettura Python non supportata: $Architecture" }
     [void][IO.Directory]::CreateDirectory((Split-Path -Parent $Destination))

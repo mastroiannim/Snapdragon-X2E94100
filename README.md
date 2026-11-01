@@ -150,7 +150,7 @@ Su Windows basta avviare `tui.bat` o `launch-tui.ps1`: il launcher riusa Python 
 se disponibile; altrimenti installa Python per utente e prepara un ambiente dedicato
 in `%LOCALAPPDATA%\HexagonClaw`. Le dipendenze vengono installate automaticamente
 senza modificare i pacchetti del Python dell'utente. Nessun passaggio manuale con pip.
-Il fallback usa CPython 3.13.13 da python.org, con SHA-256 fissato nel codice.
+Il fallback usa CPython 3.13.17 da python.org, con SHA-256 fissato nel codice.
 
 ```powershell
 .\tui.bat --model "LFM2.5-24B" --max-tokens 2048
