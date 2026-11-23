@@ -118,6 +118,7 @@ class ControlCenter:
             "l": self.live_dashboard,
         }
         self.ui.set_status_provider(self._top_status)
+        self.ui.set_help_callback(self.help)
 
     def _top_status(self) -> str:
         online, latency, models = self.processes.health_snapshot()
@@ -159,8 +160,9 @@ class ControlCenter:
             while not stop.is_set():
                 try:
                     self.ui.replace_body(self.dashboard_renderable())
-                except Exception:
-                    pass
+                except Exception as exc:
+                    # Mai silenziato: l'errore resta visibile nella barra di stato.
+                    self.ui.report_error(f"Dashboard: {exc}")
                 stop.wait(2)
 
         worker = threading.Thread(target=refresh, daemon=True)
@@ -173,15 +175,20 @@ class ControlCenter:
 
     def help(self):
         self.ui.table("Navigazione", ("Tasto", "Funzione"), [
-            ("1…9", "Nove aree operative (tasto singolo o click)"),
+            ("1…9", "Nove aree operative (tasto singolo, frecce+Invio o click)"),
+            ("Frecce / Invio", "Seleziona una voce del menu e attivala"),
+            ("Tab oppure /", "Modalità input: digitazione libera senza tasti singoli"),
             ("/", "Comandi slash contestuali alla schermata, con completamento"),
             ("C", "Chat OpenAI-compatibile locale"),
             ("L", "Dashboard aggiornata ogni 2 secondi"),
             ("B", "Indietro nei sottomenu"),
             ("R", "Aggiorna la schermata corrente"),
             ("Q", "Uscita e scelta del ciclo di vita dei server"),
-            ("F1 / F10", "Guida / Uscita quando il menu e' in attesa"),
-            ("Mouse", "Ruota per scorrere; click sulle voci del menu"),
+            ("Esc", "Annulla il prompt corrente (o esce dalla modalità input)"),
+            ("F1 / F10", "Guida / Uscita (globali)"),
+            ("Ctrl+F", "Ricerca incrementale nel corpo; Invio prossimo, Esc fine"),
+            ("PgUp/PgDn/Home/End", "Scorre il corpo; rotella mouse e scrollbar"),
+            ("Mouse", "Click sulle voci evidenziate; hover per il suggerimento"),
         ])
 
     def _dispatch(self, choice: str) -> bool:
@@ -257,6 +264,10 @@ class ControlCenter:
         if not self.processes.owned:
             return
         self.ui.console.print("Server avviati da questa sessione: " + ", ".join(map(str, self.processes.owned)))
-        keep = not self.ui.confirm("Arrestare questi server prima di uscire?")
+        try:
+            keep = not self.ui.confirm("Arrestare questi server prima di uscire?")
+        except KeyboardInterrupt:
+            # Esc annulla la conferma: scelta sicura, i server restano attivi.
+            keep = True
         result = self.processes.shutdown(keep_running=keep)
         self.ui.result(result)

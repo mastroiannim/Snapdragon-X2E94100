@@ -75,7 +75,7 @@ def bench_dashboard(base_url):
 
 
 def _start_headless(ui):
-    """Avvia l'app in un thread con pipe input e DummyOutput; ritorna il thread."""
+    """Avvia l'app in un thread con pipe input e DummyOutput; ritorna la sessione."""
     from prompt_toolkit.input.defaults import create_pipe_input
     from prompt_toolkit.output import DummyOutput
 
@@ -108,25 +108,22 @@ def _start_headless(ui):
 def bench_replace_body():
     import hexagon_control.ui.components as comp
 
-    counters = {"set_document": 0, "invalidate": 0}
+    counters = {"set_document": 0, "frame": 0}
     real_set_document = comp.Buffer.set_document
-    real_invalidate = comp.Application.invalidate
 
     def counting_set_document(self, *args, **kwargs):
         counters["set_document"] += 1
         return real_set_document(self, *args, **kwargs)
 
-    def counting_invalidate(self, *args, **kwargs):
-        counters["invalidate"] += 1
-        return real_invalidate(self, *args, **kwargs)
-
     ui = comp.Interface()
-    with patch.object(comp.Buffer, "set_document", counting_set_document), \
-            patch.object(comp.Application, "invalidate", counting_invalidate):
+    with patch.object(comp.Buffer, "set_document", counting_set_document):
         session = _start_headless(ui)
         try:
+            # Frame effettivi: on_invalidate scatta una volta per redraw
+            # schedulato; Application.invalidate coalesce le chiamate multiple.
+            ui._app.on_invalidate += lambda *_: counters.__setitem__("frame", counters["frame"] + 1)
             counters["set_document"] = 0
-            counters["invalidate"] = 0
+            counters["frame"] = 0
             ui.replace_body(Panel("dashboard di prova"))
             deadline = time.monotonic() + 5
             while counters["set_document"] < 1 and time.monotonic() < deadline:
@@ -181,7 +178,7 @@ def main():
 
     counters = bench_replace_body()
     print(f"3) replace_body(): set_document={counters['set_document']} "
-          f"invalidate={counters['invalidate']} (target: 1 e 1)")
+          f"frame={counters['frame']} (target: 1 set_document atomico, 1 frame)")
 
     result = bench_keypress()
     print(f"4) keypress->risposta prompt: {result}")
