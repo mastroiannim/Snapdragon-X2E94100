@@ -1,4 +1,5 @@
 import sys
+import threading
 import time
 
 from rich.panel import Panel
@@ -6,6 +7,95 @@ from rich.text import Text
 
 from .components import Interface
 from .screens import Screens
+
+AREA_HINTS = {
+    "1": "Router: A avvia │ P anteprima │ S stop │ R riavvia │ L log │ X stop gestiti │ B indietro",
+    "2": "Direct: M scegli modello │ P anteprima │ A avvia │ S stop │ B indietro",
+    "3": "Verifica prerequisiti in sola lettura │ Invio per continuare",
+    "4": "Kilo Code: modello, ruolo e cartella progetto │ B annulla",
+    "5": "Diagnostica: R refresh │ P porta │ B benchmark │ L log │ E errori │ Q indietro",
+    "6": "Modelli: D dettagli │ T test tool calling │ I integrità/hash │ R refresh │ B indietro",
+    "7": "Preset INI: V visualizza │ C controlla │ E modifica │ P anteprima │ G rigenera │ B indietro",
+    "8": "Percorsi/link: A/R directory │ H/Y link │ D rimuovi │ I integrità │ B indietro",
+    "9": "Update: R refresh │ C check online │ S sincronizza │ G aggiorna GenieX │ B indietro",
+    "c": "Chat: digita il messaggio o un comando slash (/help) │ Ctrl+C interrompe │ Ctrl+D esce",
+    "l": "Live dashboard │ Invio per tornare al menu",
+}
+
+MENU_CLICKABLES = [
+    ("1 Router", "1"),
+    ("2 Singolo modello", "2"),
+    ("3 Verifica", "3"),
+    ("4 Kilo Code", "4"),
+    ("5 Diagnostica", "5"),
+    ("6 Modelli", "6"),
+    ("7 Preset INI", "7"),
+    ("8 Link", "8"),
+    ("9 Aggiornamenti", "9"),
+    ("C Chat", "c"),
+    ("L Live dashboard", "l"),
+    ("? Guida", "?"),
+    ("Q Esci", "q"),
+]
+
+# Comandi slash contestuali: {"/comando": (tasto_equivalente, descrizione)}.
+MENU_SLASH = {
+    "/router": ("1", "Gestione router multi-modello"),
+    "/direct": ("2", "Avvio diretto singolo modello"),
+    "/verifica": ("3", "Prerequisiti e sicurezza"),
+    "/kilo": ("4", "Kilo Code su cartella progetto"),
+    "/diagnostica": ("5", "Diagnostica e monitoraggio"),
+    "/modelli": ("6", "Inventario GGUF"),
+    "/preset": ("7", "Editor preset INI"),
+    "/link": ("8", "Percorsi e link modelli"),
+    "/update": ("9", "Aggiornamenti stack"),
+    "/chat": ("c", "Chat locale"),
+    "/live": ("l", "Dashboard live"),
+    "/guida": ("?", "Guida tasti e comandi"),
+    "/esci": ("q", "Esci dal control center"),
+}
+
+AREA_SLASH = {
+    "1": {
+        "/avvia": ("a", "Avvia il router"), "/anteprima": ("p", "Anteprima preset"),
+        "/stop": ("s", "Arresta il server della sessione"),
+        "/riavvia": ("r", "Riavvia il router"), "/log": ("l", "Log router"),
+        "/stop-gestiti": ("x", "Stop tutti i server gestiti"),
+        "/indietro": ("b", "Torna al menu"),
+    },
+    "2": {
+        "/scegli": ("m", "Scegli modello"), "/anteprima": ("p", "Anteprima comando"),
+        "/avvia": ("a", "Avvia il modello"), "/stop": ("s", "Arresta il server"),
+        "/ricarica": ("r", "Ricarica inventario"), "/indietro": ("b", "Torna al menu"),
+    },
+    "5": {
+        "/refresh": ("r", "Aggiorna metriche"), "/porta": ("p", "Cambia porta"),
+        "/benchmark": ("b", "Benchmark modello"), "/log": ("l", "Log recenti"),
+        "/errori": ("e", "Solo errori"), "/indietro": ("q", "Torna al menu"),
+    },
+    "6": {
+        "/dettagli": ("d", "Metadati modello"), "/test": ("t", "Test tool calling"),
+        "/integrita": ("i", "Header e SHA-256"), "/refresh": ("r", "Ricarica inventario"),
+        "/indietro": ("b", "Torna al menu"),
+    },
+    "7": {
+        "/visualizza": ("v", "Mostra INI"), "/controlla": ("c", "Valida sintassi"),
+        "/modifica": ("e", "Modifica parametro"), "/anteprima": ("p", "Anteprima diff"),
+        "/rigenera": ("g", "Rigenera preset"), "/indietro": ("b", "Torna al menu"),
+    },
+    "8": {
+        "/aggiungi": ("a", "Aggiungi directory"), "/rimuovi": ("r", "Rimuovi directory"),
+        "/hardlink": ("h", "Crea hard-link"), "/symlink": ("y", "Crea symlink"),
+        "/rimuovi-link": ("d", "Rimuovi link"), "/integrita": ("i", "Verifica GGUF"),
+        "/indietro": ("b", "Torna al menu"),
+    },
+    "9": {
+        "/refresh": ("r", "Refresh locale"), "/check": ("c", "Check release online"),
+        "/sync": ("s", "Sincronizza runtime"), "/geniex": ("g", "Aggiorna GenieX"),
+        "/indietro": ("b", "Torna al menu"),
+    },
+    "l": {"/indietro": ("", "Torna al menu (Invio)")},
+}
 
 
 class ControlCenter:
@@ -27,6 +117,19 @@ class ControlCenter:
             "c": self.screens.chat,
             "l": self.live_dashboard,
         }
+        self.ui.set_status_provider(self._top_status)
+
+    def _top_status(self) -> str:
+        try:
+            online, latency, models = self.processes.health()
+            router = "ONLINE" if online else "OFFLINE"
+            detail = f"{latency:.0f} ms │ {len(models)} modelli" if online else ""
+        except Exception:
+            router, detail = "N/D", ""
+        parts = [f"│ {self.processes.base_url}", f"│ Router {router}"]
+        if detail:
+            parts.append(f"│ {detail}")
+        return " ".join(parts)
 
     def dashboard_renderable(self):
         online, latency, models = self.processes.health()
@@ -52,53 +155,82 @@ class ControlCenter:
         return Panel(content, border_style="cyan", padding=(1, 2))
 
     def live_dashboard(self):
-        self.ui.console.print("Aggiornamento ogni 2 secondi; premi un tasto per tornare al menu.")
+        self.ui.set_hint(AREA_HINTS["l"])
+        stop = threading.Event()
+
+        def refresh():
+            while not stop.is_set():
+                try:
+                    self.ui.replace_body(self.dashboard_renderable())
+                except Exception:
+                    pass
+                stop.wait(2)
+
+        worker = threading.Thread(target=refresh, daemon=True)
+        worker.start()
         try:
-            import msvcrt
-            from rich.live import Live
-            with Live(self.dashboard_renderable(), console=self.ui.console, refresh_per_second=4) as live:
-                while True:
-                    live.update(self.dashboard_renderable())
-                    for _ in range(20):
-                        if msvcrt.kbhit():
-                            msvcrt.getwch()
-                            return
-                        time.sleep(0.1)
-        except (ImportError, KeyboardInterrupt):
-            self.ui.console.print(self.dashboard_renderable())
+            self.ui.prompt("Live dashboard attiva (refresh 2s)", "")
+        finally:
+            stop.set()
+            worker.join(timeout=3)
 
     def help(self):
         self.ui.table("Navigazione", ("Tasto", "Funzione"), [
-            ("1…9", "Nove aree operative"),
+            ("1…9", "Nove aree operative (tasto singolo o click)"),
+            ("/", "Comandi slash contestuali alla schermata, con completamento"),
             ("C", "Chat OpenAI-compatibile locale"),
             ("L", "Dashboard aggiornata ogni 2 secondi"),
             ("B", "Indietro nei sottomenu"),
             ("R", "Aggiorna la schermata corrente"),
             ("Q", "Uscita e scelta del ciclo di vita dei server"),
+            ("F1 / F10", "Guida / Uscita quando il menu e' in attesa"),
+            ("Mouse", "Ruota per scorrere; click sulle voci del menu"),
         ])
+
+    def _dispatch(self, choice: str) -> bool:
+        """Esegue la scelta del menu; False per uscire."""
+        if choice in ("q", "quit", "exit"):
+            return False
+        if choice in ("?", "help"):
+            self.help()
+            return True
+        action = self.actions.get(choice)
+        if action is None:
+            if choice:
+                self.ui.console.print("Scelta non valida. ? mostra la guida.")
+            return True
+        self.ui.set_hint(AREA_HINTS.get(choice, ""))
+        self.ui.set_slash_commands(AREA_SLASH.get(choice, {}))
+        try:
+            action()
+        except KeyboardInterrupt:
+            self.ui.console.print("\nOperazione corrente interrotta. Q per uscire.")
+        except Exception as exc:
+            self.ui.error(exc)
+        finally:
+            self.ui.set_hint("")
+            self.ui.set_slash_commands(MENU_SLASH)
+            self.ui.set_clickables(MENU_CLICKABLES)
+        return True
 
     def run(self):
         if self.settings.load_error:
             self.ui.console.print(f"Configurazione non leggibile; uso valori predefiniti: {self.settings.load_error}")
-        while True:
-            try:
-                self.ui.console.print(self.dashboard_renderable())
-                choice = self.ui.prompt().casefold()
-                if choice in ("q", "quit", "exit"):
+        self.ui.set_clickables(MENU_CLICKABLES)
+        self.ui.set_slash_commands(MENU_SLASH)
+        self.ui.start()
+        try:
+            while True:
+                self.ui.replace_body(self.dashboard_renderable())
+                try:
+                    choice = self.ui.prompt(single_key=True)
+                except KeyboardInterrupt:
+                    self.ui.console.print("\nOperazione interrotta. Q per uscire.")
+                    continue
+                if not self._dispatch(choice):
                     break
-                if choice in ("?", "help"):
-                    self.help()
-                    continue
-                action = self.actions.get(choice)
-                if action is None:
-                    if choice:
-                        self.ui.console.print("Scelta non valida. ? mostra la guida.")
-                    continue
-                action()
-            except KeyboardInterrupt:
-                self.ui.console.print("\nOperazione corrente interrotta. Q per uscire.")
-            except Exception as exc:
-                self.ui.error(exc)
+        finally:
+            self.ui.stop()
         self.exit_lifecycle()
 
     def exit_lifecycle(self):

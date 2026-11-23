@@ -178,6 +178,16 @@ argomenti. Riutilizza il bootstrap Python/venv esistente con `-ExecutionPolicy B
 Il dashboard usa `rich` e `prompt_toolkit`; i controller risiedono in `hexagon_control/`,
 separati dalle schermate, mentre `launch-hexagon.ps1` resta l'unica fonte delle euristiche.
 
+L'interfaccia è full-screen in stile Kilo: **terminal fisso** su alternate screen (nessuno
+scroll del terminale), **toolbar superiore** con endpoint, stato router, latenza e numero
+di modelli, **toolbar inferiore** con shortcut e suggerimenti contestuali per l'area
+aperta, area contenuto **scorrevile con la rotellina del mouse** e **voci del menu
+cliccabili**. La console viene pulita all'avvio (`cls` + titolo finestra). La riga di
+input offre suggerimenti dalla history; `F1` apre la guida e `F10` esce quando il menu è
+in attesa. Chat e lancio di Kilo Code sospendono temporaneamente la full-screen app per
+restituire il terminale al processo esterno e la riprendono all'uscita. In ambienti senza
+console (pipe, test, IDE) l'interfaccia ricade automaticamente sul prompt a riga.
+
 I tasti `1`–`9` aprono rispettivamente: Router, singolo modello, prerequisiti/sicurezza,
 Kilo Code, diagnostica, inventario GGUF, editor INI, percorsi/link e aggiornamenti.
 `C` apre la chat, `L` la dashboard con refresh ogni due secondi, `B` torna indietro nei

@@ -3,6 +3,8 @@ setlocal
 chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
 set PYTHONUTF8=1
+title Hexagon Control Center
+cls
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0launch-tui.ps1" -ControlCenter
 set "EXIT_CODE=%ERRORLEVEL%"
 if not "%EXIT_CODE%"=="0" (

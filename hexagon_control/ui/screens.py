@@ -208,7 +208,8 @@ class Screens:
                 self.ui.result(self.kilo_service.prepare(main, small))
             elif action == "a":
                 if self.ui.confirm(f"Rigenerare kilo.json e avviare Kilo Code in {target.resolve()}?"):
-                    self.ui.result(self.kilo_service.launch(main, small, role, pure, workdir=str(target)))
+                    with self.ui.suspended():
+                        self.ui.result(self.kilo_service.launch(main, small, role, pure, workdir=str(target)))
         except Exception as exc:
             self.ui.error(exc)
 
@@ -401,6 +402,7 @@ class Screens:
         )
         chat.console = self.ui.console
         try:
-            chat.run()
+            with self.ui.suspended():
+                chat.run()
         finally:
             chat.close()
