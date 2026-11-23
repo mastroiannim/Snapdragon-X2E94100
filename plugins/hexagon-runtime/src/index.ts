@@ -276,36 +276,3 @@ export const plugin = { id: "hexagon-runtime", server: pluginInit } as const;
 
 export default pluginInit;
 
-export { createHexagonTools, parseBenchReport } from "./tools.js";
-export {
-  ROUTER_HOST,
-  ROUTER_PORT,
-  parseModelsIni,
-  buildRouterArgs,
-  buildDirectArgs,
-  probeRouter,
-  ensureModelsIni,
-} from "./process.js";
-export {
-  TESTED_CONTEXT_WINDOWS,
-  contextWindowFor,
-  listKnownModels,
-  buildHexagonProvider,
-  outputLimitFor,
-} from "./models.js";
-export {
-  scanModels,
-  inspectGguf,
-  calculateOptimalConfig,
-  isMmprojFile,
-} from "./discovery.js";
-export {
-  qualifyModel,
-  loadRegistry,
-  saveRegistry,
-  defaultRegistryPath,
-} from "./qualify.js";
-export { startModelWatcher } from "./watcher.js";
-export { probeHealth, waitForHealth } from "./health.js";
-export { startWatchdog, WATCHDOG_INTERVAL_MS } from "./watchdog.js";
-

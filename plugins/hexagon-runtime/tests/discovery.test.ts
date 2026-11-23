@@ -19,6 +19,13 @@ describe("discovery.ts — isMmprojFile", () => {
 });
 
 describe("calculateOptimalConfig — Euristiche hardware", () => {
+  it("Fallback prudente per metadati non validi o mancanti", () => {
+    const cfg = calculateOptimalConfig({} as GgufMetadata);
+    expect(cfg.device).toBe("HTP0");
+    expect(cfg.contextSize).toBe(65536);
+    expect(cfg.strategy).toContain("Fallback");
+  });
+
   it("Dense <= 6GB: 100% NPU HTP0", () => {
     const meta: GgufMetadata = {
       architecture: "qwen2",

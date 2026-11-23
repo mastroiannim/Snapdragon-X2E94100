@@ -72,6 +72,13 @@ export function isMmprojFile(fileName: string): boolean {
  * e sui vincoli hardware dello Snapdragon X2 Elite (limite DMA FastRPC < 1 GiB).
  */
 export function calculateOptimalConfig(meta: GgufMetadata): OptimalConfig {
+  if (!meta || typeof meta.architecture !== "string") {
+    return {
+      device: "HTP0",
+      contextSize: 65_536,
+      strategy: "Fallback: metadati non validi o mancanti",
+    };
+  }
   const size = meta.size_gb;
   const isKQuant = meta.quant_name === "K-Quants";
   const hasSwa = meta.sliding_window > 0;
