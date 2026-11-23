@@ -181,3 +181,49 @@ replace_body 1 aggiornamento documento (era 2).
 API pubblica di `Interface` invariata (prompt, confirm, pause, table, result,
 error, console, suspended); aggiornati i test harness (app avviata in thread)
 e i tool `tools/benchmark_tui.py` / `tools/diagnose_tui.py`.
+
+## FASE 3 — Rendering a colori e UX
+
+**Cambiamenti**
+- Colori reali: i renderable Rich sono convertiti in ANSI truecolor e poi in
+  frammenti prompt_toolkit (`_render_rich`, `_BodyLexer`). Il corpo resta un
+  `Buffer` con documento atomico; il testo plain coincide byte-per-byte col
+  rendering `color_system=None` precedente (nessuna regressione sui test).
+- Click per riga/colonna: `_scan_click_ranges` registra le occorrenze esatte
+  delle etichette; `click_value_at(linea, colonna)` risolve la voce sotto il
+  click (non piu' substringa, niente falsi positivi su righe con piu' voci).
+  Hover (`_update_hover`) ed evidenziazione della selezione menu.
+- Navigazione con frecce+Invio oltre ai tasti singoli; modalita' input esplicita
+  (`Tab` o `/`) in cui la digitazione libera non e' intercettata dai single-key.
+  `Esc` annulla davvero il prompt (prima applicava il default); `F1`/`F10`
+  globali anche sui prompt non single-key.
+- Scrollbar, `PgUp/PgDn/Home/End`, ricerca incrementale (`Ctrl+F`, Invio prossimo,
+  Esc fine). Il cursore del corpo e' mantenuto alla prima riga visibile
+  (`_sync_body_cursor`): `Window._scroll` porta il cursore in vista a ogni render,
+  quindi senza questo accorgimento il refresh riportava la vista in fondo.
+- Live dashboard aggiornato in place: `replace_body` conserva lo scroll e produce
+  un solo frame (un `set_document`, redraw coalescati da `Application.invalidate`).
+- Layout alla larghezza reale del terminale (80..200, niente minimo forzato 100);
+  re-render al resize con debounce (`_on_before_render`).
+- Errori visibili nella barra di stato (`report_error`); il refresh del dashboard
+  non e' piu' silenziato. `Esc` sulla conferma di uscita lascia i server attivi
+  (scelta sicura, nessuna azione distruttiva senza conferma).
+- Handler eccezioni del loop headless-safe: l'handler predefinito di
+  prompt_toolkit crea una `PromptSession` su console reale per "Press ENTER",
+  che in headless genera una cascata di `NoConsoleScreenBufferError`. Ora gli
+  errori sono registrati e stampati su stderr senza toccare la console.
+- Le chiamate cross-thread (`_call_soon`) sono schedulate nel contesto
+  dell'app session (`app.context`), evitando l'output Win32 di default.
+
+**Misure dopo** (`tools/benchmark_tui.py`):
+
+| Misura | Prima (FASE 2) | Dopo (FASE 3) |
+| --- | --- | --- |
+| `replace_body()` | 1 set_document | 1 set_document, 1 frame |
+| keypress -> prompt p50 | ~0,2 ms | ~0,2 ms |
+| larghezza corpo | min 100 (troncamento) | reale 80..200 |
+| click | substringa (falsi positivi) | riga/colonna esatta |
+
+Nuovi test: `tests/test_tui_ux.py` (26) — colori, hit-test, hover, scroll,
+ricerca, navigazione, modalita' input, Esc/F1/F10, barra errori, uscita sicura.
+Suite totale 169 test OK su Windows ARM64 / Python 3.13.
