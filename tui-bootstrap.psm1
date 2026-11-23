@@ -47,11 +47,43 @@ function Install-TuiPython([string]$Destination, [string]$Architecture) {
     } finally { Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue }
 }
 
+function Get-TuiWarmFingerprint([string]$Requirements, [string]$EnvironmentPython) {
+    # Impronta economica (nessun subprocess Python): hash di requirements e del
+    # modulo bootstrap + identita' del python del venv (mtime/size). Se invariata,
+    # l'ambiente e' lo stesso e si puo' saltare la verifica di provisioning.
+    $reqHash = (Get-FileHash -LiteralPath $Requirements -Algorithm SHA256).Hash
+    $moduleHash = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'tui-bootstrap.psm1') -Algorithm SHA256).Hash
+    $identity = 'assente'
+    if (Test-Path -LiteralPath $EnvironmentPython -PathType Leaf) {
+        $item = Get-Item -LiteralPath $EnvironmentPython
+        $identity = '{0}:{1}' -f $item.LastWriteTimeUtc.Ticks, $item.Length
+    }
+    return '{0}|{1}|{2}' -f $reqHash, $moduleHash, $identity
+}
+
 function Resolve-HexagonTuiPython {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Requirements,
         [string]$CacheDirectory = (Join-Path $env:LOCALAPPDATA 'HexagonClaw'))
     [void][IO.Directory]::CreateDirectory($CacheDirectory)
+    $environment = Join-Path $CacheDirectory 'tui-env'
+    $environmentPython = Join-Path $environment 'Scripts\python.exe'
+    $warmPath = Join-Path $CacheDirectory 'tui-warm.json'
+    $marker = Join-Path $environment 'requirements.sha256'
+    $reqHash = (Get-FileHash -LiteralPath $Requirements -Algorithm SHA256).Hash
+    # Percorso caldo: se l'impronta e' invariata e il pip era riuscito (marker),
+    # restituisce subito il python del venv senza subprocess di verifica.
+    if (Test-Path -LiteralPath $warmPath -PathType Leaf) {
+        try {
+            $warm = Get-Content -LiteralPath $warmPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($warm.Fingerprint -eq (Get-TuiWarmFingerprint $Requirements $environmentPython) `
+                -and (Test-Path -LiteralPath $warm.Python -PathType Leaf) `
+                -and (Test-Path -LiteralPath $marker -PathType Leaf) `
+                -and ([IO.File]::ReadAllText($marker) -eq $reqHash)) {
+                return [string]$warm.Python
+            }
+        } catch { }
+    }
     $lockPath = Join-Path $CacheDirectory 'setup.lock'
     try { $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
     catch { throw 'Preparazione TUI gia'' in corso in un altro processo.' }
@@ -65,15 +97,11 @@ function Resolve-HexagonTuiPython {
             Write-Host "Preparazione Python $architecture per la TUI..."
             $python = Install-TuiPython $managedRoot $architecture
         }
-        $environment = Join-Path $CacheDirectory 'tui-env'
-        $environmentPython = Join-Path $environment 'Scripts\python.exe'
         if (-not (Test-TuiPython $environmentPython)) {
             Write-Host 'Creazione ambiente Python della TUI...'
             [void](Invoke-RuntimeNative $python ('-I -m venv "' + $environment + '"') (Split-Path -Parent $python) 120000)
         }
-        $fingerprint = (Get-FileHash -LiteralPath $Requirements -Algorithm SHA256).Hash
-        $marker = Join-Path $environment 'requirements.sha256'
-        $ready = (Test-Path -LiteralPath $marker) -and ([IO.File]::ReadAllText($marker) -eq $fingerprint)
+        $ready = (Test-Path -LiteralPath $marker) -and ([IO.File]::ReadAllText($marker) -eq $reqHash)
         if ($ready) {
             try { [void](Invoke-RuntimeNative $environmentPython '-I -c "import rich,httpx,prompt_toolkit"' $environment 10000) }
             catch { $ready = $false }
@@ -82,8 +110,12 @@ function Resolve-HexagonTuiPython {
             Write-Host 'Installazione dipendenze TUI nell''ambiente dedicato...'
             [void](Invoke-RuntimeNative $environmentPython ('-I -m pip install --disable-pip-version-check --only-binary=:all: -r "' + $Requirements + '"') $environment 600000)
             [void](Invoke-RuntimeNative $environmentPython '-I -c "import rich,httpx,prompt_toolkit"' $environment 10000)
-            [IO.File]::WriteAllText($marker, $fingerprint)
+            [IO.File]::WriteAllText($marker, $reqHash)
         }
+        # Cache calda scritta solo a provisioning riuscito: il prossimo avvio
+        # salta Find/Test/import-check (nessun subprocess) e va dritto a python.
+        $warm = @{ Python = $environmentPython; Fingerprint = (Get-TuiWarmFingerprint $Requirements $environmentPython) }
+        $warm | ConvertTo-Json -Compress | Set-Content -LiteralPath $warmPath -Encoding UTF8
         return $environmentPython
     } finally {
         $lock.Dispose()

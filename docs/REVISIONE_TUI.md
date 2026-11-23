@@ -227,3 +227,36 @@ e i tool `tools/benchmark_tui.py` / `tools/diagnose_tui.py`.
 Nuovi test: `tests/test_tui_ux.py` (26) — colori, hit-test, hover, scroll,
 ricerca, navigazione, modalita' input, Esc/F1/F10, barra errori, uscita sicura.
 Suite totale 169 test OK su Windows ARM64 / Python 3.13.
+
+## FASE 4 — Avvio a caldo
+
+**Cambiamenti**
+- `tui-bootstrap.psm1`: cache calda (`tui-warm.json` nella cache directory).
+  `Get-TuiWarmFingerprint` calcola un'impronta economica senza subprocess Python
+  (SHA-256 di `requirements.txt` e del modulo bootstrap + mtime/size del python
+  del venv). Se l'impronta e' invariata e il marker `requirements.sha256` prova
+  che il pip era riuscito, `Resolve-HexagonTuiPython` restituisce subito il
+  python del venv saltando `Find-TuiPython`, `Test-TuiPython` e il controllo
+  `import rich,httpx,prompt_toolkit` (tre subprocess eliminati a ogni avvio).
+- La cache calda e' scritta solo a provisioning riuscito; un pip fallito non
+  lascia ne' marker ne' cache (retry possibile). Requirements o modulo cambiati
+  invalidano l'impronta e rieseguono il provisioning.
+- Catena `hexagon.bat → launch-tui.ps1 → bootstrap → python` invariata (richiesta
+  dai test entrypoint); il percorso caldo la rende rapida senza bypassarla.
+- L'handshake busy-wait era gia' stato rimosso in FASE 2 (`_ready`/`_finished`).
+- Nuovo tool `tools/measure_startup.py`: misura il first frame headless.
+
+**Misure** (Windows ARM64, venv esistente):
+
+| Misura | Prima | Dopo |
+| --- | --- | --- |
+| `Resolve-HexagonTuiPython` a caldo | ~808 ms (3 subprocess) | ~238 ms (cache, 0 subprocess) |
+| first frame headless (build+render) | — | ~10 ms |
+| import Python (`hexagon_app.py`) | ~519 ms | ~519 ms (invariato) |
+
+Stima first frame interattivo a caldo: ~240 ms (Resolve) + ~500 ms (import
+Python) + ~10 ms (build/render) + ~300 ms (overhead cmd/PowerShell) ≈ **1,2 s**,
+entro l'obiettivo ≤ ~2 s. Il primo setup (Python/venv/pip) resta invariato.
+
+Verifiche: `tests/tui-bootstrap.ps1` 4/4 PASS, `tests/entrypoints.ps1` 6/6 PASS,
+parse sintassi PowerShell 0 errori. Contratti read-only e sicurezza invariati.
