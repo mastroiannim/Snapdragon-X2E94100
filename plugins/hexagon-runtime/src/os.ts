@@ -4,7 +4,7 @@
  * della suite inietta fake attraverso OsDeps.
  */
 import { execFile, spawn } from "node:child_process";
-import { access, readdir, readFile } from "node:fs/promises";
+import { access, readdir, readFile, writeFile } from "node:fs/promises";
 import type {
   ExecFn,
   ExistsFn,
@@ -15,6 +15,7 @@ import type {
   ReadFileFn,
   SleepFn,
   SpawnFn,
+  WriteFileFn,
 } from "./types.js";
 
 export const nodeExec: ExecFn = (command, args, options = {}) =>
@@ -59,6 +60,9 @@ export const nodeSpawn: SpawnFn = (command, args, options = {}) => {
 
 export const nodeReadFile: ReadFileFn = (path) => readFile(path, "utf8");
 
+export const nodeWriteFile: WriteFileFn = (path, content) =>
+  writeFile(path, content, "utf8");
+
 export const nodeExists: ExistsFn = async (path) => {
   try {
     await access(path);
@@ -84,6 +88,7 @@ export const nodeDeps: OsDeps = {
   spawn: nodeSpawn,
   fetch: nodeFetch,
   readFile: nodeReadFile,
+  writeFile: nodeWriteFile,
   exists: nodeExists,
   listDir: nodeListDir,
   sleep: nodeSleep,

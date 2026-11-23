@@ -8,10 +8,11 @@ vi.mock("node:fs/promises", () => ({
   access: vi.fn(),
   readdir: vi.fn(),
   readFile: vi.fn(),
+  writeFile: vi.fn(),
 }));
 
 import { execFile, spawn } from "node:child_process";
-import { access, readdir, readFile } from "node:fs/promises";
+import { access, readdir, readFile, writeFile } from "node:fs/promises";
 import {
   nodeDeps,
   nodeExec,
@@ -22,6 +23,7 @@ import {
   nodeReadFile,
   nodeSleep,
   nodeSpawn,
+  nodeWriteFile,
 } from "../src/os.js";
 import { fakeResponse } from "./helpers.js";
 
@@ -30,6 +32,7 @@ const spawnMock = vi.mocked(spawn);
 const accessMock = vi.mocked(access);
 const readdirMock = vi.mocked(readdir);
 const readFileMock = vi.mocked(readFile);
+const writeFileMock = vi.mocked(writeFile);
 
 afterEach(() => {
   vi.clearAllMocks();
@@ -126,6 +129,16 @@ describe("nodeReadFile / nodeExists / nodeListDir", () => {
     expect(readFileMock).toHaveBeenCalledWith("C:/x.ini", "utf8");
   });
 
+  it("writeFile in utf8", async () => {
+    writeFileMock.mockResolvedValue(undefined as never);
+    await nodeWriteFile("C:/x.ini", "[*]\nthreads = 12\n");
+    expect(writeFileMock).toHaveBeenCalledWith(
+      "C:/x.ini",
+      "[*]\nthreads = 12\n",
+      "utf8",
+    );
+  });
+
   it("exists: true su access riuscito, false su errore", async () => {
     accessMock.mockResolvedValue(undefined as never);
     expect(await nodeExists("C:/x")).toBe(true);
@@ -178,6 +191,7 @@ describe("nodeDeps", () => {
     expect(nodeDeps.spawn).toBe(nodeSpawn);
     expect(nodeDeps.fetch).toBe(nodeFetch);
     expect(nodeDeps.readFile).toBe(nodeReadFile);
+    expect(nodeDeps.writeFile).toBe(nodeWriteFile);
     expect(nodeDeps.exists).toBe(nodeExists);
     expect(nodeDeps.listDir).toBe(nodeListDir);
     expect(nodeDeps.sleep).toBe(nodeSleep);

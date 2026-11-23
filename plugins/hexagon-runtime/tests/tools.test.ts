@@ -3,6 +3,7 @@ import {
   collectStatus,
   createHexagonTools,
   parseBenchReport,
+  parseOptionalNumber,
   runBenchmark,
 } from "../src/tools.js";
 import type { SyncOutcome } from "../src/sync.js";
@@ -10,11 +11,16 @@ import { fakeResponse, okExec, recordingExec, recordingFetch } from "./helpers.j
 
 const BENCH_MARKDOWN = `# Benchmark & PMIC Energy Report (Auto-Generated)
 
-| Modello | Profilo | Test | Velocita' (t/s) | NPU (W) |
-| :--- | :--- | :---: | ---: | ---: |
-| \`\`Ornith-1.5-9B-Q4_0.gguf\`\` | **HTP0 (100% NPU)** | \`\`pp512\`\` | **750,5** ± 3 | N/D |
-| \`\`Ornith-1.5-9B-Q4_0.gguf\`\` | **HTP0 (100% NPU)** | \`\`tg128\`\` | **46.2** ± 1 | 14 |
-| \`flint.gguf\` | **GPUOpenCL (100% GPU)** | \`tg128\` | **12** ± 0 | N/D |
+| Modello | Profilo | Test | Velocita' (t/s) | NPU (W) | GPU (W) | CPU (W) | RAM (W) | INFRA (W) | SoC Tot (W) | Sistema (W) |
+| :--- | :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| \`\`Ornith-1.5-9B-Q4_0.gguf\`\` | **HTP0 (100% NPU)** | \`\`pp512\`\` | **750,5** ± 3 | 14,2 | 1,1 | 3,4 | 2,2 | 1,0 | **21,9** | **28,4** |
+| \`\`Ornith-1.5-9B-Q4_0.gguf\`\` | **HTP0 (100% NPU)** | \`\`tg128\`\` | **46.2** ± 1 | 14 | N/D | 3 | 2 | 1 | **20** | **27** |
+| \`flint.gguf\` | **GPUOpenCL (100% GPU)** | \`tg128\` | **12** ± 0 | N/D | N/D | N/D | N/D | N/D | **N/D** | **N/D** |
+`;
+
+const LEGACY_MARKDOWN = `| Modello | Profilo | Test | Velocita' (t/s) |
+| :--- | :--- | :---: | ---: |
+| \`m.gguf\` | **HTP0 (100% NPU)** | \`tg128\` | **40** |
 `;
 
 describe("collectStatus", () => {
@@ -114,14 +120,68 @@ describe("parseBenchReport", () => {
       profile: "HTP0 (100% NPU)",
       test: "pp512",
       tokPerSec: 750.5,
+      stdDev: 3,
+      npuW: 14.2,
+      gpuW: 1.1,
+      cpuW: 3.4,
+      memW: 2.2,
+      infraW: 1,
+      socW: 21.9,
+      sysW: 28.4,
     });
     expect(rows[1].tokPerSec).toBe(46.2);
     expect(rows[2]).toMatchObject({ model: "flint.gguf", tokPerSec: 12 });
   });
 
+  it("telemetria PMIC: N/D esplicito come null, mai zero", () => {
+    const rows = parseBenchReport(BENCH_MARKDOWN);
+    expect(rows[1].gpuW).toBeNull();
+    expect(rows[1].npuW).toBe(14);
+    expect(rows[1].socW).toBe(20);
+    expect(rows[1].sysW).toBe(27);
+    expect(rows[2].npuW).toBeNull();
+    expect(rows[2].socW).toBeNull();
+    expect(rows[2].sysW).toBeNull();
+    expect(rows[2].stdDev).toBe(0);
+  });
+
+  it("report legacy senza colonne PMIC: potenze null", () => {
+    const rows = parseBenchReport(LEGACY_MARKDOWN);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual({
+      model: "m.gguf",
+      profile: "HTP0 (100% NPU)",
+      test: "tg128",
+      tokPerSec: 40,
+      stdDev: null,
+      npuW: null,
+      gpuW: null,
+      cpuW: null,
+      memW: null,
+      infraW: null,
+      socW: null,
+      sysW: null,
+    });
+  });
+
   it("report vuoto o senza righe valide: nessun risultato", () => {
     expect(parseBenchReport("")).toEqual([]);
     expect(parseBenchReport("| a | b |\n| - | - |")).toEqual([]);
+  });
+});
+
+describe("parseOptionalNumber", () => {
+  it("numeri, virgola it-IT e grassetto markdown", () => {
+    expect(parseOptionalNumber("14,2")).toBe(14.2);
+    expect(parseOptionalNumber("**21,9**")).toBe(21.9);
+    expect(parseOptionalNumber(" 3 ")).toBe(3);
+  });
+  it("N/D, vuoto, non numerico e undefined: null", () => {
+    expect(parseOptionalNumber("N/D")).toBeNull();
+    expect(parseOptionalNumber("**N/D**")).toBeNull();
+    expect(parseOptionalNumber("")).toBeNull();
+    expect(parseOptionalNumber("abc")).toBeNull();
+    expect(parseOptionalNumber(undefined)).toBeNull();
   });
 });
 
@@ -257,6 +317,8 @@ describe("createHexagonTools", () => {
       ),
     );
     expect(parsed.results[0].tokPerSec).toBe(750.5);
+    expect(parsed.results[0].npuW).toBe(14.2);
+    expect(parsed.results[0].socW).toBe(21.9);
     expect(parsed.model).toBe("Ornith-1.5-9B-Q4_0");
   });
 

@@ -196,21 +196,37 @@ e mantiene `launch-hexagon.ps1` come unica fonte delle euristiche hardware:
   dei launcher PowerShell.
 - **`process.ts`** — router su `127.0.0.1:18803`; se la porta non risponde avvia
   `llama-server.exe` con `ADSP_LIBRARY_PATH` impostato tassativamente sulla directory
-  runtime (piu' `GGML_HEXAGON_OPBATCH`/`GGML_HEXAGON_VTCM_SIZE`). Se il server e' gia'
-  attivo non interferisce. Parsing di `hexagon-models.ini` per device `HTP0` (NPU),
-  `GPUOpenCL` e split ibridi.
+  runtime (piu' `GGML_HEXAGON_OPBATCH`/`GGML_HEXAGON_VTCM_SIZE`). Verifica d'identita'
+  del rispondente (`probeRouter`: shape OpenAI di `/v1/models` o `status` di `/health`):
+  un llama-server gia' attivo non viene toccato, un processo estraneo sulla porta
+  viene segnalato e l'avvio rifiutato. Zero-setup INI: se `hexagon-models.ini` manca,
+  `ensureModelsIni` lo genera dalla preview `launch-hexagon.ps1 -Mode Router -DryRun -Json`
+  (unica fonte delle euristiche hardware) e ne persiste `ini_content`. Parsing INI
+  per device `HTP0` (NPU), `GPUOpenCL` e split ibridi.
 - **`health.ts`** — polling `http://127.0.0.1:18803/health` ogni 1000 ms, fino a 30
-  tentativi (30 s): il tempo di allocazione del grafo HTP sulla NPU.
+  tentativi (30 s): il tempo di allocazione del grafo HTP sulla NPU. `probeHealth`
+  distingue `ready`/`loading`/`down` per il watchdog.
+- **`watchdog.ts`** — sorveglianza periodica (default 15 s) a tick non sovrapposti:
+  se il router e' `down` recupera con `ensureServer` + `waitForHealth`; se e'
+  `loading` (warm-up NPU) attende senza riavviare. Avviato dopo il bootstrap della
+  prima sessione, fermato quando l'ultima sessione chiude o l'istanza viene dismessa.
 - **`models.ts`** — contesti reali testati, senza i limiti dichiarati da GenieX:
   `Ornith-1.5-9B-Q4_0` e `MiniCPM5-2B-Q4_K_M` a 65.536 token; `flint-UD-Q4_K_XL` e
-  `gpt-oss-20b-Q4_0` a 131.072 token.
+  `gpt-oss-20b-Q4_0` a 131.072 token. `buildHexagonProvider` costruisce la
+  configurazione dinamica del provider (catalogo testato + sezioni INI, limiti di
+  output con la stessa regola di `kilo_config.py`).
 - **`tools.ts`** — agent tool per Kilo: `hexagon_status` (stato router, latenza,
   modelli caricati), `hexagon_sync` (riallineamento runtime forzato),
-  `hexagon_bench` (token/s per profilo NPU/GPU da `benchmark-hexagon.ps1`).
-- **`index.ts`** — hook `event`/`session.created` per il bootstrap automatico
-  (sync → avvio → health) e hook `chat.params` che inietta
-  `reasoning_effort: "none"` sui modelli del provider locale `hexagon`, per un
-  tool-calling deterministico.
+  `hexagon_bench` (token/s per profilo NPU/GPU da `benchmark-hexagon.ps1`, con
+  telemetria PMIC completa: NPU/GPU/CPU/RAM/INFRA/SoC/Sistema in W e deviazione
+  standard; i valori non misurati sono `null`, mai zero).
+- **`index.ts`** — hook `config` per la configurazione dinamica del provider
+  `hexagon` a runtime (senza scrivere `kilo.json`: opzioni utente e modelli ignoti
+  al plugin preservati, contesti testati prioritari); hook `event`/`session.created`
+  per il bootstrap automatico (sync → INI → avvio → health) e il ciclo di vita del
+  watchdog (`session.deleted`, `server.instance.disposed`); hook `chat.params` che
+  inietta `reasoning_effort: "none"` sui modelli del provider locale `hexagon`, per
+  un tool-calling deterministico.
 
 Gli helper Python superstiti (`stack_manager.py`, `kilo_config.py`) sono usati solo
 dagli script PowerShell di setup/launcher; le dipendenze TUI (`rich`,

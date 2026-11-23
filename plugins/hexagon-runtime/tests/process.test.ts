@@ -3,14 +3,25 @@ import {
   buildDirectArgs,
   buildRouterArgs,
   defaultPaths,
+  ensureModelsIni,
   ensureServer,
   isServerActive,
+  parseJsonPayload,
   parseModelsIni,
+  probeRouter,
   ROUTER_HOST,
   ROUTER_PORT,
   serverEnv,
 } from "../src/process.js";
-import { fakeResponse, recordingFetch, recordingSpawn } from "./helpers.js";
+import {
+  fakeResponse,
+  okExec,
+  recordingExec,
+  recordingFetch,
+  recordingSpawn,
+  recordingWriteFile,
+  routerResponse,
+} from "./helpers.js";
 
 const INI_SAMPLE = `version = 1
 # commento
@@ -176,12 +187,21 @@ describe("ensureServer", () => {
     modelsDir: "C:/models",
   };
 
-  it("server gia' attivo: isolamento, nessuna spawn", async () => {
-    const { fn: fetch } = recordingFetch(() => fakeResponse(200));
+  it("server gia' attivo e identificato: isolamento, nessuna spawn", async () => {
+    const { fn: fetch } = recordingFetch((call) => routerResponse(call.url));
     const { fn: spawn, calls } = recordingSpawn();
     const result = await ensureServer({ ...base, fetch, spawn });
     expect(result.started).toBe(false);
     expect(result.pid).toBeUndefined();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("processo estraneo sulla porta: avvio rifiutato, nessuna interferenza", async () => {
+    const { fn: fetch } = recordingFetch(() => fakeResponse(200, { hello: "world" }));
+    const { fn: spawn, calls } = recordingSpawn();
+    await expect(ensureServer({ ...base, fetch, spawn })).rejects.toThrow(
+      /non identificato come llama-server/,
+    );
     expect(calls).toHaveLength(0);
   });
 
@@ -248,5 +268,160 @@ describe("defaultPaths", () => {
   it("costanti router", () => {
     expect(ROUTER_PORT).toBe(18803);
     expect(ROUTER_HOST).toBe("127.0.0.1");
+  });
+});
+
+describe("probeRouter: verifica d'identita'", () => {
+  it("shape OpenAI di /v1/models: identificato", async () => {
+    const { fn: fetch, calls } = recordingFetch((call) =>
+      call.url.endsWith("/v1/models")
+        ? fakeResponse(200, { object: "list", data: [{ id: "m" }] })
+        : fakeResponse(503),
+    );
+    expect(await probeRouter({ fetch })).toEqual({ listening: true, identified: true });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("data array senza object: identificato", async () => {
+    const { fn: fetch } = recordingFetch(() => fakeResponse(200, { data: [] }));
+    expect(await probeRouter({ fetch })).toEqual({ listening: true, identified: true });
+  });
+
+  it("/v1/models non-ok ma /health con status: identificato via fallback", async () => {
+    const { fn: fetch, calls } = recordingFetch((call) =>
+      call.url.endsWith("/health")
+        ? fakeResponse(503, { status: "loading model" })
+        : fakeResponse(503),
+    );
+    expect(await probeRouter({ fetch })).toEqual({ listening: true, identified: true });
+    expect(calls.map((call) => call.url)).toEqual([
+      "http://127.0.0.1:18803/v1/models",
+      "http://127.0.0.1:18803/health",
+    ]);
+  });
+
+  it("risposte senza shape llama-server: in ascolto ma non identificato", async () => {
+    const { fn: fetch } = recordingFetch(() => fakeResponse(200, { hello: "world" }));
+    expect(await probeRouter({ fetch })).toEqual({ listening: true, identified: false });
+  });
+
+  it("json non valido su /health: non identificato", async () => {
+    const { fn: fetch } = recordingFetch((call) =>
+      call.url.endsWith("/health")
+        ? { status: 200, ok: true, json: async () => { throw new Error("bad json"); }, text: async () => "" }
+        : fakeResponse(404),
+    );
+    expect(await probeRouter({ fetch })).toEqual({ listening: true, identified: false });
+  });
+
+  it("nessuna risposta: porta libera", async () => {
+    const { fn: fetch } = recordingFetch(() => {
+      throw new Error("ECONNREFUSED");
+    });
+    expect(await probeRouter({ fetch })).toEqual({ listening: false, identified: false });
+  });
+
+  it("/v1/models muto ma /health vivo: listening preservato", async () => {
+    const { fn: fetch } = recordingFetch((call) => {
+      if (call.url.endsWith("/v1/models")) throw new Error("ECONNRESET");
+      return fakeResponse(200, { status: "ok" });
+    });
+    expect(await probeRouter({ fetch })).toEqual({ listening: true, identified: true });
+  });
+
+  it("timeout della sonda: nessun blocco indefinito", async () => {
+    const fetch = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<never>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        }),
+    );
+    expect(await probeRouter({ fetch, timeoutMs: 20 })).toEqual({
+      listening: false,
+      identified: false,
+    });
+  });
+});
+
+describe("parseJsonPayload", () => {
+  it("JSON puro", () => {
+    expect(parseJsonPayload('{"a":1}')).toEqual({ a: 1 });
+  });
+
+  it("JSON multi-riga con diagnostica prima e dopo", () => {
+    const stdout = 'WARNING: avviso\n{\n  "mode": "Router",\n  "ini_content": "x"\n}\nfine';
+    expect(parseJsonPayload(stdout)).toEqual({ mode: "Router", ini_content: "x" });
+  });
+
+  it("output vuoto o senza graffe: errore", () => {
+    expect(() => parseJsonPayload("   ")).toThrow(/output vuoto/);
+    expect(() => parseJsonPayload("testo libero")).toThrow(/payload JSON non trovato/);
+  });
+});
+
+describe("ensureModelsIni: zero-setup INI", () => {
+  const base = { iniPath: "C:/repo/hexagon-models.ini", workspaceDir: "C:/repo" };
+  const iniContent = "[*]\nthreads = 12\n\n[m]\nmodel = m.gguf\ndevice = HTP0\nctx-size = 65536\n";
+
+  it("INI presente: nessuna generazione", async () => {
+    const { fn: exec, calls } = recordingExec(() => okExec());
+    const { fn: writeFile, calls: writes } = recordingWriteFile();
+    const result = await ensureModelsIni({
+      ...base,
+      exec,
+      exists: async () => true,
+      writeFile,
+    });
+    expect(result).toEqual({ generated: false, modelCount: 0 });
+    expect(calls).toHaveLength(0);
+    expect(writes).toHaveLength(0);
+  });
+
+  it("INI assente: preview DryRun del launcher e scrittura di ini_content", async () => {
+    const { fn: exec, calls } = recordingExec(() =>
+      okExec(JSON.stringify({ mode: "Router", ini_content: iniContent, models: [{}, {}] }, null, 2)),
+    );
+    const { fn: writeFile, calls: writes } = recordingWriteFile();
+    const result = await ensureModelsIni({
+      ...base,
+      exec,
+      exists: async () => false,
+      writeFile,
+    });
+    expect(result).toEqual({ generated: true, modelCount: 2 });
+    expect(writes).toEqual([{ path: base.iniPath, content: iniContent }]);
+    const args = calls[0].args;
+    expect(args[args.indexOf("-File") + 1]).toBe("C:\\repo\\launch-hexagon.ps1");
+    expect(args).toContain("-DryRun");
+    expect(args).toContain("-Json");
+    expect(args[args.indexOf("-Mode") + 1]).toBe("Router");
+  });
+
+  it("launcher fallito: errore descrittivo", async () => {
+    const { fn: exec } = recordingExec(() => ({ code: 1, stdout: "", stderr: "cache modelli vuota" }));
+    const { fn: writeFile } = recordingWriteFile();
+    await expect(
+      ensureModelsIni({ ...base, exec, exists: async () => false, writeFile }),
+    ).rejects.toThrow(/Generazione hexagon-models\.ini fallita.*cache modelli vuota/);
+  });
+
+  it("ini_content assente o vuoto: errore esplicito", async () => {
+    const { fn: exec } = recordingExec(() => okExec('{"mode":"Router","models":[]}'));
+    const { fn: writeFile } = recordingWriteFile();
+    await expect(
+      ensureModelsIni({ ...base, exec, exists: async () => false, writeFile }),
+    ).rejects.toThrow(/ini_content assente/);
+  });
+
+  it("models non array: modelCount 0 ma generazione valida", async () => {
+    const { fn: exec } = recordingExec(() => okExec(JSON.stringify({ ini_content: iniContent })));
+    const { fn: writeFile } = recordingWriteFile();
+    const result = await ensureModelsIni({
+      ...base,
+      exec,
+      exists: async () => false,
+      writeFile,
+    });
+    expect(result).toEqual({ generated: true, modelCount: 0 });
   });
 });

@@ -49,6 +49,7 @@ export interface HttpResponse {
 export type FetchFn = (url: string, init?: RequestInit) => Promise<HttpResponse>;
 
 export type ReadFileFn = (path: string) => Promise<string>;
+export type WriteFileFn = (path: string, content: string) => Promise<void>;
 export type ExistsFn = (path: string) => Promise<boolean>;
 export type ListDirFn = (path: string) => Promise<string[]>;
 export type SleepFn = (ms: number) => Promise<void>;
@@ -60,6 +61,7 @@ export interface OsDeps {
   spawn: SpawnFn;
   fetch: FetchFn;
   readFile: ReadFileFn;
+  writeFile: WriteFileFn;
   exists: ExistsFn;
   listDir: ListDirFn;
   sleep: SleepFn;

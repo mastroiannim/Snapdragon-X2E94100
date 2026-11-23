@@ -8,7 +8,7 @@
  */
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { FetchFn, SpawnFn } from "./types.js";
+import type { ExecFn, ExistsFn, FetchFn, SpawnFn, WriteFileFn } from "./types.js";
 
 export const ROUTER_PORT = 18803;
 export const ROUTER_HOST = "127.0.0.1";
@@ -210,15 +210,86 @@ export interface EnsureServerResult {
   reason: string;
 }
 
-/** Avvia il server solo se la porta router non risponde: nessuna interferenza. */
+export interface RouterProbe {
+  /** Una qualsiasi risposta HTTP arriva sulla porta router. */
+  listening: boolean;
+  /** Il rispondente e' identificato come llama-server (shape /v1/models o /health). */
+  identified: boolean;
+}
+
+async function fetchWithTimeout(
+  options: ServerProbeOptions,
+  url: string,
+): Promise<import("./types.js").HttpResponse> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 1_500);
+  try {
+    return await options.fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Verifica d'identita' del router: non basta una risposta HTTP qualsiasi.
+ * llama-server e' riconosciuto dalla shape OpenAI di /v1/models (`data` array
+ * o `object: "list"`) o, in fallback, dal campo `status` di /health. Un
+ * processo estraneo che risponde sulla porta viene segnalato, non sovrascritto.
+ */
+export async function probeRouter(options: ServerProbeOptions): Promise<RouterProbe> {
+  const host = options.host ?? ROUTER_HOST;
+  const port = options.port ?? ROUTER_PORT;
+  const base = `http://${host}:${port}`;
+  let listening = false;
+  try {
+    const models = await fetchWithTimeout(options, `${base}/v1/models`);
+    listening = true;
+    if (models.ok) {
+      const body = (await models.json().catch(() => null)) as
+        | { data?: unknown; object?: unknown }
+        | null;
+      if (body && (Array.isArray(body.data) || body.object === "list")) {
+        return { listening: true, identified: true };
+      }
+    }
+  } catch {
+    /* nessuna risposta su /v1/models: si prova /health */
+  }
+  try {
+    const health = await fetchWithTimeout(options, `${base}/health`);
+    listening = true;
+    const body = (await health.json().catch(() => null)) as
+      | { status?: unknown }
+      | null;
+    if (body && typeof body.status === "string") {
+      return { listening: true, identified: true };
+    }
+  } catch {
+    /* nessuna risposta nemmeno su /health */
+  }
+  return { listening, identified: false };
+}
+
+/**
+ * Avvia il server solo se la porta router e' libera. Se risponde un processo
+ * identificato come llama-server non interferisce; se risponde un processo
+ * estraneo rifiuta l'avvio (niente spawn su una porta occupata).
+ */
 export async function ensureServer(
   options: EnsureServerOptions,
 ): Promise<EnsureServerResult> {
-  if (await isServerActive(options)) {
+  const probe = await probeRouter(options);
+  if (probe.identified) {
     return {
       started: false,
-      reason: "llama-server gia' attivo sulla porta router: nessuna interferenza",
+      reason: "llama-server identificato sulla porta router: nessuna interferenza",
     };
+  }
+  if (probe.listening) {
+    throw new Error(
+      `Porta ${options.port ?? ROUTER_PORT} occupata da un processo non identificato ` +
+        "come llama-server: avvio annullato per non interferire.",
+    );
   }
   const args = buildRouterArgs(options);
   const child = options.spawn(options.serverExe, args, {
@@ -231,6 +302,84 @@ export async function ensureServer(
     pid: child.pid,
     reason: "llama-server avviato con ADSP_LIBRARY_PATH sulla directory runtime",
   };
+}
+
+/**
+ * Estrae un payload JSON da stdout che puo' contenere diagnostica PowerShell
+ * prima/dopo il JSON (ConvertTo-Json non compresso e' multi-riga).
+ */
+export function parseJsonPayload(stdout: string): Record<string, unknown> {
+  const trimmed = stdout.trim();
+  if (!trimmed) throw new Error("output vuoto");
+  try {
+    return JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    const start = trimmed.indexOf("{");
+    const end = trimmed.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      return JSON.parse(trimmed.slice(start, end + 1)) as Record<string, unknown>;
+    }
+    throw new Error("payload JSON non trovato");
+  }
+}
+
+export interface EnsureIniOptions {
+  iniPath: string;
+  workspaceDir: string;
+  exec: ExecFn;
+  exists: ExistsFn;
+  writeFile: WriteFileFn;
+}
+
+export interface EnsureIniResult {
+  generated: boolean;
+  modelCount: number;
+}
+
+/**
+ * Zero-setup INI: se hexagon-models.ini manca, lo genera dal launcher core
+ * (`launch-hexagon.ps1 -Mode Router -DryRun -Json`, unica fonte delle
+ * euristiche hardware) persistendo il campo `ini_content` della preview.
+ * Il DryRun JSON non scrive file ne' avvia processi.
+ */
+export async function ensureModelsIni(
+  options: EnsureIniOptions,
+): Promise<EnsureIniResult> {
+  if (await options.exists(options.iniPath)) {
+    return { generated: false, modelCount: 0 };
+  }
+  const script = join(options.workspaceDir, "launch-hexagon.ps1");
+  const result = await options.exec(
+    "powershell",
+    [
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      script,
+      "-Mode",
+      "Router",
+      "-DryRun",
+      "-Json",
+    ],
+    { cwd: options.workspaceDir, timeoutMs: 120_000 },
+  );
+  if (result.code !== 0) {
+    throw new Error(
+      `Generazione hexagon-models.ini fallita (launch-hexagon.ps1 exit ${result.code}): ` +
+        (result.stderr.trim() || result.stdout.trim() || "output vuoto"),
+    );
+  }
+  const payload = parseJsonPayload(result.stdout);
+  const content = payload.ini_content;
+  if (typeof content !== "string" || content.trim().length === 0) {
+    throw new Error(
+      "launch-hexagon.ps1 non ha proposto contenuto INI (ini_content assente): " +
+        "verificare la cache modelli GGUF.",
+    );
+  }
+  await options.writeFile(options.iniPath, content);
+  const models = Array.isArray(payload.models) ? payload.models.length : 0;
+  return { generated: true, modelCount: models };
 }
 
 export interface HexagonPaths {

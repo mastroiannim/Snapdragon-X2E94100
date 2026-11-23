@@ -52,3 +52,31 @@ export async function waitForHealth(options: HealthOptions): Promise<HealthResul
       "Il grafo HTP potrebbe non essersi inizializzato: verificare ADSP_LIBRARY_PATH e i driver.",
   );
 }
+
+export type RouterHealthState = "ready" | "loading" | "down";
+
+export interface ProbeHealthOptions {
+  fetch: FetchFn;
+  url?: string;
+  timeoutMs?: number;
+}
+
+/**
+ * Sonda singola per il watchdog: distingue il warm-up NPU (503 = "loading",
+ * non riavviare) dal server morto (errore di rete = "down", recuperare).
+ */
+export async function probeHealth(
+  options: ProbeHealthOptions,
+): Promise<RouterHealthState> {
+  const url = options.url ?? `http://${ROUTER_HOST}:${ROUTER_PORT}/health`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 3_000);
+  try {
+    const response = await options.fetch(url, { signal: controller.signal });
+    return response.status === 200 ? "ready" : "loading";
+  } catch {
+    return "down";
+  } finally {
+    clearTimeout(timer);
+  }
+}

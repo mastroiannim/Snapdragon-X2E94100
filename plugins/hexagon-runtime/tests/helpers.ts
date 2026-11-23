@@ -7,6 +7,7 @@ import type {
   HttpResponse,
   SpawnFn,
   SpawnOptions,
+  WriteFileFn,
 } from "../src/types.js";
 
 export function fakeResponse(status: number, body?: unknown): HttpResponse {
@@ -16,6 +17,21 @@ export function fakeResponse(status: number, body?: unknown): HttpResponse {
     json: async () => body,
     text: async () => JSON.stringify(body ?? ""),
   };
+}
+
+/** Risposta con shape llama-server riconosciuta da probeRouter. */
+export function routerResponse(url: string, status = 200): HttpResponse {
+  return url.endsWith("/health")
+    ? fakeResponse(status, { status: "ok" })
+    : fakeResponse(status, { object: "list", data: [] });
+}
+
+export function recordingWriteFile() {
+  const calls: Array<{ path: string; content: string }> = [];
+  const fn: WriteFileFn = async (path, content) => {
+    calls.push({ path, content });
+  };
+  return { fn, calls };
 }
 
 export interface ExecCall {

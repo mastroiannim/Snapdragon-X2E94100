@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { waitForHealth } from "../src/health.js";
+import { probeHealth, waitForHealth } from "../src/health.js";
 import { fakeResponse, recordingFetch } from "./helpers.js";
 
 function fakeClock() {
@@ -143,5 +143,41 @@ describe("waitForHealth", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("probeHealth", () => {
+  it("HTTP 200: ready", async () => {
+    const { fn: fetch, calls } = recordingFetch(() => fakeResponse(200));
+    expect(await probeHealth({ fetch })).toBe("ready");
+    expect(calls[0].url).toBe("http://127.0.0.1:18803/health");
+  });
+
+  it("HTTP 503 (warm-up NPU): loading, non down", async () => {
+    const { fn: fetch } = recordingFetch(() => fakeResponse(503));
+    expect(await probeHealth({ fetch })).toBe("loading");
+  });
+
+  it("errore di rete: down", async () => {
+    const { fn: fetch } = recordingFetch(() => {
+      throw new Error("ECONNREFUSED");
+    });
+    expect(await probeHealth({ fetch })).toBe("down");
+  });
+
+  it("timeout della sonda: down senza blocchi", async () => {
+    const fetch = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<never>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        }),
+    );
+    expect(await probeHealth({ fetch, timeoutMs: 20 })).toBe("down");
+  });
+
+  it("url personalizzato", async () => {
+    const { fn: fetch, calls } = recordingFetch(() => fakeResponse(200));
+    await probeHealth({ fetch, url: "http://127.0.0.1:19999/health" });
+    expect(calls[0].url).toBe("http://127.0.0.1:19999/health");
   });
 });

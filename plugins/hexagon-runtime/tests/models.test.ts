@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildHexagonProvider,
   contextWindowFor,
   DEFAULT_CONTEXT_WINDOW,
   isLocalModel,
   listKnownModels,
   LOCAL_PROVIDER_ID,
+  outputLimitFor,
   TESTED_CONTEXT_WINDOWS,
 } from "../src/models.js";
 import { parseModelsIni } from "../src/process.js";
@@ -69,5 +71,50 @@ describe("listKnownModels", () => {
     expect(extra?.tested).toBe(false);
     expect(extra?.contextWindow).toBe(8192);
     expect(extra?.device).toBe("HTP0,GPUOpenCL");
+  });
+});
+
+describe("outputLimitFor", () => {
+  it("stessa regola di kilo_config.py", () => {
+    expect(outputLimitFor(4096)).toBe(2048);
+    expect(outputLimitFor(8192)).toBe(4096);
+    expect(outputLimitFor(32768)).toBe(8192);
+    expect(outputLimitFor(65536)).toBe(16384);
+    expect(outputLimitFor(131072)).toBe(16384);
+  });
+  it("contesti piccoli: minimo 1024", () => {
+    expect(outputLimitFor(1024)).toBe(1024);
+    expect(outputLimitFor(512)).toBe(1024);
+  });
+});
+
+describe("buildHexagonProvider", () => {
+  it("catalogo testato senza INI: provider loopback OpenAI-compatible", () => {
+    const provider = buildHexagonProvider();
+    expect(provider.name).toBe("Hexagon Local Runtime");
+    expect(provider.npm).toBe("@ai-sdk/openai-compatible");
+    expect(provider.options).toEqual({
+      baseURL: "http://127.0.0.1:18803/v1",
+      apiKey: "local",
+    });
+    expect(Object.keys(provider.models)).toHaveLength(4);
+    expect(provider.models["Ornith-1.5-9B-Q4_0"]).toEqual({
+      name: "Ornith-1.5-9B-Q4_0 (HTP0)",
+      limit: { context: 65536, output: 16384 },
+    });
+    expect(provider.models["gpt-oss-20b-Q4_0"].limit.context).toBe(131072);
+  });
+
+  it("con INI: unione, device reale e contesti testati prioritari", () => {
+    const ini = parseModelsIni(
+      "[Ornith-1.5-9B-Q4_0]\ndevice = HTP0\nctx-size = 4096\n[extra]\ndevice = HTP0,GPUOpenCL\nctx-size = 32768\n",
+    );
+    const provider = buildHexagonProvider(ini);
+    expect(Object.keys(provider.models)).toHaveLength(5);
+    expect(provider.models["Ornith-1.5-9B-Q4_0"].limit.context).toBe(65536);
+    expect(provider.models["extra"]).toEqual({
+      name: "extra (HTP0,GPUOpenCL)",
+      limit: { context: 32768, output: 8192 },
+    });
   });
 });

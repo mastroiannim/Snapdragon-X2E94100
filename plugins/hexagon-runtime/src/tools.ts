@@ -68,26 +68,68 @@ export interface BenchRow {
   profile: string;
   test: string;
   tokPerSec: number;
+  stdDev: number | null;
+  npuW: number | null;
+  gpuW: number | null;
+  cpuW: number | null;
+  memW: number | null;
+  infraW: number | null;
+  socW: number | null;
+  sysW: number | null;
+}
+
+const POWER_FIELDS = [
+  "npuW",
+  "gpuW",
+  "cpuW",
+  "memW",
+  "infraW",
+  "socW",
+  "sysW",
+] as const;
+
+/** Cella numerica opzionale: "N/D", vuoto o non numerico -> null; virgola it-IT normalizzata. */
+export function parseOptionalNumber(cell: string | undefined): number | null {
+  if (cell === undefined) return null;
+  const clean = cell.replace(/\*\*/g, "").trim();
+  if (!clean || clean === "N/D") return null;
+  const value = Number.parseFloat(clean.replace(",", "."));
+  return Number.isFinite(value) ? value : null;
 }
 
 /**
- * Parsing del report markdown di benchmark-hexagon.ps1:
- * | ``modello`` | **profilo** | ``test`` | **tok/s** ± stddev | ...
- * La virgola decimale (culture it-IT) viene normalizzata.
+ * Parsing del report markdown di benchmark-hexagon.ps1, incluse le colonne
+ * PMIC (NPU/GPU/CPU/RAM/INFRA/SoC/Sistema in W) e la deviazione standard:
+ * | ``modello`` | **profilo** | ``test`` | **tok/s** ± stddev | npu | gpu | cpu | mem | infra | **soc** | **sys** |
+ * Le colonne mancanti (report legacy) restano null: i valori non misurati
+ * sono espliciti, mai zero.
  */
 export function parseBenchReport(markdown: string): BenchRow[] {
   const rows: BenchRow[] = [];
   const pattern =
-    /^\|\s*`{1,2}([^`|]+)`{1,2}\s*\|\s*\*\*([^*|]+)\*\*\s*\|\s*`{1,2}([^`|]+)`{1,2}\s*\|\s*\*\*([0-9]+(?:[.,][0-9]+)?)\*\*/;
+    /^\|\s*`{1,2}([^`|]+)`{1,2}\s*\|\s*\*\*([^*|]+)\*\*\s*\|\s*`{1,2}([^`|]+)`{1,2}\s*\|\s*\*\*([0-9]+(?:[.,][0-9]+)?)\*\*\s*(?:±\s*([0-9]+(?:[.,][0-9]+)?))?\s*\|?(.*)$/;
   for (const line of markdown.split(/\r?\n/)) {
     const match = pattern.exec(line);
     if (!match) continue;
-    rows.push({
+    const cells = (match[6] ?? "").split("|");
+    const row: BenchRow = {
       model: match[1].trim(),
       profile: match[2].trim(),
       test: match[3].trim(),
       tokPerSec: Number.parseFloat(match[4].replace(",", ".")),
+      stdDev: parseOptionalNumber(match[5]),
+      npuW: null,
+      gpuW: null,
+      cpuW: null,
+      memW: null,
+      infraW: null,
+      socW: null,
+      sysW: null,
+    };
+    POWER_FIELDS.forEach((field, index) => {
+      row[field] = parseOptionalNumber(cells[index]);
     });
+    rows.push(row);
   }
   return rows;
 }

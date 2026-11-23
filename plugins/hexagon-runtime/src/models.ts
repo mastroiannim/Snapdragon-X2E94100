@@ -5,7 +5,7 @@
  * Hexagon, non i limiti dichiarati da GenieX. Per i modelli fuori catalogo
  * si usa il ctx-size della sezione INI, con fallback prudente a 65.536.
  */
-import type { ModelsIni } from "./process.js";
+import { ROUTER_PORT, type ModelsIni } from "./process.js";
 
 export const LOCAL_PROVIDER_ID = "hexagon";
 
@@ -60,4 +60,46 @@ export function listKnownModels(ini?: ModelsIni): ModelDescriptor[] {
     });
   }
   return [...descriptors.values()];
+}
+
+/**
+ * Limite di output: stessa regola di kilo_config.py, cosi' la configurazione
+ * dinamica del plugin e' coerente con il generatore statico.
+ */
+export function outputLimitFor(contextWindow: number): number {
+  return contextWindow > 8_192
+    ? Math.min(16_384, Math.floor(contextWindow / 4))
+    : Math.max(1_024, Math.floor(contextWindow / 2));
+}
+
+export interface HexagonProviderConfig {
+  name: string;
+  npm: string;
+  options: { baseURL: string; apiKey: string };
+  models: Record<string, { name: string; limit: { context: number; output: number } }>;
+}
+
+/**
+ * Configurazione dinamica del provider hexagon: catalogo testato + sezioni
+ * INI, contesti reali e limiti di output derivati. Usata dall'hook `config`
+ * per arricchire la configurazione Kilo a runtime senza toccare kilo.json.
+ */
+export function buildHexagonProvider(ini?: ModelsIni): HexagonProviderConfig {
+  const models: HexagonProviderConfig["models"] = {};
+  for (const descriptor of listKnownModels(ini)) {
+    const device = descriptor.device ?? "HTP0";
+    models[descriptor.id] = {
+      name: `${descriptor.id} (${device})`,
+      limit: {
+        context: descriptor.contextWindow,
+        output: outputLimitFor(descriptor.contextWindow),
+      },
+    };
+  }
+  return {
+    name: "Hexagon Local Runtime",
+    npm: "@ai-sdk/openai-compatible",
+    options: { baseURL: `http://127.0.0.1:${ROUTER_PORT}/v1`, apiKey: "local" },
+    models,
+  };
 }
