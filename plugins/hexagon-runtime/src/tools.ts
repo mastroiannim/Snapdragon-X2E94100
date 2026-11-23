@@ -9,10 +9,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { tool } from "@kilocode/plugin";
 import { installProviderConfig } from "./config.js";
-import { nodeNow } from "./os.js";
-import { BUNDLED_BENCH_SCRIPT, ROUTER_HOST, ROUTER_PORT } from "./process.js";
+import { scanModels } from "./discovery.js";
+import { nodeExists, nodeListDir, nodeNow } from "./os.js";
+import {
+  BUNDLED_BENCH_SCRIPT,
+  defaultPaths,
+  ROUTER_HOST,
+  ROUTER_PORT,
+} from "./process.js";
+import { qualifyModel } from "./qualify.js";
 import type { SyncOutcome } from "./sync.js";
-import type { ExecFn, FetchFn, NowFn, ReadFileFn } from "./types.js";
+import type {
+  ExecFn,
+  ExistsFn,
+  FetchFn,
+  ListDirFn,
+  NowFn,
+  ReadFileFn,
+  WriteFileFn,
+} from "./types.js";
 
 export interface StatusReport {
   router: { host: string; port: number; active: boolean; ready: boolean };
@@ -207,6 +222,10 @@ export interface HexagonToolDeps {
   fetch: FetchFn;
   exec: ExecFn;
   readFile: ReadFileFn;
+  writeFile?: WriteFileFn;
+  listDir?: ListDirFn;
+  exists?: ExistsFn;
+  modelsDir?: string;
   workspaceDir: string;
   sync: (options: { force?: boolean }) => Promise<SyncOutcome>;
 }
@@ -267,6 +286,52 @@ export function createHexagonTools(deps: HexagonToolDeps) {
           readFile: deps.readFile,
         });
         return JSON.stringify(res, null, 2);
+      },
+    }),
+    hexagon_models: tool({
+      description:
+        "Elenca tutti i modelli GGUF presenti nella cache locale, stato di certificazione " +
+        "(certified vs untested), dimensione e allocazione hardware (HTP0/GPU).",
+      args: {},
+      async execute() {
+        const modelsDir = deps.modelsDir ?? defaultPaths(deps.workspaceDir).modelsDir;
+        const listDir = deps.listDir ?? nodeListDir;
+        const exists = deps.exists ?? nodeExists;
+        const models = await scanModels({
+          modelsDir,
+          deps: { listDir, exists, exec: deps.exec },
+        });
+        return JSON.stringify(models, null, 2);
+      },
+    }),
+    hexagon_qualify: tool({
+      description:
+        "Esegue il Qualification Gate hardware (benchmark e calibrazione) su un modello locale per promuoverlo a CERTIFIED.",
+      args: {
+        model: tool.schema
+          .string()
+          .describe("Alias del modello da qualificare (es. Ornith-1.5-9B-Q4_0 o nome file .gguf)"),
+      },
+      async execute(args) {
+        const modelsDir = deps.modelsDir ?? defaultPaths(deps.workspaceDir).modelsDir;
+        const listDir = deps.listDir ?? nodeListDir;
+        const exists = deps.exists ?? nodeExists;
+        const models = await scanModels({
+          modelsDir,
+          deps: { listDir, exists, exec: deps.exec },
+        });
+        const target = models.find((m) => m.id === args.model || m.fileName === args.model);
+        if (!target) {
+          return JSON.stringify({ error: `Modello '${args.model}' non trovato in ${modelsDir}` }, null, 2);
+        }
+        const profile = await qualifyModel({
+          model: target,
+          workspaceDir: deps.workspaceDir,
+          exec: deps.exec,
+          readFile: deps.readFile,
+          writeFile: deps.writeFile,
+        });
+        return JSON.stringify(profile, null, 2);
       },
     }),
   };

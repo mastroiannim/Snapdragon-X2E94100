@@ -108,6 +108,58 @@ describe("installProviderConfig", () => {
     expect(parsed.model).toBe("anthropic/claude-3-opus");
   });
 
+  it("non duplica il plugin se già presente", async () => {
+    const writtenFiles = new Map<string, string>();
+    const target = "C:\\test-config\\kilo\\kilo.json";
+    writtenFiles.set(
+      target,
+      JSON.stringify({
+        plugin: ["@hexagon/kilo-plugin"],
+      }),
+    );
+
+    const readFile = vi.fn(async (path: string) => writtenFiles.get(path)!);
+    const writeFile = vi.fn(async (path: string, content: string) => {
+      writtenFiles.set(path, content);
+    });
+
+    const res = await installProviderConfig({
+      configDir: "C:/test-config/kilo",
+      mainModel: "solo-modello",
+      smallModel: "solo-modello",
+      readFile,
+      writeFile,
+    });
+
+    expect(res.updated).toBe(true);
+    const parsed = JSON.parse(writtenFiles.get(res.targetPath)!);
+    expect(parsed.plugin).toEqual(["@hexagon/kilo-plugin"]);
+    expect(parsed.model).toBe("hexagon/solo-modello");
+    expect(parsed.small_model).toBe("hexagon/solo-modello");
+  });
+
+  it("usa percorso relativo se il plugin esiste nel workspace", async () => {
+    const writtenFiles = new Map<string, string>();
+    const readFile = vi.fn(async () => {
+      throw new Error("File not found");
+    });
+    const writeFile = vi.fn(async (path: string, content: string) => {
+      writtenFiles.set(path, content);
+    });
+
+    // In questo repo, plugins/hexagon-runtime esiste nella root
+    const rootDir = process.cwd().replace(/\\plugins\\hexagon-runtime$/, "").replace(/\/plugins\/hexagon-runtime$/, "");
+    const res = await installProviderConfig({
+      workspaceDir: rootDir,
+      readFile,
+      writeFile,
+    });
+
+    expect(res.updated).toBe(true);
+    const parsed = JSON.parse(writtenFiles.get(res.targetPath)!);
+    expect(parsed.plugin).toContain("./plugins/hexagon-runtime");
+  });
+
   it("scrive kilo.json locale se workspaceDir e' specificato", async () => {
     const writtenFiles = new Map<string, string>();
     const readFile = vi.fn(async () => {

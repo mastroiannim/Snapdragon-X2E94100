@@ -292,11 +292,13 @@ describe("createHexagonTools", () => {
   it("hexagon_status: esecuzione e JSON formattato", async () => {
     const { deps } = makeDeps();
     const tools = createHexagonTools(deps);
-    expect(Object.keys(tools)).toEqual([
+    expect(Object.keys(tools).sort()).toEqual([
+      "hexagon_bench",
+      "hexagon_models",
+      "hexagon_qualify",
+      "hexagon_setup",
       "hexagon_status",
       "hexagon_sync",
-      "hexagon_bench",
-      "hexagon_setup",
     ]);
     const raw = await tools.hexagon_status.execute({}, undefined as never);
     const parsed = JSON.parse(raw);
@@ -304,6 +306,35 @@ describe("createHexagonTools", () => {
     expect(parsed.router.ready).toBe(true);
     expect(parsed.loadedModels).toEqual(["Ornith-1.5-9B-Q4_0"]);
     expect(raw).toContain("\n");
+  });
+
+  it("hexagon_models: lista modelli locali con classificazione", async () => {
+    const { deps } = makeDeps();
+    const tools = createHexagonTools({
+      ...deps,
+      listDir: async () => ["Ornith-1.5-9B-Q4_0.gguf"],
+      exists: async () => true,
+    });
+    const raw = await tools.hexagon_models.execute({}, undefined as never);
+    const parsed = JSON.parse(raw);
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed[0].id).toBe("Ornith-1.5-9B-Q4_0");
+    expect(parsed[0].status).toBe("certified");
+  });
+
+  it("hexagon_qualify: qualifica un modello", async () => {
+    const { deps } = makeDeps();
+    const tools = createHexagonTools({
+      ...deps,
+      listDir: async () => ["test-model.gguf"],
+      exists: async () => true,
+      readFile: async () => BENCH_MARKDOWN,
+      writeFile: async () => {},
+    });
+    const raw = await tools.hexagon_qualify.execute({ model: "test-model" }, undefined as never);
+    const parsed = JSON.parse(raw);
+    expect(parsed.modelId).toBe("test-model");
+    expect(parsed.status).toBe("certified");
   });
 
   it("hexagon_setup: esecuzione e allineamento config", async () => {
@@ -341,6 +372,35 @@ describe("createHexagonTools", () => {
     expect(parsed.model).toBe("Ornith-1.5-9B-Q4_0");
   });
 
+  it("hexagon_models: elenca modelli con status e hardware", async () => {
+    const { deps } = makeDeps();
+    const tools = createHexagonTools(deps);
+    const raw = await tools.hexagon_models.execute({}, undefined as never);
+    const parsed = JSON.parse(raw);
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed.length).toBeGreaterThan(0);
+    expect(parsed[0]).toHaveProperty("id");
+    expect(parsed[0]).toHaveProperty("status");
+  });
+
+  it("hexagon_qualify: errore se modello non esiste", async () => {
+    const { deps } = makeDeps();
+    const tools = createHexagonTools(deps);
+    const raw = await tools.hexagon_qualify.execute({ model: "non-esistente" }, undefined as never);
+    const parsed = JSON.parse(raw);
+    expect(parsed).toHaveProperty("error");
+    expect(parsed.error).toContain("non-esistente");
+  });
+
+  it("hexagon_qualify: qualifica modello esistente", async () => {
+    const { deps } = makeDeps();
+    const tools = createHexagonTools(deps);
+    const raw = await tools.hexagon_qualify.execute({ model: "Ornith-1.5-9B-Q4_0" }, undefined as never);
+    const parsed = JSON.parse(raw);
+    expect(parsed.modelId).toBe("Ornith-1.5-9B-Q4_0");
+    expect(parsed.status).toBe("certified");
+  });
+
   it("descrizioni dei tool presenti", () => {
     const { deps } = makeDeps();
     const tools = createHexagonTools(deps);
@@ -348,5 +408,7 @@ describe("createHexagonTools", () => {
     expect(tools.hexagon_sync.description).toContain("sync-geniex");
     expect(tools.hexagon_bench.description).toContain("token/s");
     expect(tools.hexagon_setup.description).toContain("kilo.json");
+    expect(tools.hexagon_models.description).toContain("Elenca tutti i modelli GGUF");
+    expect(tools.hexagon_qualify.description).toContain("Qualification Gate");
   });
 });

@@ -40,6 +40,11 @@ import {
   type WatchdogHandle,
   type WatchdogOptions,
 } from "./watchdog.js";
+import {
+  startModelWatcher,
+  type ModelWatcher,
+  type ModelWatcherOptions,
+} from "./watcher.js";
 
 export interface BootstrapResult {
   sync: SyncOutcome;
@@ -100,6 +105,10 @@ export interface HookOptions extends RuntimeOptions {
   watchdogIntervalMs?: number;
   /** Factory iniettabile del watchdog (test del wiring). */
   startWatchdogFn?: (options: WatchdogOptions) => WatchdogHandle;
+  /** Disabilita il watcher automatico dei modelli (utile nei test unitari). */
+  disableModelWatcher?: boolean;
+  /** Factory iniettabile del model watcher (test del wiring). */
+  startModelWatcherFn?: (options: ModelWatcherOptions) => ModelWatcher;
 }
 
 export function createHexagonHooks(options: HookOptions): Hooks {
@@ -109,9 +118,11 @@ export function createHexagonHooks(options: HookOptions): Hooks {
   const bootstrap =
     options.bootstrap ?? (() => bootstrapRuntime({ ...options, workspaceDir }));
   const startWatchdogFn = options.startWatchdogFn ?? startWatchdog;
+  const startModelWatcherFn = options.startModelWatcherFn ?? startModelWatcher;
 
   let sessions = 0;
   let watchdog: WatchdogHandle | null = null;
+  let modelWatcher: ModelWatcher | null = null;
 
   const recover = async (): Promise<void> => {
     await ensureServer({
@@ -142,6 +153,30 @@ export function createHexagonHooks(options: HookOptions): Hooks {
     watchdog = null;
   };
 
+  const ensureModelWatcher = (): void => {
+    if (modelWatcher || options.disableModelWatcher) return;
+    modelWatcher = startModelWatcherFn({
+      modelsDir: paths.modelsDir,
+      workspaceDir: paths.workspaceDir,
+      listDir: deps.listDir,
+      exists: deps.exists,
+      exec: deps.exec,
+      readFile: deps.readFile,
+      writeFile: deps.writeFile,
+      onQualified: (modelId, success) => {
+        if (success) {
+          console.log(`[hexagon-runtime] Modello ${modelId} qualificato con successo.`);
+        }
+      },
+    });
+    void modelWatcher.checkNow();
+  };
+
+  const stopModelWatcher = (): void => {
+    modelWatcher?.stop();
+    modelWatcher = null;
+  };
+
   const event: NonNullable<Hooks["event"]> = async ({ event }) => {
     if (event.type === "session.created") {
       sessions += 1;
@@ -149,16 +184,21 @@ export function createHexagonHooks(options: HookOptions): Hooks {
       void bootstrap()
         .then(() => {
           ensureWatchdog();
+          ensureModelWatcher();
         })
         .catch((error: unknown) => {
           console.error("[hexagon-runtime] bootstrap runtime fallito:", error);
         });
     } else if (event.type === "session.deleted") {
       sessions = Math.max(0, sessions - 1);
-      if (sessions === 0) stopWatchdog();
+      if (sessions === 0) {
+        stopWatchdog();
+        stopModelWatcher();
+      }
     } else if (event.type === "server.instance.disposed") {
       sessions = 0;
       stopWatchdog();
+      stopModelWatcher();
     }
   };
 
@@ -202,6 +242,10 @@ export function createHexagonHooks(options: HookOptions): Hooks {
       fetch: deps.fetch,
       exec: deps.exec,
       readFile: deps.readFile,
+      writeFile: deps.writeFile,
+      listDir: deps.listDir,
+      exists: deps.exists,
+      modelsDir: paths.modelsDir,
       workspaceDir: paths.workspaceDir,
       sync: ({ force } = {}) =>
         ensureRuntime({
@@ -249,6 +293,19 @@ export {
   buildHexagonProvider,
   outputLimitFor,
 } from "./models.js";
+export {
+  scanModels,
+  inspectGguf,
+  calculateOptimalConfig,
+  isMmprojFile,
+} from "./discovery.js";
+export {
+  qualifyModel,
+  loadRegistry,
+  saveRegistry,
+  defaultRegistryPath,
+} from "./qualify.js";
+export { startModelWatcher } from "./watcher.js";
 export { probeHealth, waitForHealth } from "./health.js";
 export { startWatchdog, WATCHDOG_INTERVAL_MS } from "./watchdog.js";
 

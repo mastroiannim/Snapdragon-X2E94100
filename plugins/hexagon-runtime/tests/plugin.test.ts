@@ -60,10 +60,12 @@ describe("descrittore e ingresso del plugin", () => {
     expect(plugin.server).toBe(pluginInit);
   });
 
-  it("pluginInit ritorna gli hook con i quattro tool agent", async () => {
-    const hooks = await pluginInit(fakePluginInput());
+  it("pluginInit ritorna gli hook con i sei tool agent", async () => {
+    const hooks = await pluginInit(fakePluginInput({ disableModelWatcher: true }));
     expect(Object.keys(hooks.tool ?? {}).sort()).toEqual([
       "hexagon_bench",
+      "hexagon_models",
+      "hexagon_qualify",
       "hexagon_setup",
       "hexagon_status",
       "hexagon_sync",

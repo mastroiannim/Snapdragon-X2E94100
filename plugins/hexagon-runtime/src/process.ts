@@ -17,6 +17,7 @@ export const BUNDLED_INI_PATH = join(BUNDLED_ASSETS_DIR, "hexagon-models.ini");
 export const BUNDLED_SCRIPTS_DIR = join(BUNDLED_ASSETS_DIR, "scripts");
 export const BUNDLED_SYNC_SCRIPT = join(BUNDLED_SCRIPTS_DIR, "sync-geniex.ps1");
 export const BUNDLED_BENCH_SCRIPT = join(BUNDLED_SCRIPTS_DIR, "benchmark-hexagon.ps1");
+export const BUNDLED_INSPECT_SCRIPT = join(BUNDLED_SCRIPTS_DIR, "inspect-gguf.ps1");
 
 export interface ResolveIniOptions {
   workspaceDir?: string;

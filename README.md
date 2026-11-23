@@ -83,7 +83,7 @@ arresta e riavvia soltanto i processi `llama-server.exe` della directory interes
 
 **Il risultato è una composizione sperimentale, non un pacchetto ufficiale né una compatibilità garantita da Qualcomm.** La firma e il catalogo del DSP non sanano un'incompatibilità fra DLL e frontend. La licenza BSD-3-Clause del *progetto open source GenieX* non dimostra, da sola, il diritto di ridistribuire ogni artefatto SDK, runtime o catalogo incluso in un installer: vanno esaminati provenienza e termini di ciascun componente. Il repository descrive l'impiego locale dei componenti; non deve presentare un bundle misto come certificato o supportato ufficialmente.
 
-Il vecchio aggiornamento automatico del commit `dbbb499` non deve essere usato su un'installazione da preservare. La versione del PR #1 lo disabilita rimuovendone il codice; conserva soltanto la verifica del runtime. Vedi le [precondizioni specifiche dell'innesto](docs/COMPATIBILITA.md#verifiche-innesto-geniex-llamacpp).
+Il vecchio aggiornamento automatico del commit `dbbb499` è stato sostituito da un motore transazionale (`runtime-update.psm1`) con verifica di hash e ripristino sicuro da backup. Vedi le [precondizioni specifiche dell'innesto](docs/COMPATIBILITA.md#verifiche-innesto-geniex-llamacpp).
 
 **Stato:** le scelte di dispositivo, gli split e le dimensioni di contesto del launcher sono *euristiche sperimentali*, non configurazioni ottimali dimostrate. L'enumerazione dei device non equivale a una prova di inferenza sulla NPU. Nessun limite universale di modello a 14-15 GB o di contesto a 4096/65536 token è stabilito da questo progetto.
 
@@ -164,10 +164,7 @@ La modalità Router sfrutta il routing nativo di `llama-server` (`--models-dir`,
 3. **Caricamento On-Demand & Budget RAM:** I modelli vengono caricati solo quando invocati dai client API (es. Cline). Il parametro `-ModelsMax` (default: `2`) mantiene in memoria contemporaneamente al massimo $N$ modelli, scaricando i meno recenti (LRU) per rimanere sempre all'interno del budget di 48 GB di RAM fisica LPDDR5X.
 4. **Endpoint OpenAI compatibile:** Esponendo `/v1/models` e `/v1/chat/completions`, qualsiasi client o estensione (Cline, Continue, Roo Code) può passare da un modello all'altro semplicemente specificandone l'alias.
 
-**Cronologia:** il PR #1 aveva rimosso l'installazione automatica. Nel branch
-`feat/tui-openclaw` e' ripristinata con un motore condiviso (`runtime-update.psm1`),
-preparazione separata e prove di errore/ripristino. I test del solo blocco `-Apply`
-non sono piu' il criterio di verifica dell'updater.
+L'installazione e l'aggiornamento automatico del runtime si basano sul modulo condiviso `runtime-update.psm1`, con preparazione separata in directory di staging e prove di ripristino/rollback transazionale.
 
 `-ListOnly` e `-DryRun` possono ancora creare hard-link dei modelli durante la scansione;
 la loro esclusione dal bootstrap riguarda il runtime, non tutti gli effetti del launcher.
@@ -181,61 +178,41 @@ il contenuto INI proposto.
 
 Il server espone un endpoint compatibile OpenAI sulla porta `18803`. Il binding predefinito è `127.0.0.1`. L'accesso LAN richiede `-BindHost` esplicito; **non esporre l'endpoint senza autenticazione su una rete non attendibile**.
 
-## Plugin Kilo hexagon-runtime (architettura zero-setup)
+## Plugin Kilo hexagon-runtime (architettura zero-setup e autoconsistente)
 
-La TUI Python e il Control Center (`tui.py`, `hexagon_app.py`, `hexagon_control/`)
-sono stati rimossi. La gestione del runtime vive nel plugin TypeScript
-`plugins/hexagon-runtime` (`@hexagon/kilo-plugin`), registrato in `kilo.json`:
+La gestione del runtime vive nel plugin TypeScript `plugins/hexagon-runtime` (`@hexagon/kilo-plugin`), registrato in `kilo.json`:
 
 ```json
 { "plugin": ["./plugins/hexagon-runtime"] }
 ```
 
-Il plugin usa l'API `@kilocode/plugin` (default export `Plugin = (input) => Promise<Hooks>`)
-e mantiene `launch-hexagon.ps1` come unica fonte delle euristiche hardware:
+Il plugin è **completamente autoconsistente**: racchiude nei propri asset (`assets/scripts/`) tutti gli helper necessari (`inspect-gguf.ps1`, `sync-geniex.ps1`, `benchmark-hexagon.ps1`, `runtime-update.psm1`) e il preset `hexagon-models.ini`. Non ha alcuna dipendenza da script Python, TUI o tool esterni.
 
-- **`sync.ts`** — legge `LlamaCPP Runtime Hash` da `geniex.exe --version` e il commit
-  da `llama-server.exe --version`; se disallineati o con file mancanti
-  (`ggml-hexagon.dll`, `libggml-htp.cat`, `libggml-htp-v*.so`, `ggml-opencl.dll`)
-  invoca `sync-geniex.ps1 -Apply -NoStopServer -Json`, lo stesso motore transazionale
-  dei launcher PowerShell.
-- **`process.ts`** — router su `127.0.0.1:18803`; se la porta non risponde avvia
-  `llama-server.exe` con `ADSP_LIBRARY_PATH` impostato tassativamente sulla directory
-  runtime (piu' `GGML_HEXAGON_OPBATCH`/`GGML_HEXAGON_VTCM_SIZE`). Verifica d'identita'
-  del rispondente (`probeRouter`: shape OpenAI di `/v1/models` o `status` di `/health`):
-  un llama-server gia' attivo non viene toccato, un processo estraneo sulla porta
-  viene segnalato e l'avvio rifiutato. Zero-setup INI: se `hexagon-models.ini` manca,
-  `ensureModelsIni` lo genera dalla preview `launch-hexagon.ps1 -Mode Router -DryRun -Json`
-  (unica fonte delle euristiche hardware) e ne persiste `ini_content`. Parsing INI
-  per device `HTP0` (NPU), `GPUOpenCL` e split ibridi.
-- **`health.ts`** — polling `http://127.0.0.1:18803/health` ogni 1000 ms, fino a 30
-  tentativi (30 s): il tempo di allocazione del grafo HTP sulla NPU. `probeHealth`
-  distingue `ready`/`loading`/`down` per il watchdog.
-- **`watchdog.ts`** — sorveglianza periodica (default 15 s) a tick non sovrapposti:
-  se il router e' `down` recupera con `ensureServer` + `waitForHealth`; se e'
-  `loading` (warm-up NPU) attende senza riavviare. Avviato dopo il bootstrap della
-  prima sessione, fermato quando l'ultima sessione chiude o l'istanza viene dismessa.
-- **`models.ts`** — contesti reali testati, senza i limiti dichiarati da GenieX:
-  `Ornith-1.5-9B-Q4_0` e `MiniCPM5-2B-Q4_K_M` a 65.536 token; `flint-UD-Q4_K_XL` e
-  `gpt-oss-20b-Q4_0` a 131.072 token. `buildHexagonProvider` costruisce la
-  configurazione dinamica del provider (catalogo testato + sezioni INI, limiti di
-  output con la stessa regola di `kilo_config.py`).
-- **`tools.ts`** — agent tool per Kilo: `hexagon_status` (stato router, latenza,
-  modelli caricati), `hexagon_sync` (riallineamento runtime forzato),
-  `hexagon_bench` (token/s per profilo NPU/GPU da `benchmark-hexagon.ps1`, con
-  telemetria PMIC completa: NPU/GPU/CPU/RAM/INFRA/SoC/Sistema in W e deviazione
-  standard; i valori non misurati sono `null`, mai zero).
-- **`index.ts`** — hook `config` per la configurazione dinamica del provider
-  `hexagon` a runtime (senza scrivere `kilo.json`: opzioni utente e modelli ignoti
-  al plugin preservati, contesti testati prioritari); hook `event`/`session.created`
-  per il bootstrap automatico (sync → INI → avvio → health) e il ciclo di vita del
-  watchdog (`session.deleted`, `server.instance.disposed`); hook `chat.params` che
-  inietta `reasoning_effort: "none"` sui modelli del provider locale `hexagon`, per
-  un tool-calling deterministico.
+### Moduli architetturali
 
-Gli helper Python superstiti (`stack_manager.py`, `kilo_config.py`) sono usati solo
-dagli script PowerShell di setup/launcher; le dipendenze TUI (`rich`,
-`prompt_toolkit`, `textual`) non sono piu' richieste.
+- **`discovery.ts`** — discovery intelligente dei modelli presenti in `%USERPROFILE%\.cache\geniex\models`:
+  - Ispezione rapida dei metadati GGUF (architettura, contesto, KV heads, MoE, quantizzazione) tramite il parser binario C# in-memory `inspect-gguf.ps1` (<50 ms per file, zero memoria allocata per tensori).
+  - Separazione automatica dei proiettori multimodali (`mmproj-*.gguf`), che non compaiono come LLM testuali ma vengono associati come proiettori compagni al modello genitore.
+  - Calcolo euristico dei profili hardware conformi alle caratteristiche fisiche dello Snapdragon X2 Elite: HTP0 puro (NPU) per modelli compatti <= 6 GB, ibrido HTP0+GPU (80/20, 75/25, 50/50) per modelli medi e MoE, forzatura 100% NPU per LFM2.5 per prevenire crash GPU (`0xC0000005`), e limitazione del contesto a 64k token sui modelli pesanti per evitare l'errore DMA FastRPC (`0x200`).
+- **`qualify.ts`** — Qualification Gate hardware e persistenza del registro modelli:
+  - Classificazione a 3 stati di affidabilità:
+    - `CERTIFIED`: modelli empiricamente qualificati con benchmark reali, contesti lunghi verificati e telemetria PMIC salvata.
+    - `UNTESTED`: modelli rilevati nella cache ma non ancora qualificati; restano utilizzabili con allocazione hardware conservativa.
+    - `INCOMPATIBLE`: modelli che hanno fallito il caricamento o causato crash hardware (isolati dal catalogo per evitare loop di errore).
+  - Registro persistente memorizzato in `%LOCALAPPDATA%\Hexagon\models-registry.json`.
+- **`watcher.ts`** — sorveglianza in background: monitora periodicamente la directory modelli ed esegue automaticamente la qualificazione hardware non-bloccante non appena un nuovo file `.gguf` viene completato o scaricato nella cache.
+- **`sync.ts`** — sincronizzazione runtime con GenieX: confronta `LlamaCPP Runtime Hash` e il commit di `llama-server.exe`; se disallineati o con binari mancanti (`ggml-hexagon.dll`, `libggml-htp.cat`, `libggml-htp-v*.so`, `ggml-opencl.dll`), invoca l'updater transazionale `assets/scripts/sync-geniex.ps1` con rollback automatico in caso di errore.
+- **`process.ts`** — gestione router su `127.0.0.1:18803`: verifica d'identità del rispondente (`probeRouter` su `/v1/models` e `/health`), avvio trasparente di `llama-server.exe` con `ADSP_LIBRARY_PATH` vincolato e isolamento delle porte.
+- **`health.ts` & `watchdog.ts`** — probing dello stato del server con tolleranza per il warm-up del grafo HTP (fino a 30s) e sorveglianza periodica (default 15s) a tick non sovrapposti per garantire alta disponibilità.
+- **`models.ts` & `config.ts`** — contesti reali testati (`Ornith-1.5-9B-Q4_0` a 65.536 token, `flint-UD-Q4_K_XL` a 131.072 token) e installazione automatica della configurazione provider in `kilo.json`.
+- **`tools.ts`** — tool esposti all'agente Kilo:
+  - `hexagon_status`: stato del router, latenza di risposta, modelli caricati e risorse.
+  - `hexagon_sync`: riallineamento manuale del runtime binario con GenieX.
+  - `hexagon_bench`: benchmark empirico con telemetria PMIC hardware (potenza NPU, GPU, CPU, RAM, SoC e t/s).
+  - `hexagon_setup`: allineamento automatico della configurazione provider locale in `kilo.json`.
+  - `hexagon_models`: catalogo completo dei modelli rilevati con stato di certificazione, dimensione e split hardware.
+  - `hexagon_qualify`: esecuzione immediata del Qualification Gate hardware su uno specifico modello locale.
+- **`index.ts`** — integrazione lifecycle Kilo Code (hook `config`, `session.created`, `chat.params` con iniezione di `reasoning_effort: "none"` per determinismo agentico).
 
 ## Verifiche riproducibili
 
@@ -248,7 +225,7 @@ npm run build                 # tsc, tipi @kilocode/plugin
 npm test                      # Vitest + coverage v8 (soglie 90%)
 ```
 
-Test PowerShell del core engine (invariati dopo il pivot):
+Test PowerShell del core engine:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tests\runtime-readonly.ps1
@@ -256,15 +233,6 @@ powershell -ExecutionPolicy Bypass -File tests\runtime-update.ps1
 powershell -ExecutionPolicy Bypass -File tests\entrypoints.ps1
 powershell -ExecutionPolicy Bypass -File tests\benchmark-profiles.ps1
 ```
-
-Regressioni degli helper Python superstiti (`stack_manager`, `kilo_config`):
-
-```powershell
-python -m unittest discover -s tests -p "test_*.py" -v
-```
-
-Lo stato di avanzamento del pivot e' registrato in `.kilo/checkpoint.json`
-(CP-0 → CP-5); il branch `backup/pre-kilo-pivot` conserva il punto di ripristino.
 
 
 ## Profilazione e risultati
