@@ -73,10 +73,11 @@ export interface HookOptions extends RuntimeOptions {
 }
 
 export function createHexagonHooks(options: HookOptions): Hooks {
+  const workspaceDir = options.workspaceDir || process.cwd();
   const deps: OsDeps = { ...nodeDeps, ...options.deps };
-  const paths = defaultPaths(options.workspaceDir);
+  const paths = defaultPaths(workspaceDir);
   const bootstrap =
-    options.bootstrap ?? (() => bootstrapRuntime(options));
+    options.bootstrap ?? (() => bootstrapRuntime({ ...options, workspaceDir }));
 
   const event: NonNullable<Hooks["event"]> = async ({ event }) => {
     if (event.type === "session.created") {
@@ -120,8 +121,11 @@ export function createHexagonHooks(options: HookOptions): Hooks {
 }
 
 /** Ingresso del plugin per il loader Kilo. */
-export const pluginInit: Plugin = async (input) =>
-  createHexagonHooks({ workspaceDir: input.worktree || input.directory });
+export const pluginInit: Plugin = async (input) => {
+  const workspaceDir =
+    (input && (input.worktree || input.directory)) || process.cwd();
+  return createHexagonHooks({ workspaceDir });
+};
 
 /** Descrittore stabile richiesto dal piano di pivot (introspection/test). */
 export const plugin = { id: "hexagon-runtime", server: pluginInit } as const;
@@ -129,11 +133,4 @@ export const plugin = { id: "hexagon-runtime", server: pluginInit } as const;
 export default pluginInit;
 
 export { createHexagonTools } from "./tools.js";
-export {
-  ROUTER_HOST,
-  ROUTER_PORT,
-  parseModelsIni,
-  buildRouterArgs,
-  buildDirectArgs,
-} from "./process.js";
-export { TESTED_CONTEXT_WINDOWS, contextWindowFor, listKnownModels } from "./models.js";
+

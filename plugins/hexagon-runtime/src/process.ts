@@ -29,9 +29,10 @@ export interface ModelsIni {
 }
 
 /** Parser INI minimale: sezioni [nome], default globali [*], commenti #/;. */
-export function parseModelsIni(text: string): ModelsIni {
+export function parseModelsIni(text?: string): ModelsIni {
   const globals: Record<string, string> = {};
   const models: Record<string, ModelConfig> = {};
+  if (!text || typeof text !== "string") return { globals, models };
   let section: string | null = null;
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
@@ -244,19 +245,20 @@ export interface HexagonPaths {
 
 /** Percorsi standard dello stack Hexagon su Windows ARM64. */
 export function defaultPaths(
-  workspaceDir: string,
+  workspaceDir?: string,
   home: string = homedir(),
   localAppData: string = process.env.LOCALAPPDATA ?? join(home, "AppData", "Local"),
 ): HexagonPaths {
+  const ws = workspaceDir && workspaceDir.length > 0 ? workspaceDir : process.cwd();
   const binPath = join(home, "llama-cpp", "llama-bin-win-cpu-arm64");
   const geniexDir = join(localAppData, "GenieX CLI");
   return {
-    workspaceDir,
+    workspaceDir: ws,
     binPath,
     geniexDir,
     geniexExe: join(geniexDir, "geniex.exe"),
     serverExe: join(binPath, "llama-server.exe"),
     modelsDir: join(home, ".cache", "geniex", "models"),
-    iniPath: join(workspaceDir, "hexagon-models.ini"),
+    iniPath: join(ws, "hexagon-models.ini"),
   };
 }

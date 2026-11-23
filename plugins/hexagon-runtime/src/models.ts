@@ -25,7 +25,7 @@ export function isLocalModel(providerID: string): boolean {
 export function contextWindowFor(modelId: string, ini?: ModelsIni): number {
   const tested = TESTED_CONTEXT_WINDOWS[modelId];
   if (tested !== undefined) return tested;
-  const fromIni = ini?.models[modelId]?.ctxSize;
+  const fromIni = ini?.models?.[modelId]?.ctxSize;
   return typeof fromIni === "number" && Number.isFinite(fromIni)
     ? fromIni
     : DEFAULT_CONTEXT_WINDOW;
@@ -41,15 +41,16 @@ export interface ModelDescriptor {
 /** Catalogo: modelli testati + sezioni INI, senza duplicati. */
 export function listKnownModels(ini?: ModelsIni): ModelDescriptor[] {
   const descriptors = new Map<string, ModelDescriptor>();
+  const modelsMap = ini?.models ?? {};
   for (const [id, contextWindow] of Object.entries(TESTED_CONTEXT_WINDOWS)) {
     descriptors.set(id, {
       id,
       contextWindow,
-      device: ini?.models[id]?.device,
+      device: modelsMap[id]?.device,
       tested: true,
     });
   }
-  for (const [id, config] of Object.entries(ini?.models ?? {})) {
+  for (const [id, config] of Object.entries(modelsMap)) {
     if (descriptors.has(id)) continue;
     descriptors.set(id, {
       id,
