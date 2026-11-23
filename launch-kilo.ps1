@@ -102,8 +102,8 @@ if (-not $IsOnline) {
         exit 1
     }
 
-    # Avvio router in background console separata
-    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$LaunchHexagon`" -Mode Router -Port $Port -BindHost $BindHost" -WorkingDirectory $ScriptDir
+    # Avvio router in background console separata (con -NoExit per ispezione log)
+    Start-Process powershell -ArgumentList "-NoExit -NoProfile -ExecutionPolicy Bypass -File `"$LaunchHexagon`" -Mode Router -Port $Port -BindHost $BindHost" -WorkingDirectory $ScriptDir
 
     Write-Host " In attesa del router su $BaseUrl (warm-up NPU Hexagon)..." -ForegroundColor Cyan
     $Retries = 45
