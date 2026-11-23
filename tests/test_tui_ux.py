@@ -119,6 +119,24 @@ class ColorRenderingTests(unittest.TestCase):
             self.assertEqual(ui._current_body_width(), 119)
 
 
+class ResizeTests(unittest.TestCase):
+    def test_resize_rerenders_last_renderable_at_new_width(self):
+        from prompt_toolkit.data_structures import Size
+
+        ui = Interface()
+        _start_ui(self, ui)
+        ui.replace_body(Panel("contenuto che si adatta alla larghezza del terminale"))
+        self.assertTrue(_wait(lambda: "contenuto" in ui._body_text))
+        with patch.object(ui._app.output, "get_size", return_value=Size(rows=50, columns=120)):
+            ui._last_resize_ts = 0.0  # niente debounce nel test
+            ui._on_before_render(ui._app)
+            self.assertTrue(_wait(lambda: ui._body_lines
+                                  and max(len("".join(t for _, t in ln)) for ln in ui._body_lines) > 79))
+        widths = [len("".join(t for _, t in line)) for line in ui._body_lines]
+        self.assertLessEqual(max(widths), 119)
+        self.assertEqual(ui._last_render_width, 119)
+
+
 class HitTestTests(unittest.TestCase):
     def setUp(self):
         self.ui = Interface()

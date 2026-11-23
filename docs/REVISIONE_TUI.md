@@ -260,3 +260,59 @@ entro l'obiettivo ≤ ~2 s. Il primo setup (Python/venv/pip) resta invariato.
 
 Verifiche: `tests/tui-bootstrap.ps1` 4/4 PASS, `tests/entrypoints.ps1` 6/6 PASS,
 parse sintassi PowerShell 0 errori. Contratti read-only e sicurezza invariati.
+
+## FASE 5 — Test, documentazione e CI
+
+**Copertura test** (`python -m unittest discover -s tests -p "test_*.py"`):
+- Cache/TTL: `tests/test_status_cache.py` (7) — snapshot non bloccante, errore che
+  conserva l'ultimo valore buono, refresh sovrapposti ignorati, poller periodico.
+- Atomicità del render: `tests/test_tui_performance.py` (1 set_document) e
+  `tests/test_tui_ux.py` (1 frame per `replace_body`, scroll conservato).
+- Hit-test per colonna, hover, navigazione frecce, modalità input, Esc/F1/F10,
+  ricerca, scrollbar/PgUp/Home/End, resize, barra errori, uscita sicura:
+  `tests/test_tui_ux.py` (27).
+- I/O fuori dal render, query CIM unica: `tests/test_tui_performance.py`.
+- Contratti read-only (`-ListOnly`/`-DryRun`/`-Json`), binding loopback, conferme
+  distruttive, link senza sovrascrittura, INI atomico UTF-8 senza BOM:
+  `tests/test_control_center.py` e suite PowerShell (`runtime-readonly.ps1`,
+  `runtime-update.ps1`, `entrypoints.ps1`).
+
+**Fallback headless invariato**: senza console l'interfaccia usa il prompt a riga
+(`_prompt_fallback`); i test avviano l'app con pipe input + `DummyOutput`.
+
+**Verifica riproducibile**
+
+```powershell
+python -m pip install -r requirements.txt
+python -m compileall -q hexagon_control tests tools
+python -m unittest discover -s tests -p "test_*.py"
+python tools/benchmark_tui.py        # misure render/keypress
+python tools/measure_startup.py      # first frame a caldo
+```
+
+Suite **169 test OK** su Windows ARM64 con Python 3.10, 3.13 e 3.14 (venv CI).
+CI `Python TUI checks` (Windows/Linux, 3.10/3.14) e `PowerShell static checks`
+(sintassi, bootstrap 4/4, entrypoint 6/6, runtime read-only/update).
+
+**Riepilogo misure prima/dopo**
+
+| Criterio | Prima | Dopo |
+| --- | --- | --- |
+| `_top_status()` con router appeso (per redraw) | ~2000 ms | ~0 ms (cache TTL) |
+| `dashboard_renderable()` offline | ~2008 ms + 2 PowerShell | ~0 ms (cache, CIM unica) |
+| `replace_body()` | 2 set_document (frame vuoto) | 1 set_document, 1 frame |
+| keypress → prompt p50 | ~1 ms | ~0,2 ms |
+| click | substringa (falsi positivi) | riga/colonna esatta + hover |
+| colori Rich | persi (monocolore) | conservati (truecolor) |
+| larghezza corpo | min 100, troncamento | reale 80..200, resize |
+| scroll live dashboard | reset a ogni ciclo | conservato |
+| `Esc` | applicava il default | annulla |
+| `Resolve-HexagonTuiPython` a caldo | ~808 ms | ~238 ms (cache) |
+| first frame interattivo a caldo | — | ~1,2 s (≤ 2 s) |
+
+**Vincoli di non regressione rispettati**: euristiche di `launch-hexagon.ps1`,
+motore runtime-update/sync-geniex, formato INI e salvataggio atomico, contratti
+read-only, binding loopback, politica "nessun update né avvio server all'apertura",
+conferme distruttive, gestione link. API pubblica di `Interface` invariata
+(prompt, confirm, pause, table, result, error, console, suspended). Stack
+`rich` + `prompt_toolkit` + `httpx`, nessuna nuova dipendenza.

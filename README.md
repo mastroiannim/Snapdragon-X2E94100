@@ -181,18 +181,28 @@ separati dalle schermate, mentre `launch-hexagon.ps1` resta l'unica fonte delle 
 L'interfaccia è full-screen in stile Kilo: **terminal fisso** su alternate screen (nessuno
 scroll del terminale), **toolbar superiore** con endpoint, stato router, latenza e numero
 di modelli, **toolbar inferiore** con shortcut e suggerimenti contestuali per l'area
-aperta, area contenuto **scorrevile con la rotellina del mouse** e **voci del menu
-cliccabili**. La console viene pulita all'avvio (`cls` + titolo finestra). La riga di
-input offre suggerimenti dalla history; `F1` apre la guida e `F10` esce quando il menu è
-in attesa. Chat e lancio di Kilo Code sospendono temporaneamente la full-screen app per
-restituire il terminale al processo esterno e la riprendono all'uscita. In ambienti senza
-console (pipe, test, IDE) l'interfaccia ricade automaticamente sul prompt a riga.
+aperta, area contenuto **a colori** (gli stili `rich` sono conservati) con **scrollbar**,
+**rotellina del mouse**, `PgUp/PgDn/Home/End` e **ricerca incrementale** (`Ctrl+F`). Le
+**voci del menu sono cliccabili** con evidenziazione al passaggio del mouse; il click è
+risolto per riga/colonna sulla voce esatta. La riga di input offre suggerimenti dalla
+history. `Esc` annulla il prompt corrente; `F1` apre la guida e `F10` esce (globali).
+Gli errori restano visibili nella barra di stato, mai silenziati. Chat e lancio di Kilo
+Code sospendono temporaneamente la full-screen app senza ricrearla (corpo e scroll
+conservati) e la riprendono all'uscita. In ambienti senza console (pipe, test, IDE)
+l'interfaccia ricade automaticamente sul prompt a riga.
 
 I tasti `1`–`9` aprono rispettivamente: Router, singolo modello, prerequisiti/sicurezza,
 Kilo Code, diagnostica, inventario GGUF, editor INI, percorsi/link e aggiornamenti.
-`C` apre la chat, `L` la dashboard con refresh ogni due secondi, `B` torna indietro nei
-sottomenu e `Q` esce. Le azioni di scrittura, rimozione link e aggiornamento richiedono
-conferma. Il check delle release online è separato dai controlli locali.
+`C` apre la chat, `L` la dashboard con refresh ogni due secondi (aggiornata in place,
+senza reset dello scroll), `B` torna indietro nei sottomenu e `Q` esce. Il menu si naviga
+anche con **frecce + Invio**; `Tab` o `/` attivano la **modalità input** per la digitazione
+libera (i tasti singoli non la intercettano). Le azioni di scrittura, rimozione link e
+aggiornamento richiedono conferma; annullare con `Esc` non esegue azioni distruttive.
+Il check delle release online è separato dai controlli locali.
+
+L'avvio a caldo riusa una **cache del bootstrap**: se l'impronta di `requirements.txt`,
+del modulo bootstrap e del venv è invariata, il python viene risolto senza subprocess di
+verifica (primo frame interattivo in circa 1–2 s). Il primo setup resta invariato.
 
 - Gli avvii dal centro di controllo usano `-CheckRuntime`: eventuali installazioni o
   aggiornamenti si effettuano soltanto nell'area Aggiornamenti o tramite i launcher legacy.
