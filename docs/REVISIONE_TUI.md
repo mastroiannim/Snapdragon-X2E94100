@@ -120,3 +120,31 @@ Python 3.10 e 3.14 (venv uv) — verde prima e dopo il fix.
 
 Aggiunto `Interface._in_render`: flag di diagnostica attivo solo durante i callback
 di layout, usato dai test per vietare I/O nel path di render (criterio 1).
+
+## FASE 1 — I/O fuori dal render
+
+**Cambiamenti**
+- `hexagon_control/status_cache.py`: `TtlSnapshot`, cache aggiornata da un thread
+  poller con TTL 3 s. `snapshot()` non esegue mai I/O e non solleva; un fetch
+  fallito conserva l'ultimo valore buono (`last_error()` per la diagnostica).
+- `ProcessController`: `_fetch_status` aggiorna in background health + processi
+  con un'unica query CIM; `health_snapshot()` / `processes_snapshot()` per i
+  lettori. Il poller parte in `ControlCenter.run()` e si ferma in `close()`.
+- `server_processes()`: una sola query `Win32_Process` con `WorkingSetSize`
+  (eliminato il secondo subprocess `Get-Process`); memoria in MB dalla stessa CIM.
+- `ProcessController.start()`: callback `progress(secondi_trascorsi)` per lo
+  spinner e `cancel_event` per annullare l'attesa arrestando il launcher posseduto.
+- Toolbar, dashboard, schermate Router/Diagnostica/Kilo: letture solo da cache;
+  le decisioni critiche (avvio router da chat/kilo) usano ancora `health()` grezza.
+
+**Misure dopo** (`tools/benchmark_tui.py`):
+
+| Misura | Prima | Dopo |
+| --- | --- | --- |
+| `_top_status()` con router appeso | ~2000 ms | ~0 ms |
+| `dashboard_renderable()` offline | ~2008 ms | ~0 ms |
+
+Nuovi test: `tests/test_status_cache.py` (7), progress/annullamento in
+`test_control_center.py`, regressioni I/O-nel-render verdi in
+`tests/test_tui_performance.py`. Rimane expectedFailure: atomicità di
+`replace_body()` (FASE 2).

@@ -120,21 +120,18 @@ class ControlCenter:
         self.ui.set_status_provider(self._top_status)
 
     def _top_status(self) -> str:
-        try:
-            online, latency, models = self.processes.health()
-            router = "ONLINE" if online else "OFFLINE"
-            detail = f"{latency:.0f} ms │ {len(models)} modelli" if online else ""
-        except Exception:
-            router, detail = "N/D", ""
+        online, latency, models = self.processes.health_snapshot()
+        router = "ONLINE" if online else "OFFLINE"
+        detail = f"{latency:.0f} ms │ {len(models)} modelli" if online else ""
         parts = [f"│ {self.processes.base_url}", f"│ Router {router}"]
         if detail:
             parts.append(f"│ {detail}")
         return " ".join(parts)
 
     def dashboard_renderable(self):
-        online, latency, models = self.processes.health()
+        online, latency, models = self.processes.health_snapshot()
         owned = ", ".join(f"{record.mode}:{port}" for port, record in self.processes.owned.items()) or "nessuno"
-        managed = self.processes.server_processes(managed_only=True)
+        managed = self.processes.processes_snapshot(managed_only=True)
         process_status = ", ".join(f"PID {p['pid']} ({p['memory_mb']} MB)" for p in managed) or "nessuno"
         content = Text("HEXAGON CONTROL CENTER\n", style="bold cyan")
         content.append("Windows 11 ARM64 | Snapdragon X2 Elite Extreme\n", style="dim")
@@ -218,6 +215,7 @@ class ControlCenter:
             self.ui.console.print(f"Configurazione non leggibile; uso valori predefiniti: {self.settings.load_error}")
         self.ui.set_clickables(MENU_CLICKABLES)
         self.ui.set_slash_commands(MENU_SLASH)
+        self.processes.start_status_cache()
         self.ui.start()
         try:
             while True:
@@ -231,6 +229,7 @@ class ControlCenter:
                     break
         finally:
             self.ui.stop()
+            self.processes.stop_status_cache()
         self.exit_lifecycle()
 
     def exit_lifecycle(self):

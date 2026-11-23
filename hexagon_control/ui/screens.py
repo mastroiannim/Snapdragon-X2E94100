@@ -26,7 +26,7 @@ class Screens:
     def _show_processes(self, managed_only=False):
         rows = [
             (p.get("pid"), f"{p.get('memory_mb', 0)} MB", p.get("path") or "N/D", p.get("command_line") or "")
-            for p in self.processes.server_processes(managed_only=managed_only)
+            for p in self.processes.processes_snapshot(managed_only=managed_only)
         ]
         self.ui.table("Processi llama-server" + (" gestiti" if managed_only else ""),
                       ("PID", "Memoria", "Eseguibile", "Comando"), rows)
@@ -73,7 +73,7 @@ class Screens:
 
     def router(self):
         while True:
-            online, latency, models = self.processes.health()
+            online, latency, models = self.processes.health_snapshot()
             self.ui.table("Router multi-modello", ("Parametro", "Valore"), [
                 ("Endpoint", self.processes.base_url),
                 ("Stato", "ONLINE" if online else "OFFLINE"),
@@ -180,7 +180,7 @@ class Screens:
         self.ui.pause()
 
     def kilo(self):
-        online, _, models = self.processes.health()
+        online, _, models = self.processes.health_snapshot()
         default_main = kilo_config.RECOMMENDED_MAIN_MODEL
         default_small = kilo_config.RECOMMENDED_SMALL_MODEL
         if models:
@@ -216,7 +216,7 @@ class Screens:
     def diagnostics(self):
         while True:
             port = self.settings.data["port"]
-            online, latency, models = self.processes.health()
+            online, latency, models = self.processes.health_snapshot()
             self.ui.table("Diagnostica e monitoraggio", ("Metrica", "Valore"), [
                 ("Porta", f"{port} ({'aperta' if self.diagnostics_service.port_open(port) else 'chiusa'})"),
                 ("HTTP /v1/models", f"{'OK' if online else 'non raggiungibile'}; {latency:.1f} ms" if online else "OFFLINE"),

@@ -3,6 +3,7 @@ import os
 import struct
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -232,6 +233,39 @@ class ProcessTests(ControlCenterTestCase):
             result = self.processes.shutdown(keep_running=True)
         self.assertTrue(result.ok)
         stop.assert_not_called()
+
+    def test_start_reports_elapsed_time_via_progress(self):
+        (self.root / "launch-hexagon.ps1").write_text("# fixture", encoding="utf-8")
+        child = MagicMock(pid=10)
+        child.poll.return_value = None
+        elapsed = []
+        with patch("hexagon_control.processes.sys.platform", "win32"), \
+             patch.object(self.processes, "health",
+                          side_effect=[(False, 0, []), (True, 1, ["model"])]), \
+             patch.object(self.processes, "server_processes", side_effect=[[], [{"pid": 42}]]), \
+             patch("hexagon_control.processes.subprocess.Popen", return_value=child), \
+             patch("hexagon_control.processes.time.sleep"):
+            result = self.processes.start("Router", progress=elapsed.append)
+        self.assertTrue(result.ok, result.message)
+        self.assertTrue(elapsed, "il callback di progress non e' stato invocato")
+
+    def test_start_cancellation_stops_owned_launcher(self):
+        (self.root / "launch-hexagon.ps1").write_text("# fixture", encoding="utf-8")
+        child = MagicMock(pid=10)
+        child.poll.return_value = None
+        cancel = threading.Event()
+        cancel.set()
+        with patch("hexagon_control.processes.sys.platform", "win32"), \
+             patch.object(self.processes, "health", return_value=(False, 0, [])), \
+             patch.object(self.processes, "server_processes", return_value=[]), \
+             patch("hexagon_control.processes.subprocess.Popen", return_value=child), \
+             patch("hexagon_control.processes.time.sleep"), \
+             patch.object(self.processes, "_stop_pid", return_value=True) as stop_pid:
+            result = self.processes.start("Router", cancel_event=cancel)
+        self.assertFalse(result.ok)
+        self.assertIn("annullato", result.message)
+        self.assertFalse(self.processes.owned)
+        stop_pid.assert_called_once_with(10)
 
 
 class KiloTests(ControlCenterTestCase):

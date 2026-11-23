@@ -10,7 +10,10 @@ Bug coperti:
 - server_processes(): due subprocess PowerShell invece di una sola query CIM.
 """
 import subprocess
+import threading
+import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -22,34 +25,88 @@ from hexagon_control.ui.app import ControlCenter
 from hexagon_control.ui.components import Interface
 
 
-def _center_with_guarded_health(ui):
-    """ControlCenter il cui health() registra se viene chiamato durante il render."""
-    calls = []
+def _hung_server():
+    """Server HTTP che accetta la connessione ma non risponde mai."""
 
-    processes = MagicMock()
-    processes.base_url = "http://127.0.0.1:18803/v1"
+    class Hung(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
 
-    def health():
-        calls.append(getattr(ui, "_in_render", False))
+        def do_GET(self):
+            time.sleep(3600)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Hung)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def _forbidden_health(*args, **kwargs):
+    raise AssertionError("I/O HTTP sincrono nel path di lettura dello stato")
+
+
+class _FakeProcesses:
+    """Stand-in di ProcessController: health() e' il fetch bloccante, vietato nel render."""
+
+    base_url = "http://127.0.0.1:18803/v1"
+    owned = {}
+
+    def __init__(self, calls, ui):
+        self._calls = calls
+        self._ui = ui
+
+    def health(self):
+        self._calls.append(getattr(self._ui, "_in_render", False))
         return False, 0.0, []
 
-    processes.health = health
+    def health_snapshot(self):
+        return False, 0.0, []
+
+    def processes_snapshot(self, managed_only=False):
+        return []
+
+
+def _center_with_guarded_health(ui):
+    """ControlCenter il cui fetch bloccante registra se viene invocato durante il render."""
+    calls = []
     settings = MagicMock()
     settings.load_error = None
-    center = ControlCenter(processes, MagicMock(), MagicMock(), MagicMock(),
+    center = ControlCenter(_FakeProcesses(calls, ui), MagicMock(), MagicMock(), MagicMock(),
                            MagicMock(), MagicMock(), MagicMock(), settings)
     return center, calls
 
 
 class BlockingIoInRenderTests(unittest.TestCase):
-    @unittest.expectedFailure
     def test_status_provider_never_calls_health_during_render(self):
         ui = Interface()
         center, calls = _center_with_guarded_health(ui)
+        ui.set_status_provider(center._top_status)
         ui._top_toolbar()
-        self.assertTrue(calls, "il provider non e' stato consultato")
-        self.assertNotIn(True, calls,
-                         "health() eseguita dentro un callback di layout: redraw bloccante")
+        center.dashboard_renderable()
+        self.assertEqual(calls, [],
+                         "fetch bloccante eseguita nel path di render: redraw congelato")
+
+    def test_status_reads_never_block_with_hung_router(self):
+        """Con il router appeso (health bloccante) toolbar e dashboard restano istantanee."""
+        server = _hung_server()
+        try:
+            url = f"http://127.0.0.1:{server.server_port}/v1"
+            settings = MagicMock()
+            settings.load_error = None
+            processes = ProcessController(Path.cwd(), MagicMock(), MagicMock(), url)
+            processes.health = _forbidden_health  # qualunque I/O sincrono qui e' un bug
+            center = ControlCenter(processes, MagicMock(), MagicMock(), MagicMock(),
+                                   MagicMock(), MagicMock(), MagicMock(), settings)
+            center.ui.set_status_provider(center._top_status)
+            started = time.perf_counter()
+            center.ui._top_toolbar()
+            center.dashboard_renderable()
+            elapsed = (time.perf_counter() - started) * 1000
+            self.assertLess(elapsed, 500,
+                            f"lettura di stato bloccante nel path di render: {elapsed:.0f} ms")
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 class ReplaceBodyAtomicityTests(unittest.TestCase):
@@ -71,7 +128,6 @@ class ReplaceBodyAtomicityTests(unittest.TestCase):
 
 
 class ServerProcessesQueryTests(unittest.TestCase):
-    @unittest.expectedFailure
     def test_server_processes_uses_a_single_cim_query_with_working_set(self):
         stack = MagicMock()
         stack.managed_server_pids.return_value = {7}

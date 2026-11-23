@@ -2,15 +2,24 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import httpx
 
 from .results import OperationResult
+from .status_cache import TtlSnapshot
+
+
+_CIM_PROCESS_SCRIPT = (
+    "Get-CimInstance Win32_Process -Filter \"Name='llama-server.exe'\" -ErrorAction Stop | "
+    "Select-Object ProcessId,ExecutablePath,CommandLine,CreationDate,WorkingSetSize | "
+    "ConvertTo-Json -Compress"
+)
 
 
 @dataclass
@@ -35,8 +44,39 @@ class ProcessController:
         self.children: Dict[int, subprocess.Popen] = {}
         self.log_dir = settings.path.parent / "logs"
         self.http = httpx.Client(timeout=httpx.Timeout(10.0, connect=1.5), trust_env=False)
+        # Stato del runtime aggiornato da un poller in background: i callback di
+        # layout leggono solo la cache e non eseguono mai I/O nel render.
+        self._status_cache = TtlSnapshot(self._fetch_status, ttl=3.0)
+
+    def start_status_cache(self):
+        self._status_cache.start()
+
+    def stop_status_cache(self):
+        self._status_cache.stop()
+
+    def _fetch_status(self):
+        health = self.health()
+        processes = self.server_processes(managed_only=False)
+        managed_ids = set(self.stack_manager.managed_server_pids())
+        managed = [item for item in processes if item["pid"] in managed_ids]
+        return health, processes, managed
+
+    def health_snapshot(self) -> Tuple[bool, float, List[str]]:
+        """Stato health dall'ultimo aggiornamento del poller; mai bloccante."""
+        value = self._status_cache.snapshot()
+        if value is None:
+            return False, 0.0, []
+        return value[0]
+
+    def processes_snapshot(self, managed_only: bool = False) -> List[Dict]:
+        """Processi llama-server dall'ultimo aggiornamento del poller; mai bloccante."""
+        value = self._status_cache.snapshot()
+        if value is None:
+            return []
+        return value[2] if managed_only else value[1]
 
     def close(self):
+        self.stop_status_cache()
         self.http.close()
 
     def set_port(self, port: int):
@@ -71,13 +111,9 @@ class ProcessController:
     def server_processes(self, managed_only: bool = False) -> List[Dict]:
         if sys.platform != "win32":
             return []
-        script = (
-            "Get-CimInstance Win32_Process -Filter \"Name='llama-server.exe'\" -ErrorAction Stop | "
-            "Select-Object ProcessId,ExecutablePath,CommandLine,CreationDate | ConvertTo-Json -Compress"
-        )
         try:
             proc = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", script],
+                ["powershell", "-NoProfile", "-Command", _CIM_PROCESS_SCRIPT],
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=10, check=True,
             )
@@ -88,30 +124,28 @@ class ProcessController:
             processes = [{
                 "pid": int(item["ProcessId"]), "path": item.get("ExecutablePath") or "",
                 "command_line": item.get("CommandLine") or "",
-                "started": str(item.get("CreationDate") or ""), "memory_mb": 0,
+                "started": str(item.get("CreationDate") or ""),
+                "memory_mb": round(float(item.get("WorkingSetSize") or 0) / 1048576, 1),
             } for item in items]
             if managed_only:
                 managed = set(self.stack_manager.managed_server_pids())
                 processes = [item for item in processes if item["pid"] in managed]
-            if processes:
-                memory = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command",
-                     "Get-Process -Name llama-server -ErrorAction Stop | Select-Object Id,WorkingSet64 | ConvertTo-Json -Compress"],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace",
-                    timeout=10, check=True,
-                )
-                values = json.loads(memory.stdout) if memory.stdout.strip() else []
-                values = values if isinstance(values, list) else [values]
-                working_sets = {int(item["Id"]): round(float(item["WorkingSet64"]) / 1048576, 1) for item in values}
-                for item in processes:
-                    item["memory_mb"] = working_sets.get(item["pid"], 0)
             return processes
         except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError):
             return []
 
     def start(self, mode: str, model: Optional[Path] = None, port: Optional[int] = None,
               models_max: Optional[int] = None, bind_host: str = "127.0.0.1",
-              allow_non_loopback: bool = False, wait: float = 30.0) -> OperationResult:
+              allow_non_loopback: bool = False, wait: float = 30.0,
+              cancel_event: Optional[threading.Event] = None,
+              progress: Optional[Callable[[float], None]] = None) -> OperationResult:
+        """Avvia il server e attende la disponibilita' dell'endpoint.
+
+        ``progress`` riceve i secondi trascorsi a ogni ciclo di attesa (per lo
+        spinner dell'interfaccia); ``cancel_event`` interrompe l'attesa e
+        arresta il launcher appena avviato, sicuro perche' il processo e'
+        posseduto da questa sessione.
+        """
         try:
             self.validate_bind(bind_host, allow_non_loopback)
             port = int(port or self.settings.data["port"])
@@ -165,7 +199,15 @@ class ProcessController:
         self.owned[port] = record
         self.children[port] = child
         deadline = time.monotonic() + wait
+        started_at = time.monotonic()
         while time.monotonic() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                self._stop_record(record)
+                self.owned.pop(port, None)
+                self.children.pop(port, None)
+                return OperationResult(False, "Avvio annullato dall'utente")
+            if progress is not None:
+                progress(time.monotonic() - started_at)
             online, _, _ = self.health()
             if online:
                 candidates = [p for p in self.server_processes(managed_only=True) if p["pid"] not in preexisting]
