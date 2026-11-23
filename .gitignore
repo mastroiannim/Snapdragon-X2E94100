@@ -1,11 +1,20 @@
-# File auto-generati dal launcher
-hexagon-models.ini
+# File auto-generati dal launcher e backup
+hexagon-models.ini*
+*.bak
+*.bak*
+*.backup
+*.orig
 
-# File temporanei e log
+# File temporanei, dump e log di test/server
 *.log
 *.tmp
 __pycache__/
 *.pyc
+*_err.txt
+*_out.txt
+*_run.txt
+log_*.txt
+test_*.txt
 
 # Output di benchmark e analisi locali
 benchmark-logs/
