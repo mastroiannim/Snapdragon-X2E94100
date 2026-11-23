@@ -82,3 +82,41 @@ client; non eseguono modelli o installazioni GenieX.
 Riferimenti: [politica di aggiornamento](REVISIONE_TECNICA.md),
 [contratto di compatibilità](COMPATIBILITA.md),
 [API server llama.cpp: timings, usage e reasoning](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
+
+---
+
+# Rifattorizzazione Control Center: fluidità e UX (in corso)
+
+Baseline e misure delle fasi di rifattorizzazione della TUI full-screen
+(`hexagon_control/ui/`). Vincoli invariati: euristiche di `launch-hexagon.ps1`,
+motore runtime-update/sync-geniex, formato INI (salvataggio atomico UTF-8 senza BOM),
+contratti read-only, binding loopback, conferme distruttive, gestione link.
+
+## FASE 0 — Baseline, CI e test di regressione
+
+**Causa del fallimento CI** (run #8–#10, tutte le matrici): il test
+`test_generate_kilo_config_structure` dipendeva da `hexagon-models.ini` — file
+gitignored, assente nel checkout CI — e da un router live su 127.0.0.1:18803.
+Riprodotto localmente spostando l'INI: `AssertionError: 0 not greater than 0`.
+Correzione: test reso ermetico con INI di fixture in directory temporanea e
+`fetch_live_models` disattivato. Riproduzione estesa: suite eseguita anche con
+Python 3.10 e 3.14 (venv uv) — verde prima e dopo il fix.
+
+**Misure baseline** (`python tools/benchmark_tui.py`, Windows ARM64, Python 3.13):
+
+| Misura | Prima |
+| --- | --- |
+| `_top_status()` con router appeso (per redraw) | ~2000 ms (timeout HTTP 2 s) |
+| `dashboard_renderable()` con router offline | ~2008 ms (solo health; +2 subprocess PowerShell su Windows) |
+| `replace_body()` | 2 `set_document` (clear+append, frame vuoto intermedio) |
+| keypress → risoluzione prompt (DummyOutput) | ~1 ms p50 (il lag reale deriva dal render bloccante) |
+
+**Test di regressione fotografati** (`tests/test_tui_performance.py`), marcati
+`expectedFailure` finché la fase che li risolve non li rende verdi:
+- I/O bloccante nella toolbar di stato (guard `_in_render` in `Interface`);
+- `replace_body()` non atomico (due aggiornamenti del documento);
+- `server_processes()` con due query PowerShell invece di una sola CIM con
+  `WorkingSetSize`.
+
+Aggiunto `Interface._in_render`: flag di diagnostica attivo solo durante i callback
+di layout, usato dai test per vietare I/O nel path di render (criterio 1).

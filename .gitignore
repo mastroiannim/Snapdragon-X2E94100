@@ -11,6 +11,9 @@ __pycache__/
 benchmark-logs/
 long-context-results/
 
+# Ambienti virtuali locali per test multi-versione (uv)
+.venv*/
+
 # Modelli locali e pesi
 models/
 *.gguf

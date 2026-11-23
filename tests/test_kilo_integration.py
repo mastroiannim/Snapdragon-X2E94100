@@ -103,8 +103,28 @@ class TestKiloConfig(unittest.TestCase):
         self.assertEqual(models, {})
 
     def test_generate_kilo_config_structure(self):
-        """Verifica la struttura del dizionario kilo.json generato."""
-        cfg = kilo_config.generate_kilo_config(self.workspace_dir)
+        """Verifica la struttura del dizionario kilo.json generato.
+
+        Il test e' ermetico: usa un INI di fixture in directory temporanea e
+        disattiva la consultazione HTTP del router, per non dipendere da
+        hexagon-models.ini (gitignored, assente in CI) ne' da un router attivo.
+        """
+        fixture_ini = """[*]
+flash-attn = on
+[Ornith-1.5-9B-Q4_0]
+model = /models/ornith.gguf
+device = HTP0
+ctx-size = 8192
+[MiniCPM5-2B-Q4_K_M]
+model = /models/minicpm.gguf
+device = HTP0
+ctx-size = 4096
+"""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_workspace = Path(tmp_dir)
+            (tmp_workspace / "hexagon-models.ini").write_text(fixture_ini, encoding="utf-8")
+            with patch("kilo_config.fetch_live_models", return_value=[]):
+                cfg = kilo_config.generate_kilo_config(tmp_workspace)
 
         # Struttura base
         self.assertIn("provider", cfg)

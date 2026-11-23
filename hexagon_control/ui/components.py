@@ -176,6 +176,10 @@ class Interface:
         self._loop = None
         self._thread: Optional[threading.Thread] = None
         self._status_provider: Callable[[], str] = lambda: ""
+        # Guard di diagnostica: True mentre viene eseguito un callback di layout
+        # (toolbar/fragment). I provider devono leggere solo cache: uno I/O
+        # bloccante qui congela l'intera UI a ogni redraw.
+        self._in_render = False
         self._stop_clock = threading.Event()
         self.history_file = Path.home() / ".hexagon_control_history"
 
@@ -390,7 +394,11 @@ class Interface:
     # Toolbar
     # ------------------------------------------------------------------
     def _top_toolbar(self):
-        status = self._status_provider() or "Hexagon Control Center"
+        self._in_render = True
+        try:
+            status = self._status_provider() or "Hexagon Control Center"
+        finally:
+            self._in_render = False
         clock = datetime.now().strftime("%H:%M")
         return f" 🐉 HEXAGON {status} │ {clock} "
 
