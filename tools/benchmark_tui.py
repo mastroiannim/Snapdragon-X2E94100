@@ -74,10 +74,38 @@ def bench_dashboard(base_url):
     return (time.perf_counter() - started) * 1000
 
 
-def bench_replace_body():
+def _start_headless(ui):
+    """Avvia l'app in un thread con pipe input e DummyOutput; ritorna il thread."""
     from prompt_toolkit.input.defaults import create_pipe_input
     from prompt_toolkit.output import DummyOutput
 
+    import hexagon_control.ui.components as comp
+
+    pipe = create_pipe_input().__enter__()
+    real_application = comp.Application
+
+    def factory(*args, **kwargs):
+        kwargs["input"] = pipe
+        kwargs["output"] = DummyOutput()
+        return real_application(*args, **kwargs)
+
+    patcher = patch.object(comp, "Application", side_effect=factory, autospec=True)
+    patcher.start()
+    worker = threading.Thread(target=ui.start, daemon=True)
+    worker.start()
+    ui.wait_ready(10)
+
+    class _Session:
+        def close(self):
+            ui.stop()
+            worker.join(timeout=5)
+            patcher.stop()
+            pipe.close()
+
+    return _Session()
+
+
+def bench_replace_body():
     import hexagon_control.ui.components as comp
 
     counters = {"set_document": 0, "invalidate": 0}
@@ -92,78 +120,53 @@ def bench_replace_body():
         counters["invalidate"] += 1
         return real_invalidate(self, *args, **kwargs)
 
-    with create_pipe_input() as pipe:
-        real_application = comp.Application
-
-        def factory(*args, **kwargs):
-            kwargs["input"] = pipe
-            kwargs["output"] = DummyOutput()
-            return real_application(*args, **kwargs)
-
-        ui = comp.Interface()
-        with patch.object(comp, "Application", side_effect=factory, autospec=True), \
-                patch.object(comp.Buffer, "set_document", counting_set_document), \
-                patch.object(comp.Application, "invalidate", counting_invalidate):
-            ui.start()
-            try:
-                deadline = time.monotonic() + 10
-                while (ui._app is None or not ui.running) and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                counters["set_document"] = 0
-                counters["invalidate"] = 0
-                ui.replace_body(Panel("dashboard di prova"))
-                deadline = time.monotonic() + 5
-                while counters["set_document"] < 2 and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                time.sleep(0.2)  # lascia smaltire la coda del loop
-                return dict(counters)
-            finally:
-                ui.stop()
+    ui = comp.Interface()
+    with patch.object(comp.Buffer, "set_document", counting_set_document), \
+            patch.object(comp.Application, "invalidate", counting_invalidate):
+        session = _start_headless(ui)
+        try:
+            counters["set_document"] = 0
+            counters["invalidate"] = 0
+            ui.replace_body(Panel("dashboard di prova"))
+            deadline = time.monotonic() + 5
+            while counters["set_document"] < 1 and time.monotonic() < deadline:
+                time.sleep(0.02)
+            time.sleep(0.2)  # lascia smaltire la coda del loop
+            return dict(counters)
+        finally:
+            session.close()
 
 
 def bench_keypress():
-    from prompt_toolkit.input.defaults import create_pipe_input
-    from prompt_toolkit.output import DummyOutput
-
     import hexagon_control.ui.components as comp
 
-    with create_pipe_input() as pipe:
-        real_application = comp.Application
+    ui = comp.Interface()
+    session = _start_headless(ui)
+    try:
+        samples = []
+        for _ in range(10):
+            outcome = {}
 
-        def factory(*args, **kwargs):
-            kwargs["input"] = pipe
-            kwargs["output"] = DummyOutput()
-            return real_application(*args, **kwargs)
+            def ask():
+                try:
+                    outcome["v"] = ui.prompt("menu", single_key=True)
+                except Exception as exc:  # noqa: BLE001
+                    outcome["err"] = exc
 
-        ui = comp.Interface()
-        with patch.object(comp, "Application", side_effect=factory, autospec=True):
-            ui.start()
-            try:
-                deadline = time.monotonic() + 10
-                while (ui._app is None or not ui.running) and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                samples = []
-                for _ in range(10):
-                    outcome = {}
-
-                    def ask():
-                        try:
-                            outcome["v"] = ui.prompt("menu", single_key=True)
-                        except Exception as exc:  # noqa: BLE001
-                            outcome["err"] = exc
-
-                    worker = threading.Thread(target=ask, daemon=True)
-                    worker.start()
-                    time.sleep(0.1)  # il prompt e' attivo
-                    started = time.perf_counter()
-                    pipe.send_text("4")
-                    worker.join(3)
-                    samples.append((time.perf_counter() - started) * 1000)
-                    if "v" not in outcome:
-                        return {"errore": "prompt non risolto"}
-                return {"p50": statistics.median(samples), "samples": [round(s, 1) for s in samples]}
-            finally:
-                ui.stop()
+            worker = threading.Thread(target=ask, daemon=True)
+            worker.start()
+            deadline = time.monotonic() + 2
+            while ui._pending is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            started = time.perf_counter()
+            ui.resolve_prompt("4")
+            worker.join(3)
+            samples.append((time.perf_counter() - started) * 1000)
+            if "v" not in outcome:
+                return {"errore": "prompt non risolto"}
+        return {"p50": statistics.median(samples), "samples": [round(s, 1) for s in samples]}
+    finally:
+        session.close()
 
 
 def main():

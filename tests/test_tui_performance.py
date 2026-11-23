@@ -1,8 +1,9 @@
 """Test di regressione per le performance e l'architettura di rendering della TUI.
 
-Fotografano i bug noti PRIMA del rifacimento (FASE 0): sono marcati
-``expectedFailure`` e devono diventare verdi man mano che le fasi li correggono.
-Quando un test passa, il decoratore va rimosso.
+Fotografano i bug noti PRIMA del rifacimento (FASE 0); diventati verdi con:
+- FASE 1: vietato l'I/O bloccante nel path di lettura dello stato (cache TTL);
+  server_processes() con una sola query CIM.
+- FASE 2: replace_body() atomico (un solo set_document + un solo invalidate).
 
 Bug coperti:
 - I/O bloccante (HTTP) dentro il callback della toolbar di stato.
@@ -110,9 +111,11 @@ class BlockingIoInRenderTests(unittest.TestCase):
 
 
 class ReplaceBodyAtomicityTests(unittest.TestCase):
-    @unittest.expectedFailure
     def test_replace_body_sets_document_exactly_once(self):
+        from test_control_center_ui import _start_ui_in_thread
+
         ui = Interface()
+        _start_ui_in_thread(self, ui)
         sets = []
         real_set_document = components.Buffer.set_document
 
@@ -122,6 +125,9 @@ class ReplaceBodyAtomicityTests(unittest.TestCase):
 
         with patch.object(components.Buffer, "set_document", spy):
             ui.replace_body(Panel("nuovo contenuto"))
+            deadline = time.monotonic() + 5
+            while "nuovo contenuto" not in ui._body_text and time.monotonic() < deadline:
+                time.sleep(0.02)
         self.assertIn("nuovo contenuto", ui._body_text)
         self.assertEqual(len(sets), 1,
                          f"replace_body non atomico: {len(sets)} aggiornamenti del documento")

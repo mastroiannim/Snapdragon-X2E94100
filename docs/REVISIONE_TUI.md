@@ -148,3 +148,36 @@ Nuovi test: `tests/test_status_cache.py` (7), progress/annullamento in
 `test_control_center.py`, regressioni I/O-nel-render verdi in
 `tests/test_tui_performance.py`. Rimane expectedFailure: atomicità di
 `replace_body()` (FASE 2).
+
+## FASE 2 — Event loop unico, render atomico, suspend/resume
+
+**Architettura**
+- Il loop di `Application.run_async` vive sul thread di `Interface.start()` (di
+  norma il main); menu e schermate girano in un `ThreadPoolExecutor` dedicato
+  (`ControlCenter.run`). Comunicazione via `call_soon_threadsafe` + eventi.
+- Handshake senza busy-wait: `_ready`/`_finished` al posto del polling con
+  `sleep(0.02)`; `Interface.wait_ready()` per chi usa l'interfaccia da altri
+  thread. `stop()` attende il termine solo se chiamato da un altro thread.
+- Stato del prompt protetto da `_state_lock` (transizioni e letture nelle
+  callback di layout).
+- `replace_body()` atomico: un solo `set_document` + un solo `invalidate`,
+  nessun frame vuoto; le righe cliccabili vengono ricalcolate una sola volta
+  sul testo nuovo. Benchmark: set_document 2 -> 1.
+- `suspended()` non distrugge più l'app: usa il pattern `in_terminal` di
+  prompt_toolkit (render sospeso, input staccato, redraw allo stato conservato).
+  Corpo e scroll sopravvivono a chat/Kilo; nessuna uscita dall'alternate screen.
+  La chat scrive ora sul terminale reale durante l'handover (prima finiva nel
+  corpo invisibile).
+- Errori del loop UI mai silenziati: eccezioni registrate in
+  `Interface._last_app_error` (catena con l'handler di prompt_toolkit) e
+  traccia su stderr; l'app resta attiva.
+- `ControlCenter._menu_loop`: `exit_lifecycle` (conferma arresto server) avviene
+  con l'app ancora attiva; se l'app muore da sola, i server attivi vengono
+  segnalati su stdout.
+
+**Misure dopo**: keypress -> risoluzione prompt p50 ~0,2 ms (era ~1,1 ms);
+replace_body 1 aggiornamento documento (era 2).
+
+API pubblica di `Interface` invariata (prompt, confirm, pause, table, result,
+error, console, suspended); aggiornati i test harness (app avviata in thread)
+e i tool `tools/benchmark_tui.py` / `tools/diagnose_tui.py`.

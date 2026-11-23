@@ -12,13 +12,14 @@ full-screen app non e' attiva (test, pipe, ambienti headless).
 
 import io
 import shutil
+import sys
 import threading
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from prompt_toolkit import Application
+from prompt_toolkit.application.run_in_terminal import in_terminal
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer, Completion
@@ -169,74 +170,168 @@ class Interface:
         self._question = ""
         self._default: Optional[str] = None
         self._pending: Optional[_PendingPrompt] = None
+        # Stato del prompt condiviso fra thread UI e thread delle azioni:
+        # tutte le transizioni passano da questo lock.
+        self._state_lock = threading.Lock()
         # Comandi slash contestuali: {"/comando": (tasto_equivalente, descrizione)}
         self.slash_commands: Dict[str, Tuple[str, str]] = {}
         self._input: Optional[TextArea] = None
         self._app: Optional[Application] = None
         self._loop = None
-        self._thread: Optional[threading.Thread] = None
         self._status_provider: Callable[[], str] = lambda: ""
         # Guard di diagnostica: True mentre viene eseguito un callback di layout
         # (toolbar/fragment). I provider devono leggere solo cache: uno I/O
         # bloccante qui congela l'intera UI a ogni redraw.
         self._in_render = False
-        self._stop_clock = threading.Event()
+        # Handshake di avvio: niente busy-wait, solo eventi.
+        self._starting = False
+        self._ready = threading.Event()
+        self._finished = threading.Event()
+        self._ever_ready = False  # l'app e' mai partita con successo in questa sessione
+        self._start_thread: Optional[threading.Thread] = None
+        self._last_app_error: Optional[Exception] = None
+        self._handover_cm = None
         self.history_file = Path.home() / ".hexagon_control_history"
 
     # ------------------------------------------------------------------
-    # Ciclo di vita della full-screen app (thread dedicato)
+    # Ciclo di vita della full-screen app
     # ------------------------------------------------------------------
     @property
     def running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        return self._ready.is_set()
+
+    def wait_ready(self, timeout: Optional[float] = None) -> bool:
+        """Attende che l'app sia pronta senza polling; False su timeout."""
+        return self._ready.wait(timeout)
 
     def start(self):
-        if self.running:
+        """Costruisce ed esegue l'app sul thread chiamante (di norma il main).
+
+        Il loop asyncio dell'application vive sul thread di start(); le
+        schermate e le azioni girano su un executor e comunicano con
+        ``call_soon_threadsafe`` + eventi. Blocca fino a ``stop()`` o all'uscita
+        dall'app. Senza busy-wait: l'avvenuta costruzione è segnalata con
+        ``_ready``, il termine con ``_finished``.
+        """
+        if self._starting or self.running:
             return
-        self._stop_clock.clear()
-        self._thread = threading.Thread(target=self._run_app, name="hexagon-tui", daemon=True)
-        self._thread.start()
-        deadline = time.monotonic() + 5
-        while (self._app is None or self._loop is None) and time.monotonic() < deadline and self.running:
-            time.sleep(0.02)
-
-    def stop(self):
-        self._stop_clock.set()
-        if self._app is not None and self._loop is not None:
-            try:
-                self._loop.call_soon_threadsafe(self._app.exit)
-            except RuntimeError:
-                pass
-        if self._thread is not None:
-            self._thread.join(timeout=5)
-            self._thread = None
-        self._loop = None
-        self._app = None
-        self._reject_pending()
-
-    def suspended(self):
-        """Context manager: sospende la full-screen app per subprocess/chat esterne."""
-        return _Suspend(self)
-
-    def _run_app(self):
         import asyncio
 
-        # Application.run() creerebbe un loop proprio con asyncio.run();
-        # serve invece il nostro loop perche' il thread principale lo usa
-        # con call_soon_threadsafe per aggiornare corpo, domande e hint.
+        self._starting = True
+        self._finished.clear()
+        self._start_thread = threading.current_thread()
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        self._loop.set_exception_handler(self._loop_exception_handler)
         try:
             self._app = self._build_app()
+            self._chain_app_exception_handler(self._app)
+            self._ever_ready = True
+            self._ready.set()
             self._loop.run_until_complete(self._app.run_async())
-        except Exception:
-            pass
+        except (KeyboardInterrupt, EOFError):
+            pass  # uscita volontaria dall'app
+        except Exception as exc:  # mai silenziato: traccia su stderr e in memoria
+            self._last_app_error = exc
+            print(f"hexagon-tui: errore nel loop UI: {exc}", file=sys.stderr)
         finally:
+            self._ready.clear()
             self._app = None
+            try:
+                self._loop.close()
+            except Exception:
+                pass
             self._loop = None
+            self._starting = False
+            self._start_thread = None
+            self._reject_pending()
+            self._finished.set()
+
+    def _chain_app_exception_handler(self, app: Application):
+        """Registra gli errori del loop anche con l'handler di prompt_toolkit attivo.
+
+        run_async sostituisce temporaneamente l'exception handler del loop con
+        il proprio (che stampa e tiene in vita l'app): lo avvolgiamo per
+        conservare l'errore in ``_last_app_error`` senza alterarne il comportamento.
+        """
+        real_handler = app._handle_exception
+
+        def chained_handler(loop, context):
+            self._record_loop_error(context)
+            return real_handler(loop, context)
+
+        app._handle_exception = chained_handler
+
+    def _record_loop_error(self, context):
+        exc = context.get("exception")
+        self._last_app_error = exc if isinstance(exc, Exception) \
+            else RuntimeError(str(context.get("message") or "errore nel loop UI"))
+
+    def _loop_exception_handler(self, loop, context):
+        # Eccezioni dai callback del loop: mai silenziate, la UI resta attiva.
+        self._record_loop_error(context)
+        print(f"hexagon-tui: {self._last_app_error}", file=sys.stderr)
+
+    def stop(self, timeout: float = 5.0):
+        """Richiede l'uscita dell'app; attende il termine se chiamato da altro thread."""
+        app, loop = self._app, self._loop
+        if app is not None and loop is not None:
+            try:
+                loop.call_soon_threadsafe(app.exit)
+            except RuntimeError:
+                pass
+        self._reject_pending()
+        if (self._start_thread is not None
+                and threading.current_thread() is not self._start_thread):
+            self._finished.wait(timeout)
+
+    def suspended(self):
+        """Context manager: cede il terminale al corpo senza distruggere l'app.
+
+        Il rendering viene sospeso e l'input staccato (pattern ``in_terminal``
+        di prompt_toolkit); al ritorno l'app viene ridisegnata nello stato
+        conservato: corpo, scroll e prompt restano intatti, senza uscire
+        dall'alternate screen.
+        """
+        return _Suspend(self)
+
+    def run_in_terminal(self, func: Callable[[], object], in_executor: bool = True) -> object:
+        """Esegue ``func`` nel terminale sopra la UI, senza ricreare l'app."""
+        if not self.running or self._loop is None or self._app is None:
+            return func()
+        future = self._run_coroutine_threadsafe(self._run_above(func, in_executor))
+        return future.result()
+
+    def _run_coroutine_threadsafe(self, coroutine):
+        import asyncio
+
+        return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+
+    async def _run_above(self, func: Callable[[], object], in_executor: bool):
+        from prompt_toolkit.eventloop import run_in_executor_with_context
+
+        async with in_terminal():
+            if in_executor:
+                return await run_in_executor_with_context(func)
+            return func()
+
+    def _begin_handover(self):
+        if not self.running or self._loop is None or self._app is None:
+            return
+        self._handover_cm = in_terminal()
+        self._run_coroutine_threadsafe(self._handover_cm.__aenter__()).result()
+
+    def _end_handover(self):
+        if self._handover_cm is None:
+            return
+        cm, self._handover_cm = self._handover_cm, None
+        self._run_coroutine_threadsafe(cm.__aexit__(None, None, None)).result()
 
     def _reject_pending(self):
-        pending, self._pending = self._pending, None
+        with self._state_lock:
+            pending, self._pending = self._pending, None
+            self._question = ""
+            self._default = None
         if pending is not None:
             pending.resolve(_INTERRUPT)
 
@@ -405,8 +500,11 @@ class Interface:
     def _question_fragments(self):
         # La barra e' sempre visibile: con un prompt attivo mostra la domanda,
         # altrimenti una riga di stato inattivo cosi' il layout non salta mai.
-        if self._pending is not None:
-            return [("class:question", f"❯ {self._question}")]
+        with self._state_lock:
+            pending = self._pending
+            question = self._question
+        if pending is not None:
+            return [("class:question", f"❯ {question}")]
         return [("class:idle", "❯ pronto — tasto singolo, / per i comandi, ? guida, Q esci")]
 
     def _bottom_toolbar(self):
@@ -417,11 +515,13 @@ class Interface:
             options = " │ ".join(cmd for cmd in self.slash_commands if cmd.startswith(typed))
             if options:
                 return f" {options} │ ↵ conferma │ Esc annulla "
-        if self._pending is not None and self._pending.question:
+        with self._state_lock:
+            pending = self._pending
+        if pending is not None and pending.question:
             tail = "↵ conferma │ Esc annulla"
-            if self._pending.quick:
+            if pending.quick:
                 tail = "s/n oppure ↵ conferma │ Esc annulla"
-            elif self._pending.single_key:
+            elif pending.single_key:
                 tail = "tasto singolo │ / comandi │ ↵ default"
         else:
             tail = self._hint or "? guida │ Q esci"
@@ -475,13 +575,37 @@ class Interface:
         self._invalidate()
 
     def replace_body(self, renderable):
-        """Sostituisce il corpo con il rendering testuale di un oggetto Rich."""
+        """Sostituisce il corpo con il rendering testuale di un oggetto Rich.
+
+        Atomico: un solo aggiornamento del documento e un solo invalidate,
+        senza frame vuoto intermedio.
+        """
         buf = io.StringIO()
         console = Console(file=buf, force_terminal=False, color_system=None,
                           width=_body_width(), legacy_windows=False)
         console.print(renderable)
-        self.clear_body()
-        self.append_body(buf.getvalue())
+        text = buf.getvalue()
+        if not self.running or self._loop is None:
+            self._replace_local(text)
+            return
+        self._loop.call_soon_threadsafe(self._replace_local, text)
+
+    def _replace_local(self, text: str):
+        self._body_text = text
+        self._click_lines = self._scan_click_lines(text)
+        if self._body_buffer is not None:
+            self._body_buffer.set_document(Document(text, len(text)), bypass_readonly=True)
+        self._invalidate()
+
+    def _scan_click_lines(self, text: str) -> Dict[int, object]:
+        if not self._clickables:
+            return {}
+        mapping: Dict[int, object] = {}
+        for offset, line in enumerate(text.split("\n")):
+            value = self.click_value_for_line(line)
+            if value is not None:
+                mapping[offset] = value
+        return mapping
 
     # ------------------------------------------------------------------
     # Voci cliccabili (mouse)
@@ -501,17 +625,24 @@ class Interface:
     # ------------------------------------------------------------------
     def prompt(self, message: str = "hexagon ›", default: Optional[str] = None,
                single_key: bool = False, quick: Optional[Dict[str, object]] = None) -> str:
+        if self._starting and not self.running:
+            # start() e' in corso sul suo thread: handshake ad eventi, no polling.
+            self._ready.wait(10)
         if not self.running:
+            if self._finished.is_set() and self._ever_ready:
+                # Sessione UI terminata: non improvvisare un input() su stdin.
+                raise KeyboardInterrupt
             value = self._prompt_fallback(message, default)
             return self._translate_slash(value)
-        if self._pending is not None:
-            # Un prompt precedente non e' stato chiuso: interrompilo invece di bloccarti.
-            self._pending.resolve(_INTERRUPT)
-            self._finish_prompt()
         pending = _PendingPrompt(message, default, single_key, quick)
-        self._pending = pending
-        self._question = message + (f" [{default}]" if default is not None else "")
-        self._default = default
+        with self._state_lock:
+            previous = self._pending
+            self._pending = pending
+            self._question = message + (f" [{default}]" if default is not None else "")
+            self._default = default
+        if previous is not None:
+            # Un prompt precedente non e' stato chiuso: interrompilo invece di bloccarti.
+            previous.resolve(_INTERRUPT)
         if self._input is not None:
             self._input.buffer.reset()
         self._invalidate()
@@ -526,13 +657,14 @@ class Interface:
                 if not self.running:
                     pending.resolve(_INTERRUPT)
         finally:
-            if self._pending is pending:
-                self._pending = None
-                self._question = ""
-                self._default = None
-                if self._input is not None:
-                    self._input.buffer.reset()
-                self._invalidate()
+            with self._state_lock:
+                if self._pending is pending:
+                    self._pending = None
+                    self._question = ""
+                    self._default = None
+            if self._input is not None:
+                self._input.buffer.reset()
+            self._invalidate()
         if pending.result is _INTERRUPT:
             raise KeyboardInterrupt
         if isinstance(pending.result, bool):
@@ -551,15 +683,17 @@ class Interface:
             self._app.layout.focus(self._input)
 
     def _finish_prompt(self):
-        self._pending = None
-        self._question = ""
-        self._default = None
+        with self._state_lock:
+            self._pending = None
+            self._question = ""
+            self._default = None
         if self._input is not None:
             self._input.buffer.reset()
         self._invalidate()
 
     def resolve_prompt(self, value: object):
-        pending = self._pending
+        with self._state_lock:
+            pending = self._pending
         if pending is not None:
             pending.resolve(value)
             self._finish_prompt()
@@ -602,13 +736,15 @@ class Interface:
 
 
 class _Suspend:
+    """Cede il terminale al corpo senza distruggere l'app (vedi Interface.suspended)."""
+
     def __init__(self, iface: "Interface"):
         self._iface = iface
 
     def __enter__(self):
-        self._iface.stop()
+        self._iface._begin_handover()
         return self
 
     def __exit__(self, *exc):
-        self._iface.start()
+        self._iface._end_handover()
         return False

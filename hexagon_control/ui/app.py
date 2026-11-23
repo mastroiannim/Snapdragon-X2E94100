@@ -1,6 +1,6 @@
 import sys
 import threading
-import time
+from concurrent.futures import ThreadPoolExecutor
 
 from rich.panel import Panel
 from rich.text import Text
@@ -216,21 +216,42 @@ class ControlCenter:
         self.ui.set_clickables(MENU_CLICKABLES)
         self.ui.set_slash_commands(MENU_SLASH)
         self.processes.start_status_cache()
-        self.ui.start()
-        try:
-            while True:
-                self.ui.replace_body(self.dashboard_renderable())
-                try:
-                    choice = self.ui.prompt(single_key=True)
-                except KeyboardInterrupt:
-                    self.ui.console.print("\nOperazione interrotta. Q per uscire.")
-                    continue
-                if not self._dispatch(choice):
-                    break
-        finally:
-            self.ui.stop()
-            self.processes.stop_status_cache()
+        # Il loop dell'app gira sul thread chiamante (di norma il main); il menu
+        # e le schermate vivono in un executor e comunicano con eventi/code.
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="hexagon-actions") as executor:
+            menu = executor.submit(self._menu_loop)
+            try:
+                self.ui.start()
+            finally:
+                if not menu.done():
+                    # L'app e' terminata da sola (es. EOF): sveglia il menu.
+                    self.ui.stop()
+                menu.result()
+        self.processes.stop_status_cache()
         self.exit_lifecycle()
+
+    def _menu_loop(self):
+        """Ciclo del menu sul thread delle azioni; termina con ui.stop()."""
+        if not self.ui.wait_ready(10):
+            return
+        quit_requested = False
+        while self.ui.running:
+            self.ui.replace_body(self.dashboard_renderable())
+            try:
+                choice = self.ui.prompt(single_key=True)
+            except KeyboardInterrupt:
+                self.ui.console.print("\nOperazione interrotta. Q per uscire.")
+                continue
+            if not self._dispatch(choice):
+                quit_requested = True
+                break
+        if quit_requested:
+            # Conferma di uscita con l'app ancora attiva: la full-screen resta usabile.
+            self.exit_lifecycle()
+        elif self.processes.owned:
+            print("Sessione UI terminata; server ancora attivi: "
+                  + ", ".join(map(str, self.processes.owned)))
+        self.ui.stop()
 
     def exit_lifecycle(self):
         if not self.processes.owned:

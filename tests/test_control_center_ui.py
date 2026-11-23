@@ -1,4 +1,5 @@
 """Test headless per l'interfaccia full-screen del Control Center."""
+import threading
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -125,43 +126,90 @@ class FallbackPromptTests(unittest.TestCase):
             self.assertFalse(self.ui.confirm("Proseguire?"))
 
 
-class FullScreenLoopTests(unittest.TestCase):
-    """Regressione: il loop di marshaling deve essere quello dell'app.
+def _start_ui_in_thread(testcase, ui):
+    """Avvia l'app di ui in un thread con pipe/dummy output e registra i cleanup."""
+    from prompt_toolkit.input.defaults import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
 
-    Application.run() crea un loop proprio con asyncio.run(); se la classe
-    Interface usasse un loop diverso per call_soon_threadsafe, corpo e domande
-    non verrebbero mai aggiornati (TUI con body vuoto, tastiera funzionante).
+    pipe = create_pipe_input().__enter__()
+    real_application = components.Application
+
+    def factory(*args, **kwargs):
+        kwargs["input"] = pipe
+        kwargs["output"] = DummyOutput()
+        return real_application(*args, **kwargs)
+
+    patcher = patch.object(components, "Application", side_effect=factory, autospec=True)
+    patcher.start()
+    testcase.addCleanup(patcher.stop)
+    testcase.addCleanup(pipe.close)
+    worker = threading.Thread(target=ui.start, name="hexagon-tui-test", daemon=True)
+    worker.start()
+
+    def cleanup():
+        ui.stop()
+        worker.join(timeout=5)
+
+    testcase.addCleanup(cleanup)
+    testcase.assertTrue(ui.wait_ready(10), "full-screen app non avviata nel test")
+    return worker
+
+
+class FullScreenLoopTests(unittest.TestCase):
+    """Regressione: il loop dell'app vive sul thread di start(); il codice che
+
+    usa l'interfaccia (menu, schermate) gira su un altro thread e comunica con
+    eventi/call_soon_threadsafe. Nessun busy-wait: l'avvio e' segnalato con un
+    evento (wait_ready) e il termine con _finished.
     """
 
     def test_body_updates_reach_the_running_app(self):
-        from prompt_toolkit.input.defaults import create_pipe_input
-        from prompt_toolkit.output import DummyOutput
+        ui = Interface()
+        _start_ui_in_thread(self, ui)
+        ui.append_body("CONTENUTO DI PROVA\n")
+        deadline = time.time() + 5
+        while "CONTENUTO DI PROVA" not in ui._body_text and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertIn("CONTENUTO DI PROVA", ui._body_text)
+        self.assertIsNotNone(ui._body_buffer)
+        self.assertIn("CONTENUTO DI PROVA", ui._body_buffer.document.text)
 
-        with create_pipe_input() as pipe:
-            real_application = components.Application
+    def test_prompt_resolves_from_another_thread(self):
+        ui = Interface()
+        _start_ui_in_thread(self, ui)
+        outcome = {}
 
-            def factory(*args, **kwargs):
-                kwargs["input"] = pipe
-                kwargs["output"] = DummyOutput()
-                return real_application(*args, **kwargs)
+        def ask():
+            try:
+                outcome["v"] = ui.prompt("menu", single_key=True)
+            except Exception as exc:  # noqa: BLE001
+                outcome["err"] = exc
 
-            ui = Interface()
-            with patch.object(components, "Application", side_effect=factory, autospec=True):
-                ui.start()
-                try:
-                    deadline = time.time() + 10
-                    while (ui._app is None or not ui.running) and time.time() < deadline:
-                        time.sleep(0.05)
-                    self.assertTrue(ui.running, "full-screen app non avviata nel test")
-                    ui.append_body("CONTENUTO DI PROVA\n")
-                    deadline = time.time() + 5
-                    while "CONTENUTO DI PROVA" not in ui._body_text and time.time() < deadline:
-                        time.sleep(0.05)
-                    self.assertIn("CONTENUTO DI PROVA", ui._body_text)
-                    self.assertIsNotNone(ui._body_buffer)
-                    self.assertIn("CONTENUTO DI PROVA", ui._body_buffer.document.text)
-                finally:
-                    ui.stop()
+        asker = threading.Thread(target=ask, daemon=True)
+        asker.start()
+        deadline = time.time() + 2
+        while ui._pending is None and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertIsNotNone(ui._pending, "prompt non attivo")
+        ui.resolve_prompt("4")
+        asker.join(timeout=3)
+        self.assertEqual(outcome.get("v"), "4")
+
+    def test_app_error_is_not_silenced(self):
+        ui = Interface()
+        # Il printer di prompt_toolkit richiede una console vera: nel test
+        # headless la sostituiamo; la catena di registrazione resta esercitata.
+        with patch.object(components.Application, "_handle_exception",
+                          lambda app, loop, context: None):
+            _start_ui_in_thread(self, ui)
+            ui._loop.call_soon_threadsafe(
+                lambda: (_ for _ in ()).throw(RuntimeError("boom nel loop")))
+            deadline = time.time() + 5
+            while ui._last_app_error is None and time.time() < deadline:
+                time.sleep(0.05)
+        self.assertIsInstance(ui._last_app_error, RuntimeError)
+        # l'errore da callback non uccide l'app: la UI resta attiva e usabile
+        self.assertTrue(ui.running)
 
 
 class SlashModeTests(unittest.TestCase):
@@ -208,13 +256,28 @@ class SlashModeTests(unittest.TestCase):
 
 
 class SuspendTests(unittest.TestCase):
-    def test_suspend_stops_and_restarts(self):
+    def test_suspend_uses_terminal_handover_not_restart(self):
         ui = Interface()
-        with patch.object(ui, "stop") as stop, patch.object(ui, "start") as start:
+        with patch.object(ui, "_begin_handover") as begin, \
+             patch.object(ui, "_end_handover") as end:
             with ui.suspended():
                 pass
-        stop.assert_called_once()
-        start.assert_called_once()
+        begin.assert_called_once()
+        end.assert_called_once()
+
+    def test_suspend_preserves_app_and_body(self):
+        ui = Interface()
+        _start_ui_in_thread(self, ui)
+        ui.append_body("CORPO DA CONSERVARE\n")
+        deadline = time.time() + 5
+        while "CORPO DA CONSERVARE" not in ui._body_text and time.time() < deadline:
+            time.sleep(0.05)
+        app_before = ui._app
+        with ui.suspended():
+            pass
+        self.assertIs(ui._app, app_before, "suspended() ha ricreato l'app")
+        self.assertIn("CORPO DA CONSERVARE", ui._body_text)
+        self.assertTrue(ui.running)
 
 
 class ControlCenterDispatchTests(unittest.TestCase):

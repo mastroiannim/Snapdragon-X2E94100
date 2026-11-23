@@ -26,12 +26,10 @@ comp.Application = _factory
 
 ui = comp.Interface()
 ui.set_clickables([("4 Kilo Code", "4")])
-ui.start()
+ui_thread = threading.Thread(target=ui.start, daemon=True)
+ui_thread.start()
 
-for _ in range(100):
-    if ui._app is not None and ui.running:
-        break
-    time.sleep(0.05)
+ui.wait_ready(10)
 print("1) app avviata:", ui.running, "loop:", ui._loop is not None, "app:", ui._app is not None)
 
 ui.replace_body(__import__("rich.panel", fromlist=["Panel"]).Panel("CONTENUTO DASHBOARD\n1 Router\n4 Kilo Code", title="T"))
@@ -80,4 +78,5 @@ if app is not None:
         print("---- FINE ----")
 
 ui.stop()
+ui_thread.join(timeout=5)
 print("8) stop ok, running:", ui.running)

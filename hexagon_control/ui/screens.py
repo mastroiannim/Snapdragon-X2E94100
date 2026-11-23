@@ -245,9 +245,9 @@ class Screens:
                         workspace_dir=self.processes.workspace_dir,
                     )
                     chat.prompt_session = None
-                    chat.console = self.ui.console
                     try:
-                        chat.run_benchmark(tokens)
+                        with self.ui.suspended():
+                            chat.run_benchmark(tokens)
                     finally:
                         chat.close()
                 elif choice in ("l", "e"):
@@ -400,7 +400,6 @@ class Screens:
             base_url=self.processes.base_url, model=model,
             workspace_dir=self.processes.workspace_dir,
         )
-        chat.console = self.ui.console
         try:
             with self.ui.suspended():
                 chat.run()
