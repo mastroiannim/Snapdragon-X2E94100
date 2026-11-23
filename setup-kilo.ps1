@@ -92,8 +92,13 @@ Report-Check "Cache Modelli GGUF" ($GgufCount -gt 0) "Trovati $GgufCount file in
 
 # 6. Configurazione Kilo Code locale
 $KiloJsonPath = Join-Path $ScriptDir "kilo.json"
+$PluginCli = Join-Path $ScriptDir "plugins\hexagon-runtime\dist\cli.js"
 if (-not (Test-Path $KiloJsonPath) -and -not $CheckOnly) {
-    python (Join-Path $ScriptDir "kilo_config.py") --generate | Out-Null
+    if (Test-Path $PluginCli) {
+        node $PluginCli setup --workspace | Out-Null
+    } elseif (Test-Path (Join-Path $ScriptDir "kilo_config.py")) {
+        python (Join-Path $ScriptDir "kilo_config.py") --generate | Out-Null
+    }
 }
 $KiloJsonExists = Test-Path $KiloJsonPath
 Report-Check "File configurazione kilo.json" $KiloJsonExists "Percorso: $KiloJsonPath"

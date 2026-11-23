@@ -4,9 +4,11 @@ import {
   ensureRuntime,
   extractGeniexHash,
   extractLlamaCommit,
+  resolveSyncScript,
   runSyncScript,
   sameCommit,
 } from "../src/sync.js";
+import { BUNDLED_SYNC_SCRIPT } from "../src/process.js";
 import {
   ALL_RUNTIME_FILES,
   GENIEX_VERSION_OUTPUT,
@@ -186,11 +188,16 @@ describe("runSyncScript", () => {
     expect(call.args).toContain("-Apply");
     expect(call.args).toContain("-NoStopServer");
     expect(call.args).toContain("-Json");
-    expect(call.args[call.args.indexOf("-File") + 1]).toBe(
-      "C:\\repo\\sync-geniex.ps1",
-    );
+    expect(call.args[call.args.indexOf("-File") + 1]).toBe(BUNDLED_SYNC_SCRIPT);
     expect(call.args[call.args.indexOf("-BinPath") + 1]).toBe("C:/bin");
     expect(call.args[call.args.indexOf("-GenieXDir") + 1]).toBe("C:/genie");
+  });
+
+  it("resolveSyncScript: usa script del workspace se presente, altrimenti fallback bundled", async () => {
+    const exists = vi.fn(async (p: string) => p.includes("custom-ws"));
+    expect(await resolveSyncScript("C:/custom-ws", exists)).toBe("C:\\custom-ws\\sync-geniex.ps1");
+    expect(await resolveSyncScript("C:/nonexistent", async () => false)).toBe(BUNDLED_SYNC_SCRIPT);
+    expect(await resolveSyncScript(undefined)).toBe(BUNDLED_SYNC_SCRIPT);
   });
 
   it("exit non-zero con payload Error: errore propagato", async () => {

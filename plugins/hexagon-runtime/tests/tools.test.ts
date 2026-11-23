@@ -4,8 +4,10 @@ import {
   createHexagonTools,
   parseBenchReport,
   parseOptionalNumber,
+  resolveBenchScript,
   runBenchmark,
 } from "../src/tools.js";
+import { BUNDLED_BENCH_SCRIPT } from "../src/process.js";
 import type { SyncOutcome } from "../src/sync.js";
 import { fakeResponse, okExec, recordingExec, recordingFetch } from "./helpers.js";
 
@@ -203,9 +205,7 @@ describe("runBenchmark", () => {
     expect(report.reportPath).toBe("C:/tmp/bench.md");
     const call = calls[0];
     expect(call.command).toBe("powershell");
-    expect(call.args[call.args.indexOf("-File") + 1]).toBe(
-      "C:\\repo\\benchmark-hexagon.ps1",
-    );
+    expect(call.args[call.args.indexOf("-File") + 1]).toBe(BUNDLED_BENCH_SCRIPT);
     expect(call.args[call.args.indexOf("-Models") + 1]).toBe(
       "Ornith-1.5-9B-Q4_0.gguf",
     );
@@ -280,6 +280,15 @@ describe("createHexagonTools", () => {
     };
   }
 
+  it("resolveBenchScript: usa script locale se presente, altrimenti fallback su bundled", () => {
+    expect(resolveBenchScript({ workspaceDir: "C:/custom", exists: (p) => p.includes("custom") })).toBe(
+      "C:\\custom\\benchmark-hexagon.ps1",
+    );
+    expect(resolveBenchScript({ workspaceDir: "C:/nonexistent", exists: () => false })).toBe(
+      BUNDLED_BENCH_SCRIPT,
+    );
+  });
+
   it("hexagon_status: esecuzione e JSON formattato", async () => {
     const { deps } = makeDeps();
     const tools = createHexagonTools(deps);
@@ -287,6 +296,7 @@ describe("createHexagonTools", () => {
       "hexagon_status",
       "hexagon_sync",
       "hexagon_bench",
+      "hexagon_setup",
     ]);
     const raw = await tools.hexagon_status.execute({}, undefined as never);
     const parsed = JSON.parse(raw);
@@ -294,6 +304,15 @@ describe("createHexagonTools", () => {
     expect(parsed.router.ready).toBe(true);
     expect(parsed.loadedModels).toEqual(["Ornith-1.5-9B-Q4_0"]);
     expect(raw).toContain("\n");
+  });
+
+  it("hexagon_setup: esecuzione e allineamento config", async () => {
+    const { deps } = makeDeps();
+    const tools = createHexagonTools(deps);
+    const raw = await tools.hexagon_setup.execute({ workspace: true }, undefined as never);
+    const parsed = JSON.parse(raw);
+    expect(parsed.updated).toBe(true);
+    expect(parsed.modelCount).toBeGreaterThan(0);
   });
 
   it("hexagon_sync: trigger force e JSON dell'esito", async () => {
@@ -328,5 +347,6 @@ describe("createHexagonTools", () => {
     expect(tools.hexagon_status.description).toContain("Snapdragon");
     expect(tools.hexagon_sync.description).toContain("sync-geniex");
     expect(tools.hexagon_bench.description).toContain("token/s");
+    expect(tools.hexagon_setup.description).toContain("kilo.json");
   });
 });

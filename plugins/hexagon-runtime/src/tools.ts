@@ -4,11 +4,13 @@
  * La logica di report e' separata dai wrapper zod cosi' i test verificano
  * formattazione JSON e parsing senza il runtime Kilo.
  */
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { tool } from "@kilocode/plugin";
+import { installProviderConfig } from "./config.js";
 import { nodeNow } from "./os.js";
-import { ROUTER_HOST, ROUTER_PORT } from "./process.js";
+import { BUNDLED_BENCH_SCRIPT, ROUTER_HOST, ROUTER_PORT } from "./process.js";
 import type { SyncOutcome } from "./sync.js";
 import type { ExecFn, FetchFn, NowFn, ReadFileFn } from "./types.js";
 
@@ -147,11 +149,27 @@ export interface BenchmarkOptions {
   model?: string;
   repetitions?: number;
   reportPath?: string;
+  benchScript?: string;
+}
+
+/** Risolve lo script di benchmark: workspaceDir se presente, altrimenti asset bundled. */
+export function resolveBenchScript(options: {
+  workspaceDir?: string;
+  exists?: (path: string) => boolean;
+} = {}): string {
+  const exists = options.exists ?? existsSync;
+  if (options.workspaceDir) {
+    const wsScript = join(options.workspaceDir, "benchmark-hexagon.ps1");
+    if (exists(wsScript)) return wsScript;
+  }
+  return BUNDLED_BENCH_SCRIPT;
 }
 
 /** Lancia benchmark-hexagon.ps1 e legge i token/s dal report generato. */
 export async function runBenchmark(options: BenchmarkOptions): Promise<BenchReport> {
-  const script = join(options.workspaceDir, "benchmark-hexagon.ps1");
+  const script =
+    options.benchScript ??
+    resolveBenchScript({ workspaceDir: options.workspaceDir });
   const reportPath =
     options.reportPath ?? join(tmpdir(), `hexagon-bench-${Date.now()}.md`);
   const args = [
@@ -232,6 +250,23 @@ export function createHexagonTools(deps: HexagonToolDeps) {
           model: args.model,
         });
         return JSON.stringify(report, null, 2);
+      },
+    }),
+    hexagon_setup: tool({
+      description:
+        "Configura o allinea il provider 'hexagon' nel file kilo.json o nella configurazione globale (~/.config/kilo/kilo.jsonc).",
+      args: {
+        workspace: tool.schema
+          .boolean()
+          .optional()
+          .describe("Se true scrive kilo.json nel workspace locale; se false o omesso aggiorna la configurazione globale"),
+      },
+      async execute(args) {
+        const res = await installProviderConfig({
+          workspaceDir: args.workspace ? deps.workspaceDir : undefined,
+          readFile: deps.readFile,
+        });
+        return JSON.stringify(res, null, 2);
       },
     }),
   };

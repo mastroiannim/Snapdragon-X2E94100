@@ -6,9 +6,43 @@
  * (allocazione FastRPC/HTP). I parametri per HTP0 (NPU) e GPUOpenCL sono
  * letti da hexagon-models.ini.
  */
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExecFn, ExistsFn, FetchFn, SpawnFn, WriteFileFn } from "./types.js";
+
+export const BUNDLED_ASSETS_DIR = fileURLToPath(new URL("../assets", import.meta.url));
+export const BUNDLED_INI_PATH = join(BUNDLED_ASSETS_DIR, "hexagon-models.ini");
+export const BUNDLED_SCRIPTS_DIR = join(BUNDLED_ASSETS_DIR, "scripts");
+export const BUNDLED_SYNC_SCRIPT = join(BUNDLED_SCRIPTS_DIR, "sync-geniex.ps1");
+export const BUNDLED_BENCH_SCRIPT = join(BUNDLED_SCRIPTS_DIR, "benchmark-hexagon.ps1");
+
+export interface ResolveIniOptions {
+  workspaceDir?: string;
+  localAppData?: string;
+  exists?: (path: string) => boolean;
+}
+
+/**
+ * Risoluzione gerarchica di hexagon-models.ini:
+ * 1. Override esplicito nel workspace: <workspaceDir>/hexagon-models.ini
+ * 2. Override utente: %LOCALAPPDATA%/Hexagon/hexagon-models.ini
+ * 3. Default distribuito col plugin: assets/hexagon-models.ini
+ */
+export function resolveIniPath(options: ResolveIniOptions = {}): string {
+  const exists = options.exists ?? existsSync;
+  if (options.workspaceDir) {
+    const wsIni = join(options.workspaceDir, "hexagon-models.ini");
+    if (exists(wsIni)) return wsIni;
+  }
+  const localAppData = options.localAppData ?? process.env.LOCALAPPDATA;
+  if (localAppData) {
+    const userIni = join(localAppData, "Hexagon", "hexagon-models.ini");
+    if (exists(userIni)) return userIni;
+  }
+  return BUNDLED_INI_PATH;
+}
 
 export const ROUTER_PORT = 18803;
 export const ROUTER_HOST = "127.0.0.1";
@@ -397,6 +431,7 @@ export function defaultPaths(
   workspaceDir?: string,
   home: string = homedir(),
   localAppData: string = process.env.LOCALAPPDATA ?? join(home, "AppData", "Local"),
+  exists?: (path: string) => boolean,
 ): HexagonPaths {
   const ws = workspaceDir && workspaceDir.length > 0 ? workspaceDir : process.cwd();
   const binPath = join(home, "llama-cpp", "llama-bin-win-cpu-arm64");
@@ -408,6 +443,6 @@ export function defaultPaths(
     geniexExe: join(geniexDir, "geniex.exe"),
     serverExe: join(binPath, "llama-server.exe"),
     modelsDir: join(home, ".cache", "geniex", "models"),
-    iniPath: join(ws, "hexagon-models.ini"),
+    iniPath: resolveIniPath({ workspaceDir: ws, localAppData, exists }),
   };
 }

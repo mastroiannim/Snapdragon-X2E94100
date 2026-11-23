@@ -127,9 +127,13 @@ if (-not $IsOnline) {
     }
 }
 
-# 3. Sincronizzazione kilo.json
+# 3. Sincronizzazione kilo.json (100% TypeScript, zero dipendenze Python)
+$PluginCli = Join-Path $ScriptDir "plugins\hexagon-runtime\dist\cli.js"
 $KiloConfigScript = Join-Path $ScriptDir "kilo_config.py"
-if (Test-Path $KiloConfigScript) {
+if (Test-Path $PluginCli) {
+    Write-Host " * Sincronizzazione:  Aggiornamento kilo.json via plugin TS..." -ForegroundColor Gray
+    node $PluginCli setup --workspace | Out-Null
+} elseif (Test-Path $KiloConfigScript) {
     Write-Host " * Sincronizzazione:  Aggiornamento kilo.json..." -ForegroundColor Gray
     python $KiloConfigScript --generate --port $Port
     if ($LASTEXITCODE -ne 0) {

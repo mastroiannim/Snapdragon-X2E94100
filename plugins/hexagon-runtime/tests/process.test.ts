@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildDirectArgs,
   buildRouterArgs,
+  BUNDLED_INI_PATH,
   defaultPaths,
   ensureModelsIni,
   ensureServer,
@@ -9,6 +10,7 @@ import {
   parseJsonPayload,
   parseModelsIni,
   probeRouter,
+  resolveIniPath,
   ROUTER_HOST,
   ROUTER_PORT,
   serverEnv,
@@ -234,15 +236,31 @@ describe("ensureServer", () => {
   });
 });
 
-describe("defaultPaths", () => {
-  it("percorsi standard Windows ARM64", () => {
+describe("defaultPaths e resolveIniPath", () => {
+  it("percorsi standard Windows ARM64 con fallback su ini bundled", () => {
     const paths = defaultPaths("C:/repo", "C:/Users/test", "C:/Users/test/AppData/Local");
     expect(paths.binPath).toBe("C:\\Users\\test\\llama-cpp\\llama-bin-win-cpu-arm64");
     expect(paths.geniexDir).toBe("C:\\Users\\test\\AppData\\Local\\GenieX CLI");
     expect(paths.geniexExe).toContain("geniex.exe");
     expect(paths.serverExe).toContain("llama-server.exe");
     expect(paths.modelsDir).toBe("C:\\Users\\test\\.cache\\geniex\\models");
-    expect(paths.iniPath).toBe("C:\\repo\\hexagon-models.ini");
+    expect(paths.iniPath).toBe(BUNDLED_INI_PATH);
+  });
+
+  it("override ini da workspace se presente", () => {
+    const exists = vi.fn((p: string) => p.includes("custom-ws"));
+    const paths = defaultPaths("C:/custom-ws", "C:/Users/test", "C:/Users/test/AppData/Local", exists);
+    expect(paths.iniPath).toBe("C:\\custom-ws\\hexagon-models.ini");
+  });
+
+  it("override ini da AppData se assente nel workspace", () => {
+    const exists = vi.fn((p: string) => p.includes("AppData") && p.includes("Hexagon"));
+    const paths = defaultPaths("C:/empty-ws", "C:/Users/test", "C:/Users/test/AppData/Local", exists);
+    expect(paths.iniPath).toBe("C:\\Users\\test\\AppData\\Local\\Hexagon\\hexagon-models.ini");
+  });
+
+  it("resolveIniPath: fallback finale su asset bundled", () => {
+    expect(resolveIniPath({ workspaceDir: "C:/none", exists: () => false })).toBe(BUNDLED_INI_PATH);
   });
 
   it("default da homedir/LOCALAPPDATA reali", () => {

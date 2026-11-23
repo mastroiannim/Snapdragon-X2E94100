@@ -6,6 +6,7 @@
  * sync-geniex.ps1 -Apply -NoStopServer -Json (il wrapper transazionale core).
  */
 import { dirname, join } from "node:path";
+import { BUNDLED_SYNC_SCRIPT } from "./process.js";
 import type { ExecFn, ExistsFn, ListDirFn } from "./types.js";
 
 export const REQUIRED_RUNTIME_FILES = [
@@ -133,15 +134,32 @@ export interface SyncScriptResult {
 }
 
 /**
- * Invoca il sincronizzatore core. Il percorso dello script e' la root del
- * repository (equivalente di ../../sync-geniex.ps1 dalla cartella del plugin).
+ * Risolve il percorso dello script di sincronizzazione:
+ * se presente nel workspace usa quello locale, altrimenti usa la versione inclusa nel plugin.
+ */
+export async function resolveSyncScript(
+  workspaceDir?: string,
+  exists?: ExistsFn,
+): Promise<string> {
+  if (workspaceDir && exists) {
+    const wsScript = join(workspaceDir, "sync-geniex.ps1");
+    if (await exists(wsScript)) return wsScript;
+  }
+  return BUNDLED_SYNC_SCRIPT;
+}
+
+/**
+ * Invoca il sincronizzatore core. Se non trovato nel workspaceDir,
+ * ricade sul wrapper transazionale pacchettizzato negli asset del plugin.
  */
 export async function runSyncScript(
   workspaceDir: string,
-  paths: { binPath: string; geniexDir: string },
-  deps: { exec: ExecFn },
+  paths: { binPath: string; geniexDir: string; syncScript?: string },
+  deps: { exec: ExecFn; exists?: ExistsFn },
 ): Promise<SyncScriptResult> {
-  const script = join(workspaceDir, "sync-geniex.ps1");
+  const script =
+    paths.syncScript ??
+    (await resolveSyncScript(workspaceDir, deps.exists));
   const result = await deps.exec(
     "powershell",
     [
@@ -157,7 +175,7 @@ export async function runSyncScript(
       "-GenieXDir",
       paths.geniexDir,
     ],
-    { cwd: workspaceDir, timeoutMs: 900_000 },
+    { cwd: dirname(script), timeoutMs: 900_000 },
   );
   const lines = result.stdout.trim().split(/\r?\n/).filter(Boolean);
   const lastLine = lines[lines.length - 1] ?? "";
@@ -190,6 +208,7 @@ export interface EnsureRuntimeOptions {
   workspaceDir: string;
   binPath: string;
   geniexDir: string;
+  syncScript?: string;
   force?: boolean;
   deps: SyncDeps;
 }
@@ -209,7 +228,7 @@ export async function ensureRuntime(
   }
   const sync = await runSyncScript(
     options.workspaceDir,
-    { binPath: options.binPath, geniexDir: options.geniexDir },
+    { binPath: options.binPath, geniexDir: options.geniexDir, syncScript: options.syncScript },
     options.deps,
   );
   const after = await checkRuntime(options.paths, options.deps);

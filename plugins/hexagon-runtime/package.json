@@ -1,3 +1,27 @@
-{"name": "@hexagon/kilo-plugin", "version": "1.0.0",   "description": "Snapdragon X2 Elite hardware orchestrator for Kilo Code",
+{
+  "name": "@hexagon/kilo-plugin",
+  "version": "1.0.0",
+  "description": "Snapdragon X2 Elite hardware orchestrator for Kilo Code",
   "type": "module",
-  "main": "dist/index.js", "types": "dist/index.d.ts", "scripts": {"build": "tsc", "test": "vitest run --coverage", "test:watch": "vitest"}, "devDependencies": {"@kilocode/plugin": "^1.0.0", "@types/node": "^20.11.0", "@vitest/coverage-v8": "^1.2.0", "typescript": "^5.3.3", "vitest": "^1.2.0"}}
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "hexagon-setup": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "assets"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@kilocode/plugin": "^1.0.0",
+    "@types/node": "^20.11.0",
+    "@vitest/coverage-v8": "^1.2.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  }
+}

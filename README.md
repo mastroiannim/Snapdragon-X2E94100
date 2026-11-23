@@ -16,21 +16,26 @@ non richiede Git, CMake, Visual Studio, SDK Hexagon/QNN o una precedente install
 llama.cpp. I modelli GGUF sono contenuti di input: il launcher usa quelli presenti
 nella cache di GenieX (`geniex pull`), oppure la directory specificata con `-ModelsDir`.
 
-L'entry point consigliato e' **Kilo Code** con il plugin nativo `hexagon-runtime`
-(architettura zero-setup: niente TUI Python, niente Control Center):
+L'entry point consigliato e' **Kilo Code** con il plugin nativo `@hexagon/kilo-plugin`
+(architettura disaccoppiata e distribuibile, zero-setup, niente TUI Python, niente Control Center):
 
 ```powershell
-.\setup-kilo.ps1              # verifica prerequisiti, runtime e sicurezza offline
-.\launch-kilo.ps1             # avvia il router Hexagon su loopback e apre Kilo Code
+# 1. Setup una tantum del provider locale (100% TypeScript, zero dipendenze Python):
+node .\plugins\hexagon-runtime\dist\cli.js setup --workspace
+
+# 2. Avvio diretto di Kilo Code (da qualsiasi cartella o progetto):
+kilo
 ```
 
 Alla creazione di una sessione Kilo, il plugin `plugins/hexagon-runtime` allinea
-automaticamente il runtime al commit GenieX, avvia `llama-server.exe` con
-`ADSP_LIBRARY_PATH` se la porta 18803 e' libera e attende la readiness HTTP
-(warm-up del grafo HTP). I launcher specializzati restano disponibili per
-l'automazione e l'uso headless:
+automaticamente il runtime al commit GenieX (utilizzando gli script incorporati nel pacchetto),
+avvia `llama-server.exe` con `ADSP_LIBRARY_PATH` se la porta 18803 e' libera e attende la readiness HTTP
+(warm-up del grafo HTP).
 
+I launcher PowerShell e batch restano disponibili per retrocompatibilita', automazione e uso headless:
 ```powershell
+.\launch-kilo.ps1        # launcher integrato locale
+.\setup-kilo.ps1         # verifica prerequisiti, runtime e sicurezza offline
 .\llama-server-all.bat   # prepara il runtime e avvia il router
 .\llama-server.bat       # prepara il runtime e avvia un singolo modello
 ```

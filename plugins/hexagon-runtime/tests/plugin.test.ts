@@ -60,10 +60,11 @@ describe("descrittore e ingresso del plugin", () => {
     expect(plugin.server).toBe(pluginInit);
   });
 
-  it("pluginInit ritorna gli hook con i tre tool agent", async () => {
+  it("pluginInit ritorna gli hook con i quattro tool agent", async () => {
     const hooks = await pluginInit(fakePluginInput());
     expect(Object.keys(hooks.tool ?? {}).sort()).toEqual([
       "hexagon_bench",
+      "hexagon_setup",
       "hexagon_status",
       "hexagon_sync",
     ]);
