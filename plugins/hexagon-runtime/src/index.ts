@@ -107,6 +107,12 @@ export interface HookOptions extends RuntimeOptions {
   startWatchdogFn?: (options: WatchdogOptions) => WatchdogHandle;
   /** Disabilita il watcher automatico dei modelli (utile nei test unitari). */
   disableModelWatcher?: boolean;
+  /**
+   * Consenso esplicito per l'esecuzione automatica dei benchmark in background.
+   * Default: false. Se false o non definito, all'avvio del plugin non viene avviato
+   * alcun benchmark in background, prevenendo la saturazione della memoria.
+   */
+  enableAutoBenchmark?: boolean;
   /** Factory iniettabile del model watcher (test del wiring). */
   startModelWatcherFn?: (options: ModelWatcherOptions) => ModelWatcher;
 }
@@ -123,6 +129,12 @@ export function createHexagonHooks(options: HookOptions): Hooks {
   let sessions = 0;
   let watchdog: WatchdogHandle | null = null;
   let modelWatcher: ModelWatcher | null = null;
+  let bootstrapPromise: Promise<unknown> | null = null;
+
+  const userConsentedAutoBenchmark =
+    options.enableAutoBenchmark === true ||
+    process.env.HEXAGON_ENABLE_AUTO_BENCHMARK === "1" ||
+    process.env.HEXAGON_ENABLE_AUTO_BENCHMARK === "true";
 
   const recover = async (): Promise<void> => {
     await ensureServer({
@@ -155,6 +167,11 @@ export function createHexagonHooks(options: HookOptions): Hooks {
 
   const ensureModelWatcher = (): void => {
     if (modelWatcher || options.disableModelWatcher) return;
+    if (!userConsentedAutoBenchmark) {
+      // I benchmark non devono avviarsi automaticamente in background all'avvio del plugin
+      // senza espresso consenso dell'utente (enableAutoBenchmark = true).
+      return;
+    }
     modelWatcher = startModelWatcherFn({
       modelsDir: paths.modelsDir,
       workspaceDir: paths.workspaceDir,
@@ -163,6 +180,7 @@ export function createHexagonHooks(options: HookOptions): Hooks {
       exec: deps.exec,
       readFile: deps.readFile,
       writeFile: deps.writeFile,
+      enableAutoBenchmark: true,
       onQualified: (modelId, success) => {
         if (success) {
           console.log(`[hexagon-runtime] Modello ${modelId} qualificato con successo.`);
@@ -180,15 +198,20 @@ export function createHexagonHooks(options: HookOptions): Hooks {
   const event: NonNullable<Hooks["event"]> = async ({ event }) => {
     if (event.type === "session.created") {
       sessions += 1;
-      // Fire-and-forget: il warm-up NPU (fino a 30 s) non deve bloccare la sessione.
-      void bootstrap()
-        .then(() => {
-          ensureWatchdog();
-          ensureModelWatcher();
-        })
-        .catch((error: unknown) => {
-          console.error("[hexagon-runtime] bootstrap runtime fallito:", error);
-        });
+      // Serializza il bootstrap: sessioni parallele non avviano sequenze concorrenti
+      if (!bootstrapPromise) {
+        bootstrapPromise = bootstrap()
+          .then(() => {
+            ensureWatchdog();
+            ensureModelWatcher();
+          })
+          .catch((error: unknown) => {
+            console.error("[hexagon-runtime] bootstrap runtime fallito:", error);
+          })
+          .finally(() => {
+            bootstrapPromise = null;
+          });
+      }
     } else if (event.type === "session.deleted") {
       sessions = Math.max(0, sessions - 1);
       if (sessions === 0) {

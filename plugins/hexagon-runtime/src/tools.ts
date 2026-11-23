@@ -180,42 +180,64 @@ export function resolveBenchScript(options: {
   return BUNDLED_BENCH_SCRIPT;
 }
 
+let benchmarkInProgress = false;
+
+/** Verifica se un benchmark e' attualmente in corso. */
+export function isBenchmarkActive(): boolean {
+  return benchmarkInProgress;
+}
+
+/** Reset del lock benchmark (riservato ai test). */
+export function resetBenchmarkActiveForTests(): void {
+  benchmarkInProgress = false;
+}
+
 /** Lancia benchmark-hexagon.ps1 e legge i token/s dal report generato. */
 export async function runBenchmark(options: BenchmarkOptions): Promise<BenchReport> {
-  const script =
-    options.benchScript ??
-    resolveBenchScript({ workspaceDir: options.workspaceDir });
-  const reportPath =
-    options.reportPath ?? join(tmpdir(), `hexagon-bench-${Date.now()}.md`);
-  const args = [
-    "-ExecutionPolicy",
-    "Bypass",
-    "-File",
-    script,
-    "-Repetitions",
-    String(options.repetitions ?? 1),
-    "-ReportPath",
-    reportPath,
-  ];
-  if (options.model) {
-    args.push("-Models", options.model.endsWith(".gguf") ? options.model : `${options.model}.gguf`);
-  }
-  const result = await options.exec("powershell", args, {
-    cwd: options.workspaceDir,
-    timeoutMs: 1_800_000,
-  });
-  if (result.code !== 0) {
+  if (benchmarkInProgress) {
     throw new Error(
-      `benchmark-hexagon.ps1 fallito (exit ${result.code}): ` +
-        (result.stderr.trim() || result.stdout.trim() || "output vuoto"),
+      "Benchmark già in esecuzione: l'avvio di benchmark in parallelo è bloccato per prevenire la saturazione della memoria (RAM/VRAM).",
     );
   }
-  const markdown = await options.readFile(reportPath);
-  return {
-    model: options.model ?? "suite predefinita",
-    results: parseBenchReport(markdown),
-    reportPath,
-  };
+  benchmarkInProgress = true;
+  try {
+    const script =
+      options.benchScript ??
+      resolveBenchScript({ workspaceDir: options.workspaceDir });
+    const reportPath =
+      options.reportPath ?? join(tmpdir(), `hexagon-bench-${Date.now()}.md`);
+    const args = [
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      script,
+      "-Repetitions",
+      String(options.repetitions ?? 1),
+      "-ReportPath",
+      reportPath,
+    ];
+    if (options.model) {
+      args.push("-Models", options.model.endsWith(".gguf") ? options.model : `${options.model}.gguf`);
+    }
+    const result = await options.exec("powershell", args, {
+      cwd: options.workspaceDir,
+      timeoutMs: 1_800_000,
+    });
+    if (result.code !== 0) {
+      throw new Error(
+        `benchmark-hexagon.ps1 fallito (exit ${result.code}): ` +
+          (result.stderr.trim() || result.stdout.trim() || "output vuoto"),
+      );
+    }
+    const markdown = await options.readFile(reportPath);
+    return {
+      model: options.model ?? "suite predefinita",
+      results: parseBenchReport(markdown),
+      reportPath,
+    };
+  } finally {
+    benchmarkInProgress = false;
+  }
 }
 
 export interface HexagonToolDeps {

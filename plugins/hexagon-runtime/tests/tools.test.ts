@@ -4,6 +4,7 @@ import {
   createHexagonTools,
   parseBenchReport,
   parseOptionalNumber,
+  resetBenchmarkActiveForTests,
   resolveBenchScript,
   runBenchmark,
 } from "../src/tools.js";
@@ -248,6 +249,25 @@ describe("runBenchmark", () => {
     await expect(
       runBenchmark({ exec, readFile, workspaceDir: workspace, reportPath: "r.md" }),
     ).rejects.toThrow(/benchmark-hexagon\.ps1 fallito \(exit 2\).*modello mancante/);
+  });
+
+  it("blocca esecuzione di benchmark in parallelo per prevenire saturazione di memoria", async () => {
+    resetBenchmarkActiveForTests();
+    let resolveP1: (val: any) => void;
+    const slowPromise = new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+      resolveP1 = resolve;
+    });
+    const exec = vi.fn(() => slowPromise);
+    const readFile = vi.fn(async () => "");
+
+    const p1 = runBenchmark({ exec, readFile, workspaceDir: workspace, reportPath: "r1.md" });
+
+    await expect(
+      runBenchmark({ exec, readFile, workspaceDir: workspace, reportPath: "r2.md" }),
+    ).rejects.toThrow(/Benchmark già in esecuzione: l'avvio di benchmark in parallelo è bloccato/);
+
+    resolveP1!({ code: 0, stdout: "", stderr: "" });
+    await p1;
   });
 });
 

@@ -34,6 +34,7 @@ describe("watcher.ts — startModelWatcher", () => {
       writeFile,
       registryPath: "C:/registry.json",
       intervalMs: 100_000,
+      enableAutoBenchmark: true,
       onQualified,
     });
 
@@ -43,6 +44,40 @@ describe("watcher.ts — startModelWatcher", () => {
       expect(discovered[0].id).toBe("nuovo-modello");
       expect(onQualified).toHaveBeenCalledWith("nuovo-modello", true);
       expect(storage.get("C:/registry.json")).toContain("nuovo-modello");
+    } finally {
+      watcher.stop();
+    }
+  });
+
+  it("senza enableAutoBenchmark (default false): scansiona ma non avvia benchmark", async () => {
+    const listDir = vi.fn(async () => ["nuovo-modello.gguf"]);
+    const exists = vi.fn(async () => true);
+    const { fn: exec, calls } = recordingExec(() => okExec(""));
+    const onQualified = vi.fn();
+
+    const watcher = startModelWatcher({
+      modelsDir: "C:/models",
+      workspaceDir: "C:/workspace",
+      listDir,
+      exists,
+      exec,
+      readFile: vi.fn(async () => "{}"),
+      registryPath: "C:/registry.json",
+      intervalMs: 100_000,
+      onQualified,
+    });
+
+    try {
+      const discovered = await watcher.checkNow();
+      expect(discovered).toHaveLength(1);
+      expect(discovered[0].id).toBe("nuovo-modello");
+      expect(onQualified).not.toHaveBeenCalled();
+      // inspect-gguf.ps1 puo' essere invocato per i metadati, ma nessun benchmark-hexagon.ps1 viene eseguito
+      expect(
+        calls.filter((c) =>
+          c.args.some((a) => a.includes("benchmark-hexagon")),
+        ),
+      ).toHaveLength(0);
     } finally {
       watcher.stop();
     }

@@ -23,6 +23,8 @@ export interface ModelWatcherDeps {
 export interface ModelWatcherOptions extends ModelWatcherDeps {
   intervalMs?: number;
   registryPath?: string;
+  /** Consenso esplicito dell'utente per eseguire benchmark empirici automatici in background. Default: false. */
+  enableAutoBenchmark?: boolean;
 }
 
 export interface ModelWatcher {
@@ -64,20 +66,26 @@ export function startModelWatcher(options: ModelWatcherOptions): ModelWatcher {
       });
 
       const untested = discovered.filter((m) => m.status === "untested");
-      for (const model of untested) {
-        if (stopped) break;
-        // Qualifica in background
-        const res = await qualifyModel({
-          model,
-          workspaceDir: options.workspaceDir,
-          exec: options.exec,
-          readFile: options.readFile,
-          writeFile: options.writeFile,
-          registryPath: options.registryPath,
-        });
-        if (options.onQualified) {
-          options.onQualified(model.id, res.status === "certified");
+      if (options.enableAutoBenchmark) {
+        for (const model of untested) {
+          if (stopped) break;
+          // Qualifica in background SOLO SE c'e' espresso consenso dell'utente
+          const res = await qualifyModel({
+            model,
+            workspaceDir: options.workspaceDir,
+            exec: options.exec,
+            readFile: options.readFile,
+            writeFile: options.writeFile,
+            registryPath: options.registryPath,
+          });
+          if (options.onQualified) {
+            options.onQualified(model.id, res.status === "certified");
+          }
         }
+      } else if (untested.length > 0) {
+        console.warn(
+          `[hexagon-runtime] Rilevati ${untested.length} modelli non testati. Benchmark automatico ignorato (richiede consenso esplicito per evitare saturazione memoria).`,
+        );
       }
 
       return discovered;

@@ -158,6 +158,55 @@ describe("hook event / session.created", () => {
       expect(calls.some((call) => call.url.endsWith("/health"))).toBe(true),
     );
   });
+
+  it("session.created: nessun benchmark/model-watcher automatico avviato all'avvio senza espresso consenso", async () => {
+    const watcherFactory = vi.fn();
+    const hooks = createHexagonHooks({
+      workspaceDir: "C:/repo",
+      bootstrap: async () => undefined,
+      startModelWatcherFn: watcherFactory,
+    });
+    await hooks.event!({
+      event: { type: "session.created" } as EventInput,
+    });
+    // Attende tick del bootstrap
+    await new Promise((r) => setTimeout(r, 10));
+    expect(watcherFactory).not.toHaveBeenCalled();
+  });
+
+  it("session.created con enableAutoBenchmark: avvia il model watcher", async () => {
+    const watcherFactory = vi.fn(() => ({
+      checkNow: vi.fn(async () => []),
+      stop: vi.fn(),
+    }));
+    const hooks = createHexagonHooks({
+      workspaceDir: "C:/repo",
+      bootstrap: async () => undefined,
+      enableAutoBenchmark: true,
+      startModelWatcherFn: watcherFactory,
+    });
+    await hooks.event!({
+      event: { type: "session.created" } as EventInput,
+    });
+    await vi.waitFor(() => expect(watcherFactory).toHaveBeenCalledTimes(1));
+  });
+
+  it("session.created concorrenti: bootstrap serializzato e nessun avvio parallelo", async () => {
+    let resolveBootstrap: () => void;
+    const bootstrapPromise = new Promise<void>((resolve) => {
+      resolveBootstrap = resolve;
+    });
+    const bootstrap = vi.fn(() => bootstrapPromise);
+    const hooks = createHexagonHooks({
+      workspaceDir: "C:/repo",
+      bootstrap,
+    });
+    const ev1 = hooks.event!({ event: { type: "session.created" } as EventInput });
+    const ev2 = hooks.event!({ event: { type: "session.created" } as EventInput });
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    resolveBootstrap!();
+    await Promise.all([ev1, ev2]);
+  });
 });
 
 describe("bootstrapRuntime", () => {

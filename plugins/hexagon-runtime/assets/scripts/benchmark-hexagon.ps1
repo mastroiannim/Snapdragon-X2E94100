@@ -23,6 +23,12 @@ if (-not (Test-Path $benchExe)) {
     throw "Impossibile trovare '$benchExe'. Esegui prima sync-geniex.ps1."
 }
 
+# Protezione rigorosa contro esecuzioni parallele di benchmark che saturano la memoria di sistema (99% RAM)
+$existingBench = Get-Process -Name "llama-bench" -ErrorAction SilentlyContinue
+if ($existingBench) {
+    throw "Un'altra istanza di llama-bench.exe è già in esecuzione (PID $($existingBench.Id -join ', ')). I benchmark paralleli sono bloccati per prevenire la saturazione della memoria."
+}
+
 function Get-RailSnapshot {
     $raw = Get-CimInstance Win32_PerfRawData_PowerMeterCounter_EnergyMeter -ErrorAction SilentlyContinue
     $map = @{}
@@ -130,33 +136,40 @@ function Invoke-BenchWithPower {
     $prevSnap = Get-RailSnapshot
     $prevTime = $sw.Elapsed.TotalSeconds
 
-    $proc = Start-Process -FilePath $benchExe -ArgumentList $argStr -WorkingDirectory $BinPath -NoNewWindow -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+    $proc = $null
+    try {
+        $proc = Start-Process -FilePath $benchExe -ArgumentList $argStr -WorkingDirectory $BinPath -NoNewWindow -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
 
-    while (-not $proc.HasExited) {
-        Start-Sleep -Milliseconds 300
-        $nowTime = $sw.Elapsed.TotalSeconds
-        $nowSnap = Get-RailSnapshot
-        $dt = $nowTime - $prevTime
-        if ($dt -ge 0.2 -and $nowSnap.Count -gt 0) {
-            $w = Get-RailDeltaWatts $prevSnap $nowSnap $dt
-            $npuG = ($w["NPU"] + $w["GPU"])
-            $cpuW = [math]::Round(($w["CPU_CLUSTER_0"] + $w["CPU_CLUSTER_1"] + $w["CPU_CLUSTER_2"]), 2)
-            $samples += [PSCustomObject]@{
-                T        = [math]::Round($nowTime, 2)
-                NPU      = $w["NPU"]
-                GPU      = $w["GPU"]
-                CPU      = $cpuW
-                MEM      = $w["MEMORY"]
-                INFRA    = $w["INFRA"]
-                SOC      = $w["SOC"]
-                SYS      = $w["SYSTEM"]
-                AccelSum = $npuG
+        while (-not $proc.HasExited) {
+            Start-Sleep -Milliseconds 300
+            $nowTime = $sw.Elapsed.TotalSeconds
+            $nowSnap = Get-RailSnapshot
+            $dt = $nowTime - $prevTime
+            if ($dt -ge 0.2 -and $nowSnap.Count -gt 0) {
+                $w = Get-RailDeltaWatts $prevSnap $nowSnap $dt
+                $npuG = ($w["NPU"] + $w["GPU"])
+                $cpuW = [math]::Round(($w["CPU_CLUSTER_0"] + $w["CPU_CLUSTER_1"] + $w["CPU_CLUSTER_2"]), 2)
+                $samples += [PSCustomObject]@{
+                    T        = [math]::Round($nowTime, 2)
+                    NPU      = $w["NPU"]
+                    GPU      = $w["GPU"]
+                    CPU      = $cpuW
+                    MEM      = $w["MEMORY"]
+                    INFRA    = $w["INFRA"]
+                    SOC      = $w["SOC"]
+                    SYS      = $w["SYSTEM"]
+                    AccelSum = $npuG
+                }
+                $prevSnap = $nowSnap
+                $prevTime = $nowTime
             }
-            $prevSnap = $nowSnap
-            $prevTime = $nowTime
+        }
+        $proc.WaitForExit()
+    } finally {
+        if ($proc -and -not $proc.HasExited) {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
         }
     }
-    $proc.WaitForExit()
     Start-Sleep -Milliseconds 100
 
     if ($proc.ExitCode -ne 0) {
