@@ -45,22 +45,37 @@ class KiloController:
         return OperationResult(True, f"Configurazione valida: {path}")
 
     def launch(self, main_model: str, small_model: str, role: str = "interattivo",
-               pure: bool = False) -> OperationResult:
+               pure: bool = False, workdir: Optional[str] = None) -> OperationResult:
         if role not in self.roles:
             return OperationResult(False, "Ruolo Kilo non valido")
+        target = self.workspace_dir
+        if workdir:
+            candidate = Path(workdir).expanduser()
+            if not candidate.is_dir():
+                return OperationResult(False, f"Cartella di lavoro non trovata: {candidate}")
+            target = candidate.resolve()
         prepared = self.prepare(main_model, small_model)
         if not prepared.ok:
             return prepared
+        workspace_resolved = self.workspace_dir.resolve()
+        if target != workspace_resolved and workspace_resolved not in target.parents:
+            path, changed, issues = kilo_config.install_global_provider(self.workspace_dir)
+            if issues:
+                return OperationResult(False, "Provider globale non installabile: " + "; ".join(issues))
+            if changed:
+                prepared = OperationResult(
+                    True, prepared.message + f"; provider hexagon aggiornato in {path}")
         executable = shutil.which("kilo.cmd") or shutil.which("kilo")
         if not executable:
             return OperationResult(False, "kilo.cmd non trovato nel PATH")
-        arguments = [executable, "-m", "hexagon/" + main_model.removeprefix("hexagon/")]
+        arguments = [executable, str(target), "-m", "hexagon/" + main_model.removeprefix("hexagon/")]
         if role != "interattivo":
             arguments += ["--agent", role]
         if pure:
             arguments += ["--pure"]
         try:
-            completed = subprocess.run(arguments, cwd=self.workspace_dir)
+            completed = subprocess.run(arguments, cwd=target)
         except OSError as exc:
             return OperationResult(False, f"Avvio Kilo fallito: {exc}")
-        return OperationResult(completed.returncode == 0, f"Kilo terminato con codice {completed.returncode}")
+        return OperationResult(completed.returncode == 0,
+                               f"Kilo terminato con codice {completed.returncode} in {target}")

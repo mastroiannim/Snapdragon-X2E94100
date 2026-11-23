@@ -257,6 +257,61 @@ class KiloTests(ControlCenterTestCase):
         self.assertFalse(result.ok)
         self.assertFalse((self.root / "kilo.json").exists())
 
+    def _launch_controller(self):
+        processes = MagicMock()
+        processes.health.return_value = (True, 1, ["main", "small"])
+        processes.base_url = "http://127.0.0.1:18803/v1"
+        return KiloController(self.root, processes, self.settings)
+
+    def test_launch_rejects_missing_workdir(self):
+        controller = self._launch_controller()
+        with patch("hexagon_control.kilo.subprocess.run") as run:
+            result = controller.launch("main", "small", workdir=str(self.root / "inesistente"))
+        self.assertFalse(result.ok)
+        run.assert_not_called()
+
+    def test_launch_inside_workspace_uses_project_path_without_global_install(self):
+        controller = self._launch_controller()
+        workdir = self.root / "progetto"
+        workdir.mkdir()
+        with patch("hexagon_control.kilo.subprocess.run",
+                   return_value=subprocess.CompletedProcess([], 0)) as run, \
+             patch("hexagon_control.kilo.shutil.which", return_value="kilo.cmd"), \
+             patch("hexagon_control.kilo.kilo_config.install_global_provider") as install:
+            result = controller.launch("main", "small", workdir=str(workdir))
+        self.assertTrue(result.ok, result.message)
+        args = run.call_args.args[0]
+        self.assertEqual(args[0], "kilo.cmd")
+        self.assertEqual(args[1], str(workdir.resolve()))
+        self.assertEqual(args[3], "hexagon/main")
+        self.assertEqual(run.call_args.kwargs["cwd"], workdir.resolve())
+        install.assert_not_called()
+
+    def test_launch_outside_workspace_installs_global_provider(self):
+        controller = self._launch_controller()
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            with patch("hexagon_control.kilo.subprocess.run",
+                       return_value=subprocess.CompletedProcess([], 0)) as run, \
+                 patch("hexagon_control.kilo.shutil.which", return_value="kilo.cmd"), \
+                 patch("hexagon_control.kilo.kilo_config.install_global_provider",
+                       return_value=(Path("kilo.jsonc"), True, [])) as install:
+                result = controller.launch("main", "small", workdir=str(workdir))
+        self.assertTrue(result.ok, result.message)
+        install.assert_called_once()
+        args = run.call_args.args[0]
+        self.assertEqual(args[1], str(workdir.resolve()))
+        self.assertEqual(run.call_args.kwargs["cwd"], workdir.resolve())
+
+    def test_launch_fails_when_global_provider_not_installable(self):
+        controller = self._launch_controller()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("hexagon_control.kilo.shutil.which", return_value="kilo.cmd"), \
+                 patch("hexagon_control.kilo.kilo_config.install_global_provider",
+                       return_value=(Path("kilo.jsonc"), False, ["non parsabile"])):
+                result = controller.launch("main", "small", workdir=tmp)
+        self.assertFalse(result.ok)
+
 
 class DiagnosticsUsageTests(ControlCenterTestCase):
     def controller(self):

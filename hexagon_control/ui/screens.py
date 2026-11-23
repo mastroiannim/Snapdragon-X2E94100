@@ -194,6 +194,11 @@ class Screens:
         main = self.ui.prompt("Modello principale", default_main)
         small = self.ui.prompt("Modello ausiliario", default_small)
         role = self.ui.prompt("Ruolo", "interattivo").casefold()
+        folder = self.ui.prompt("Cartella progetto da contestualizzare", str(Path.cwd()))
+        target = Path(folder).expanduser()
+        if not target.is_dir():
+            self.ui.error(f"Cartella non trovata: {target}")
+            return
         pure = self.ui.confirm("Avviare Kilo in modalità pure?")
         action = self.ui.prompt("P prepara configurazione, A avvia Kilo, B annulla", "a").casefold()
         if action == "b":
@@ -202,8 +207,8 @@ class Screens:
             if action == "p":
                 self.ui.result(self.kilo_service.prepare(main, small))
             elif action == "a":
-                if self.ui.confirm("Rigenerare kilo.json e avviare Kilo Code?"):
-                    self.ui.result(self.kilo_service.launch(main, small, role, pure))
+                if self.ui.confirm(f"Rigenerare kilo.json e avviare Kilo Code in {target.resolve()}?"):
+                    self.ui.result(self.kilo_service.launch(main, small, role, pure, workdir=str(target)))
         except Exception as exc:
             self.ui.error(exc)
 

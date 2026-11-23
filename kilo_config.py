@@ -10,7 +10,9 @@ import argparse
 import configparser
 import json
 import os
+import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -23,6 +25,9 @@ DEFAULT_WORKSPACE = Path(__file__).resolve().parent
 # Modelli verificati e raccomandati
 RECOMMENDED_MAIN_MODEL = "Ornith-1.5-9B-Q4_0"
 RECOMMENDED_SMALL_MODEL = "MiniCPM5-2B-Q4_K_M"
+
+# Config globale di Kilo Code CLI (da `kilo debug paths`)
+GLOBAL_CONFIG_NAME = "kilo.jsonc"
 
 
 def parse_hexagon_models_ini(ini_path: Path) -> Dict[str, Dict[str, Any]]:
@@ -98,7 +103,7 @@ def generate_kilo_config(
         meta = ini_models.get(mid, {})
         ctx_size = meta.get("ctx_size", 65536)
         device = meta.get("device", "HTP0")
-        output_limit = min(8192, ctx_size // 4) if ctx_size > 8192 else max(1024, ctx_size // 2)
+        output_limit = min(16384, ctx_size // 4) if ctx_size > 8192 else max(1024, ctx_size // 2)
 
         models_config[mid] = {
             "name": f"{mid} ({device})",
@@ -168,6 +173,60 @@ def write_kilo_config(workspace_dir: Path = DEFAULT_WORKSPACE, config: Optional[
     return target
 
 
+def global_config_path(config_dir: Optional[Path] = None) -> Path:
+    """Risolve il percorso del config globale di Kilo Code CLI."""
+    root = Path(config_dir) if config_dir is not None else Path.home() / ".config" / "kilo"
+    return root / GLOBAL_CONFIG_NAME
+
+
+def install_global_provider(
+    workspace_dir: Path = DEFAULT_WORKSPACE,
+    config_dir: Optional[Path] = None,
+) -> Tuple[Path, bool, List[str]]:
+    """Installa (o aggiorna) il provider 'hexagon' nel config globale di Kilo.
+
+    Necessario per avviare `kilo <cartella>` su progetti fuori dal workspace
+    Hexagon: Kilo risolve kilo.json risalendo dalla cartella del progetto e,
+    se non lo trova, ricade sul config globale (~/.config/kilo/kilo.jsonc).
+    Il file esistente viene preservato e backuppato con timestamp; se non e'
+    parsabile come JSON la funzione non tocca nulla e segnala l'errore.
+    """
+    config = generate_kilo_config(workspace_dir)
+    hexagon = config["provider"]["hexagon"]
+
+    target = global_config_path(config_dir)
+    existing: Dict[str, Any] = {}
+    if target.is_file():
+        try:
+            with open(target, "r", encoding="utf-8-sig") as f:
+                existing = json.load(f)
+        except (OSError, ValueError) as exc:
+            return target, False, [f"Config globale {target} non parsabile ({exc}); file lasciato intatto."]
+
+    providers = existing.get("provider")
+    if not isinstance(providers, dict):
+        providers = {}
+    if providers.get("hexagon") == hexagon:
+        return target, False, []
+
+    merged = dict(existing)
+    merged["provider"] = {**providers, "hexagon": hexagon}
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_file():
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup = target.with_name(f"{target.name}.bak-{stamp}")
+            shutil.copy2(target, backup)
+        with open(target, "w", encoding="utf-8") as f:
+            json.dump(merged, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+    except OSError as exc:
+        return target, False, [f"Scrittura config globale fallita: {exc}"]
+
+    return target, True, []
+
+
 def validate_kilo_config(config_path: Path) -> Tuple[bool, List[str]]:
     """Verifica che la configurazione rispetti i vincoli di sicurezza offline."""
     issues = []
@@ -216,11 +275,25 @@ def main():
     parser.add_argument("--generate", action="store_true", help="Genera kilo.json nel workspace")
     parser.add_argument("--check", action="store_true", help="Valida kilo.json esistente")
     parser.add_argument("--status", action="store_true", help="Mostra stato configurazione e modelli")
+    parser.add_argument("--install-global", action="store_true",
+                        help="Installa/aggiorna il provider hexagon nel config globale di Kilo (~/.config/kilo)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Porta HTTP del router (default: 18803)")
     args = parser.parse_args()
 
     base_url = f"http://127.0.0.1:{args.port}/v1"
     config_file = DEFAULT_WORKSPACE / "kilo.json"
+
+    if args.install_global:
+        path, changed, issues = install_global_provider(DEFAULT_WORKSPACE)
+        if issues:
+            print("Errori installazione provider globale:")
+            for issue in issues:
+                print(f" - {issue}")
+            sys.exit(1)
+        print(f"Provider hexagon {'installato/aggiornato' if changed else 'gia allineato'} in {path}")
+        if changed:
+            print("Backup del file precedente creato con timestamp nello stesso percorso.")
+        sys.exit(0)
 
     if args.check:
         ok, issues = validate_kilo_config(config_file)

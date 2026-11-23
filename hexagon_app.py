@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from stack_manager import DEFAULT_WORKSPACE, StackManager
+from hexagon_control import __version__
 from hexagon_control.backend import PowerShellBackend
 from hexagon_control.diagnostics import DiagnosticsController
 from hexagon_control.kilo import KiloController
@@ -19,6 +20,7 @@ from hexagon_control.updates import UpdateController
 
 def main():
     parser = argparse.ArgumentParser(description="Centro di controllo locale Hexagon")
+    parser.add_argument("--version", action="version", version=__version__, help="Stampa la versione di Hexagon")
     parser.add_argument("--url", default="http://127.0.0.1:18803/v1")
     parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     args = parser.parse_args()

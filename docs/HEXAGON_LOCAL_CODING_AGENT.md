@@ -130,10 +130,23 @@ Caratteristiche:
 ### 3. `kilo_config.py` (Modulo di Sincronizzazione)
 Utility Python per interrogare e aggiornare la configurazione:
 ```powershell
-python kilo_config.py --status      # Mostra stato configurazione e router
-python kilo_config.py --check       # Valida vincoli di sicurezza offline
-python kilo_config.py --generate    # Ricrea kilo.json dai preset hardware
+python kilo_config.py --status          # Mostra stato configurazione e router
+python kilo_config.py --check           # Valida vincoli di sicurezza offline
+python kilo_config.py --generate        # Ricrea kilo.json dai preset hardware
+python kilo_config.py --install-global  # Installa/aggiorna il provider hexagon nel config globale
 ```
+
+### 4. Selezione della Cartella di Progetto (TUI Control Center)
+Quando la TUI di controllo avvia Kilo Code (menu Router + Kilo), chiede la
+**cartella del progetto da contestualizzare** e la passa a Kilo come percorso
+del progetto (`kilo <cartella>`), avviando il processo con `cwd` su quella
+cartella: l'agente opera quindi sul repository scelto anziché sul workspace Hexagon.
+
+Kilo Code risolve `kilo.json` risalendo dalla cartella del progetto; per i
+progetti **fuori** dal workspace Hexagon, il provider `hexagon` viene quindi
+reso disponibile via config globale `~/.config/kilo/kilo.jsonc`
+(aggiornato automaticamente al lancio, con backup timestamped del file
+precedente; mai sovrascrive un file non parsabile).
 
 ---
 

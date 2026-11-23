@@ -10,6 +10,65 @@ from unittest.mock import patch, MagicMock
 import kilo_config
 
 
+class TestGlobalProviderInstall(unittest.TestCase):
+    """Test per install_global_provider (provider hexagon nel config globale Kilo)."""
+
+    def setUp(self):
+        self.workspace_dir = Path(__file__).resolve().parent.parent
+        self.tmp = tempfile.TemporaryDirectory()
+        self.config_dir = Path(self.tmp.name) / "kilo"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_install_creates_global_config(self):
+        path, changed, issues = kilo_config.install_global_provider(self.workspace_dir, self.config_dir)
+        self.assertEqual(issues, [])
+        self.assertTrue(changed)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.assertIn("hexagon", data["provider"])
+        self.assertEqual(data["provider"]["hexagon"]["npm"], "@ai-sdk/openai-compatible")
+        self.assertTrue(data["provider"]["hexagon"]["options"]["baseURL"].startswith("http://127.0.0.1"))
+
+    def test_install_preserves_existing_entries_and_backs_up(self):
+        self.config_dir.mkdir(parents=True)
+        existing = {
+            "permission": {"bash": {"git status *": "allow"}},
+            "provider": {"other": {"npm": "some-package"}},
+        }
+        path = self.config_dir / kilo_config.GLOBAL_CONFIG_NAME
+        path.write_text(json.dumps(existing), encoding="utf-8")
+
+        result_path, changed, issues = kilo_config.install_global_provider(self.workspace_dir, self.config_dir)
+
+        self.assertEqual(issues, [])
+        self.assertTrue(changed)
+        data = json.loads(result_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["permission"], existing["permission"])
+        self.assertIn("other", data["provider"])
+        self.assertIn("hexagon", data["provider"])
+        backups = list(self.config_dir.glob(f"{kilo_config.GLOBAL_CONFIG_NAME}.bak-*"))
+        self.assertEqual(len(backups), 1)
+
+    def test_install_is_idempotent(self):
+        kilo_config.install_global_provider(self.workspace_dir, self.config_dir)
+        _, changed, issues = kilo_config.install_global_provider(self.workspace_dir, self.config_dir)
+        self.assertFalse(changed)
+        self.assertEqual(issues, [])
+        self.assertEqual(len(list(self.config_dir.glob(f"{kilo_config.GLOBAL_CONFIG_NAME}.bak-*"))), 0)
+
+    def test_install_refuses_unparsable_config(self):
+        self.config_dir.mkdir(parents=True)
+        path = self.config_dir / kilo_config.GLOBAL_CONFIG_NAME
+        path.write_text("{ non e json", encoding="utf-8")
+
+        _, changed, issues = kilo_config.install_global_provider(self.workspace_dir, self.config_dir)
+
+        self.assertFalse(changed)
+        self.assertTrue(issues)
+        self.assertEqual(path.read_text(encoding="utf-8"), "{ non e json")
+
+
 class TestKiloConfig(unittest.TestCase):
     """Test unitari per la generazione e validazione di kilo.json."""
 
