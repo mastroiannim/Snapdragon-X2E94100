@@ -123,8 +123,14 @@ def generate_kilo_config(
         else main_id
     )
 
-    config = {
+    config: Dict[str, Any] = {
         "$schema": "https://app.kilo.ai/config.json",
+    }
+    plugin_path = workspace_dir / "plugins" / "hexagon-runtime"
+    if plugin_path.is_dir():
+        config["plugin"] = ["./plugins/hexagon-runtime"]
+
+    config.update({
         "provider": {
             "hexagon": {
                 "name": "Hexagon Local Runtime",
@@ -157,7 +163,7 @@ def generate_kilo_config(
             "task": "ask",
             "external_directory": "ask"
         }
-    }
+    })
     return config
 
 

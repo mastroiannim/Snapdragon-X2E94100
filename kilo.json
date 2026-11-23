@@ -154,6 +154,5 @@
     },
     "task": "ask",
     "external_directory": "ask"
-  },
-  "snapshot": false
+  }
 }

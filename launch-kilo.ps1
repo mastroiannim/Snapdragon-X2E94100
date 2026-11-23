@@ -105,8 +105,8 @@ if (-not $IsOnline) {
     # Avvio router in background console separata
     Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$LaunchHexagon`" -Mode Router -Port $Port -BindHost $BindHost" -WorkingDirectory $ScriptDir
 
-    Write-Host " In attesa del router su $BaseUrl..." -ForegroundColor Cyan
-    $Retries = 20
+    Write-Host " In attesa del router su $BaseUrl (warm-up NPU Hexagon)..." -ForegroundColor Cyan
+    $Retries = 45
     while ($Retries -gt 0 -and -not $IsOnline) {
         Start-Sleep -Seconds 1
         try {
@@ -122,7 +122,7 @@ if (-not $IsOnline) {
     }
 
     if (-not $IsOnline) {
-        Write-Error "Impossibile contattare il router Hexagon su $BaseUrl entro il timeout."
+        Write-Error "Impossibile contattare il router Hexagon su $BaseUrl entro il timeout di 45s. Verifica che la porta $Port non sia bloccata."
         exit 1
     }
 }
