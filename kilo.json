@@ -75,6 +75,13 @@
             "output": 16384
           }
         },
+        "Qwen_Qwen3.6-35B-A3B-Q4_0": {
+          "name": "Qwen_Qwen3.6-35B-A3B-Q4_0 (HTP0,GPUOpenCL)",
+          "limit": {
+            "context": 65536,
+            "output": 16384
+          }
+        },
         "qwen2.5-coder-14b-instruct-q4_0": {
           "name": "qwen2.5-coder-14b-instruct-q4_0 (HTP0,GPUOpenCL)",
           "limit": {
@@ -112,13 +119,6 @@
         },
         "Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-Q4_K_M": {
           "name": "Qwen3.8-27B-TurboFCFusion-735-882-Here-Uncen-NEO-CODER-MAX-Q4_K_M (HTP0)",
-          "limit": {
-            "context": 65536,
-            "output": 16384
-          }
-        },
-        "Qwen_Qwen3.6-35B-A3B-Q4_0": {
-          "name": "Qwen_Qwen3.6-35B-A3B-Q4_0 (HTP0,GPUOpenCL)",
           "limit": {
             "context": 65536,
             "output": 16384
