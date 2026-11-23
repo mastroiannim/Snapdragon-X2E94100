@@ -1,6 +1,3 @@
 {
-  "$schema": "https://app.kilo.ai/config.json",
-  "plugin": [
-    "hexagon"
-  ]
+  "$schema": "https://app.kilo.ai/config.json"
 }
