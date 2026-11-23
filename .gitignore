@@ -17,3 +17,8 @@ long-context-results/
 # Modelli locali e pesi
 models/
 *.gguf
+
+# Plugin Kilo (plugins/hexagon-runtime): dipendenze, build e coverage
+node_modules/
+plugins/*/dist/
+plugins/*/coverage/

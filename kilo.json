@@ -1,5 +1,8 @@
 {
   "$schema": "https://app.kilo.ai/config.json",
+  "plugin": [
+    "./plugins/hexagon-runtime"
+  ],
   "provider": {
     "hexagon": {
       "name": "Hexagon Local Runtime",
@@ -151,5 +154,6 @@
     },
     "task": "ask",
     "external_directory": "ask"
-  }
+  },
+  "snapshot": false
 }

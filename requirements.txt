@@ -1,4 +1,3 @@
-# Dipendenze per Hexagon Claw TUI (OpenClaw-style Text User Interface)
-rich>=13.0.0
-prompt_toolkit>=3.0.0
+# Dipendenze degli helper runtime Python (stack_manager.py, kilo_config.py).
+# Lo stack TUI/Control Center e' stato rimosso: niente rich, prompt_toolkit o textual.
 httpx>=0.25.0

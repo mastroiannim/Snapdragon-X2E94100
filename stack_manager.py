@@ -19,10 +19,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from rich.text import Text
 
 USER_PROFILE = Path(os.environ.get("USERPROFILE") or Path.home())
 LOCAL_APPDATA = Path(os.environ.get("LOCALAPPDATA") or USER_PROFILE / "AppData" / "Local")
@@ -120,7 +116,7 @@ class StackManager:
         return False
 
     def start_server_router(self, port: int = 18803, bind_host: str = "127.0.0.1") -> bool:
-        """Avvia il launcher del checkout corrente; la TUI verifica poi l'HTTP."""
+        """Avvia il launcher del checkout corrente; il plugin Kilo verifica poi l'HTTP."""
         script = self.workspace_dir / "launch-hexagon.ps1"
         if sys.platform != "win32" or not script.is_file():
             return False
@@ -372,52 +368,3 @@ class StackManager:
     def update_geniex_cli(self) -> Tuple[bool, str]:
         ok, result = self._run_runtime_update("-UpdateGenieX")
         return ok, result.get("Message", "") if ok else result.get("Error", "")
-
-    def render_stack_dashboard(self, console: Console):
-        st = self.get_stack_status()
-        table = Table(title="🐉 Inventario Stack GenieX / llama.cpp", border_style="cyan")
-        table.add_column("Componente", style="bold cyan")
-        table.add_column("Versione / Dettaglio")
-        table.add_column("Esito osservato")
-        table.add_row("GenieX CLI", Text(f"{st['geniex_version']} (QAIRT {st['qairt_version']})"),
-                      "Presente" if st["geniex_installed"] else "Mancante")
-        llama_ver = st["llama_server_version"]
-        if st.get("llama_release_tag"):
-            llama_ver = f"{llama_ver} [{st['llama_release_tag']}]"
-        table.add_row("llama.cpp Server", Text(llama_ver),
-                      "Presente" if st["llama_server_installed"] else "Mancante")
-        table.add_row("Commit", Text(f"GenieX: {st['geniex_llama_hash'] or 'N/D'}; "
-                                     f"llama.cpp: {st['llama_server_commit'] or 'N/D'}"),
-                      "Coincidono" if st["commit_aligned"] else "Differenti o non rilevati")
-        files = st["runtime_files"]
-        table.add_row("Runtime", f"{sum(f['match'] for f in files)}/{len(files)} file identici; "
-                      f"{sum(f['is_hardlink'] for f in files)} hard-link",
-                      "Identità verificata" if st["all_files_aligned"] else "Differenze o inventario incompleto")
-        for name, artifact in st["npu_artifacts"].items():
-            detail = artifact["sha256"]
-            if artifact.get("signature") and artifact["signature"] != "N/D":
-                detail = f"{detail}; firma: {artifact['signature']}"
-            table.add_row(name, detail, "Presente" if artifact["present"] else "Mancante")
-        running = st["server_running"]
-        table.add_row("Processi llama-server", "Controllo locale per nome",
-                      "N/D" if running is None else "In esecuzione" if running else "Fermi")
-        console.print(table)
-        console.print("[dim]File presenti e commit uguali non verificano firma, ABI o offload reale.[/dim]")
-        for error in st["errors"]:
-            console.print(Text(error, style="yellow"))
-
-    def render_updates_dashboard(self, console: Console):
-        up = self.check_updates()
-        available = up["update_available_llamacpp"]
-        state = "Non determinabile" if available is None else "Build più recente pubblicata" if available else "Nessuna build più recente"
-        table = Table(title="🐉 Release pubblicate", border_style="cyan")
-        table.add_column("Software")
-        table.add_column("Versione locale")
-        table.add_column("Release / Esito")
-        table.add_row("llama.cpp", Text(up["current_llamacpp_commit"]),
-                      Text(f"{up['latest_llamacpp_build']} ({up['latest_llamacpp_published']}): {state}"))
-        table.add_row("GenieX", Text(up["current_geniex"]), Text(up["geniex_update_status"]))
-        console.print(table)
-        console.print(Panel(Text(up["safe_update_advisory"]), border_style="yellow"))
-        for error in up["errors"]:
-            console.print(Text(error, style="yellow"))

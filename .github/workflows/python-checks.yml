@@ -1,18 +1,16 @@
-name: Python TUI checks
+name: Python runtime checks
 
 on:
   push:
-    branches: [main, feat/tui-openclaw]
+    branches: [main]
     paths:
       - '*.py'
-      - '*tui*'
       - 'requirements.txt'
       - 'tests/test_*.py'
       - '.github/workflows/python-checks.yml'
   pull_request:
     paths:
       - '*.py'
-      - '*tui*'
       - 'requirements.txt'
       - 'tests/test_*.py'
       - '.github/workflows/python-checks.yml'
@@ -36,21 +34,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Install TUI dependencies
+      - name: Install runtime helper dependencies
         run: python -m pip install -r requirements.txt
       - name: Compile Python modules
-        run: python -m compileall -q tui.py stack_manager.py tests
+        run: python -m compileall -q stack_manager.py kilo_config.py tests
       - name: Run isolated regression tests
         run: python -m unittest discover -s tests -p "test_*.py" -v
-      - name: Check Windows PowerShell launcher syntax
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          $tokens = $null
-          $parseErrors = $null
-          [void][System.Management.Automation.Language.Parser]::ParseFile(
-            (Join-Path $PWD 'launch-tui.ps1'), [ref]$tokens, [ref]$parseErrors
-          )
-          if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
-      - name: Check CLI
-        run: python tui.py --help

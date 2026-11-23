@@ -12,7 +12,7 @@ $runtime = Join-Path $genie 'llama_cpp'
 $bin = Join-Path $profile 'llama-cpp\llama-bin-win-cpu-arm64'
 $models = Join-Path $profile '.cache\geniex\models'
 $savedProfile = $env:USERPROFILE; $savedAppData = $env:LOCALAPPDATA
-$savedMarker = $env:HEXAGON_TEST_MARKER; $savedPython = $env:HEXAGON_TEST_PYTHON
+$savedMarker = $env:HEXAGON_TEST_MARKER
 $savedExit = $env:HEXAGON_TEST_EXIT; $savedFixture = $env:HEXAGON_TEST_FIXTURE
 $shell = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
 foreach ($path in @($checkout,$runtime,$models)) { [void][IO.Directory]::CreateDirectory($path) }
@@ -29,7 +29,7 @@ function Run-Entry([string]$Arguments) {
     } finally { $process.Dispose() }
 }
 try {
-    foreach ($name in @('launch-hexagon.ps1','sync-geniex.ps1','runtime-update.psm1','launch-tui.ps1')) {
+    foreach ($name in @('launch-hexagon.ps1','sync-geniex.ps1','runtime-update.psm1')) {
         Copy-Item -LiteralPath (Join-Path $repo $name) -Destination $checkout
     }
     $fixture = Join-Path $root 'fixture.exe'
@@ -102,38 +102,10 @@ function Get-RuntimeProcesses($Directory) { return @() }
     if ($result.Code -ne 7) { throw "Direct server exit code lost: $($result.Code) $($result.Output) $($result.Error)" }
     $env:HEXAGON_TEST_EXIT = $savedExit
     Write-Host 'PASS direct launcher propagates server exit code'
-
-    # La TUI usa il bootstrap, conserva flag e spazi e restituisce il codice Python.
-    $env:HEXAGON_TEST_PYTHON = (Get-Command python.exe -ErrorAction Stop).Source
-    [IO.File]::WriteAllText((Join-Path $checkout 'tui-bootstrap.psm1'), 'function Resolve-HexagonTuiPython { param($Requirements) return $env:HEXAGON_TEST_PYTHON }; Export-ModuleMember -Function Resolve-HexagonTuiPython')
-    [IO.File]::WriteAllText((Join-Path $checkout 'requirements.txt'), '')
-    [IO.File]::WriteAllText((Join-Path $checkout 'tui.py'), 'import sys,json; print(json.dumps(sys.argv)); sys.exit(7)')
-    $result = Run-Entry ('-NoProfile -File "' + (Join-Path $checkout 'launch-tui.ps1') + '" -FromBatch --url http://127.0.0.1:18803/v1 --model "Case With Spaces" --max-tokens 32')
-    if ($result.Code -ne 7) { throw "Python exit code lost: $($result.Code) $($result.Output) $($result.Error)" }
-    $lastLine = ($result.Output.Trim() -split '\r?\n')[-1]
-    $arguments = $lastLine | ConvertFrom-Json
-    if ($arguments[$arguments.IndexOf('--model')+1] -ne 'Case With Spaces' -or $arguments[-1] -ne '32') { throw "CLI arguments lost: $lastLine" }
-    Write-Host 'PASS TUI launcher reuses bootstrap, preserves CLI arguments and exit code'
-
-    [IO.File]::WriteAllText((Join-Path $checkout 'hexagon_app.py'), 'import sys,json; print(json.dumps(sys.argv)); sys.exit(9)')
-    Remove-Item -LiteralPath $bin -Recurse -Force
-    $result = Run-Entry ('-NoProfile -File "' + (Join-Path $checkout 'launch-tui.ps1') + '" -ControlCenter')
-    if ($result.Code -ne 9) { throw "Control center exit code lost: $($result.Code) $($result.Output) $($result.Error)" }
-    if (Test-Path (Join-Path $bin 'hexagon-runtime.json')) { throw 'Control center bootstrap changed the runtime' }
-    $lastLine = ($result.Output.Trim() -split '\r?\n')[-1]
-    $arguments = $lastLine | ConvertFrom-Json
-    if ($arguments[0] -notlike '*hexagon_app.py' -or $arguments -contains '--model') { throw "Control center arguments invalid: $lastLine" }
-    Write-Host 'PASS control center bootstrap skips runtime sync and preserves Python exit code'
-
-    Copy-Item -LiteralPath (Join-Path $repo 'hexagon.bat') -Destination $checkout
-    $batch = Join-Path $checkout 'hexagon.bat'
-    $result = Run-Entry ('-NoProfile -Command "& ''' + $batch + '''"; exit $LASTEXITCODE')
-    if ($result.Code -ne 9 -or $result.Output -notmatch 'hexagon_app.py') { throw "hexagon.bat failed: $($result.Code) $($result.Output) $($result.Error)" }
-    Write-Host 'PASS hexagon.bat is parameterless and preserves the control center exit code'
-    Write-Host 'ENTRYPOINT_TESTS=PASS (6 Windows process scenarios)'
+    Write-Host 'ENTRYPOINT_TESTS=PASS (3 Windows process scenarios)'
 } finally {
     $env:USERPROFILE=$savedProfile; $env:LOCALAPPDATA=$savedAppData
-    $env:HEXAGON_TEST_MARKER=$savedMarker; $env:HEXAGON_TEST_PYTHON=$savedPython
+    $env:HEXAGON_TEST_MARKER=$savedMarker
     $env:HEXAGON_TEST_FIXTURE=$savedFixture; $env:HEXAGON_TEST_EXIT=$savedExit
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }

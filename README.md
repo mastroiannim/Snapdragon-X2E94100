@@ -16,18 +16,23 @@ non richiede Git, CMake, Visual Studio, SDK Hexagon/QNN o una precedente install
 llama.cpp. I modelli GGUF sono contenuti di input: il launcher usa quelli presenti
 nella cache di GenieX (`geniex pull`), oppure la directory specificata con `-ModelsDir`.
 
+L'entry point consigliato e' **Kilo Code** con il plugin nativo `hexagon-runtime`
+(architettura zero-setup: niente TUI Python, niente Control Center):
+
 ```powershell
-.\hexagon.bat            # centro di controllo unificato, senza parametri
+.\setup-kilo.ps1              # verifica prerequisiti, runtime e sicurezza offline
+.\launch-kilo.ps1             # avvia il router Hexagon su loopback e apre Kilo Code
 ```
 
-Il centro di controllo prepara soltanto Python e le dipendenze TUI, poi apre il dashboard:
-non avvia server, non aggiorna il runtime e non modifica l'INI all'apertura. I launcher
-specializzati restano disponibili per l'automazione e l'uso headless:
+Alla creazione di una sessione Kilo, il plugin `plugins/hexagon-runtime` allinea
+automaticamente il runtime al commit GenieX, avvia `llama-server.exe` con
+`ADSP_LIBRARY_PATH` se la porta 18803 e' libera e attende la readiness HTTP
+(warm-up del grafo HTP). I launcher specializzati restano disponibili per
+l'automazione e l'uso headless:
 
 ```powershell
 .\llama-server-all.bat   # prepara il runtime e avvia il router
 .\llama-server.bat       # prepara il runtime e avvia un singolo modello
-.\tui.bat                # prepara Python/dipendenze TUI, poi il router e la chat
 ```
 
 ### Hexagon Local Coding Agent (Kilo Code)
@@ -171,135 +176,75 @@ il contenuto INI proposto.
 
 Il server espone un endpoint compatibile OpenAI sulla porta `18803`. Il binding predefinito è `127.0.0.1`. L'accesso LAN richiede `-BindHost` esplicito; **non esporre l'endpoint senza autenticazione su una rete non attendibile**.
 
-## Hexagon Control Center
+## Plugin Kilo hexagon-runtime (architettura zero-setup)
 
-`hexagon.bat` è l'entry point principale per doppio clic o terminale e non richiede
-argomenti. Riutilizza il bootstrap Python/venv esistente con `-ExecutionPolicy Bypass`.
-Il dashboard usa `rich` e `prompt_toolkit`; i controller risiedono in `hexagon_control/`,
-separati dalle schermate, mentre `launch-hexagon.ps1` resta l'unica fonte delle euristiche.
+La TUI Python e il Control Center (`tui.py`, `hexagon_app.py`, `hexagon_control/`)
+sono stati rimossi. La gestione del runtime vive nel plugin TypeScript
+`plugins/hexagon-runtime` (`@hexagon/kilo-plugin`), registrato in `kilo.json`:
 
-L'interfaccia è full-screen in stile Kilo: **terminal fisso** su alternate screen (nessuno
-scroll del terminale), **toolbar superiore** con endpoint, stato router, latenza e numero
-di modelli, **toolbar inferiore** con shortcut e suggerimenti contestuali per l'area
-aperta, area contenuto **a colori** (gli stili `rich` sono conservati) con **scrollbar**,
-**rotellina del mouse**, `PgUp/PgDn/Home/End` e **ricerca incrementale** (`Ctrl+F`). Le
-**voci del menu sono cliccabili** con evidenziazione al passaggio del mouse; il click è
-risolto per riga/colonna sulla voce esatta. La riga di input offre suggerimenti dalla
-history. `Esc` annulla il prompt corrente; `F1` apre la guida e `F10` esce (globali).
-Gli errori restano visibili nella barra di stato, mai silenziati. Chat e lancio di Kilo
-Code sospendono temporaneamente la full-screen app senza ricrearla (corpo e scroll
-conservati) e la riprendono all'uscita. In ambienti senza console (pipe, test, IDE)
-l'interfaccia ricade automaticamente sul prompt a riga.
-
-I tasti `1`–`9` aprono rispettivamente: Router, singolo modello, prerequisiti/sicurezza,
-Kilo Code, diagnostica, inventario GGUF, editor INI, percorsi/link e aggiornamenti.
-`C` apre la chat, `L` la dashboard con refresh ogni due secondi (aggiornata in place,
-senza reset dello scroll), `B` torna indietro nei sottomenu e `Q` esce. Il menu si naviga
-anche con **frecce + Invio**; `Tab` o `/` attivano la **modalità input** per la digitazione
-libera (i tasti singoli non la intercettano). Le azioni di scrittura, rimozione link e
-aggiornamento richiedono conferma; annullare con `Esc` non esegue azioni distruttive.
-Il check delle release online è separato dai controlli locali.
-
-L'avvio a caldo riusa una **cache del bootstrap**: se l'impronta di `requirements.txt`,
-del modulo bootstrap e del venv è invariata, il python viene risolto senza subprocess di
-verifica (primo frame interattivo in circa 1–2 s). Il primo setup resta invariato.
-
-- Gli avvii dal centro di controllo usano `-CheckRuntime`: eventuali installazioni o
-  aggiornamenti si effettuano soltanto nell'area Aggiornamenti o tramite i launcher legacy.
-- PID, memoria e log sono rilevati dai processi locali. L'elenco `/v1/models` indica i
-  modelli registrati; gli slot caricati restano `N/D` se il server non li espone.
-- Il tool calling è marcato verificato solo dopo una richiesta funzionale esplicita;
-  quantizzazione e nome file non costituiscono una prova.
-- L'editor INI valida sintassi e parametri, mostra il diff e salva in modo atomico con
-  backup UTF-8 senza BOM. Le preview JSON non modificano il file.
-- Hard-link e symlink non sovrascrivono destinazioni esistenti. La rimozione è limitata
-  ai link nelle directory configurate e non elimina gli altri riferimenti al contenuto.
-- Configurazione e log sono in `%LOCALAPPDATA%\HexagonClaw`; i log di sessione sono nella
-  sottodirectory `logs`. Il rilevamento automatico dei modelli include le sottodirectory.
-- All'uscita è possibile lasciare attivi oppure arrestare soltanto i server avviati dalla
-  sessione. Il controllo esplicito `X` nel menu Router gestisce invece l'intera directory
-  runtime, come la CLI esistente.
-
-Per un Python già predisposto è disponibile anche `python hexagon_app.py`; la modalità
-interattiva legacy `python tui.py` e tutti i relativi flag restano supportati.
-
-## Hexagon Claw TUI (Interfaccia Terminale in Stile OpenClaw)
-
-Interfaccia testuale `🐉` per la chat con un endpoint `llama-server` compatibile OpenAI.
-Su Windows basta avviare `tui.bat` o `launch-tui.ps1`: il launcher riusa Python 3.10+
-se disponibile; altrimenti installa Python per utente e prepara un ambiente dedicato
-in `%LOCALAPPDATA%\HexagonClaw`. Le dipendenze vengono installate automaticamente
-senza modificare i pacchetti del Python dell'utente. Nessun passaggio manuale con pip.
-Il fallback usa CPython 3.13.17 da python.org, con SHA-256 fissato nel codice.
-
-```powershell
-.\tui.bat --model "LFM2.5-24B" --max-tokens 2048
-# Oppure:
-.\launch-tui.ps1 -Model "LFM2.5-24B" -MaxTokens 2048
+```json
+{ "plugin": ["./plugins/hexagon-runtime"] }
 ```
 
-Per l'avvio diretto con un Python gia' predisposto rimane disponibile `python tui.py`.
-Se l'endpoint HTTP locale e' offline, la TUI avvia il router, il cui launcher comprende
-il bootstrap. Un URL remoto non avvia o aggiorna processi locali.
+Il plugin usa l'API `@kilocode/plugin` (default export `Plugin = (input) => Promise<Hooks>`)
+e mantiene `launch-hexagon.ps1` come unica fonte delle euristiche hardware:
 
-Il workspace predefinito è la directory del checkout, dove il launcher genera
-`hexagon-models.ini`. Se il file non è presente nel workspace indicato con
-`--workspace`, la TUI ricade su quello generato nel checkout. Per usare un'altra
-directory:
+- **`sync.ts`** — legge `LlamaCPP Runtime Hash` da `geniex.exe --version` e il commit
+  da `llama-server.exe --version`; se disallineati o con file mancanti
+  (`ggml-hexagon.dll`, `libggml-htp.cat`, `libggml-htp-v*.so`, `ggml-opencl.dll`)
+  invoca `sync-geniex.ps1 -Apply -NoStopServer -Json`, lo stesso motore transazionale
+  dei launcher PowerShell.
+- **`process.ts`** — router su `127.0.0.1:18803`; se la porta non risponde avvia
+  `llama-server.exe` con `ADSP_LIBRARY_PATH` impostato tassativamente sulla directory
+  runtime (piu' `GGML_HEXAGON_OPBATCH`/`GGML_HEXAGON_VTCM_SIZE`). Se il server e' gia'
+  attivo non interferisce. Parsing di `hexagon-models.ini` per device `HTP0` (NPU),
+  `GPUOpenCL` e split ibridi.
+- **`health.ts`** — polling `http://127.0.0.1:18803/health` ogni 1000 ms, fino a 30
+  tentativi (30 s): il tempo di allocazione del grafo HTP sulla NPU.
+- **`models.ts`** — contesti reali testati, senza i limiti dichiarati da GenieX:
+  `Ornith-1.5-9B-Q4_0` e `MiniCPM5-2B-Q4_K_M` a 65.536 token; `flint-UD-Q4_K_XL` e
+  `gpt-oss-20b-Q4_0` a 131.072 token.
+- **`tools.ts`** — agent tool per Kilo: `hexagon_status` (stato router, latenza,
+  modelli caricati), `hexagon_sync` (riallineamento runtime forzato),
+  `hexagon_bench` (token/s per profilo NPU/GPU da `benchmark-hexagon.ps1`).
+- **`index.ts`** — hook `event`/`session.created` per il bootstrap automatico
+  (sync → avvio → health) e hook `chat.params` che inietta
+  `reasoning_effort: "none"` sui modelli del provider locale `hexagon`, per un
+  tool-calling deterministico.
+
+Gli helper Python superstiti (`stack_manager.py`, `kilo_config.py`) sono usati solo
+dagli script PowerShell di setup/launcher; le dipendenze TUI (`rich`,
+`prompt_toolkit`, `textual`) non sono piu' richieste.
+
+## Verifiche riproducibili
+
+Suite del plugin (mock di OS/subprocess/HTTP, nessun hardware Qualcomm richiesto):
 
 ```powershell
-python tui.py --workspace "C:\percorso\Snapdragon-X2E94100" --url http://127.0.0.1:18803/v1
+cd plugins\hexagon-runtime
+npm install
+npm run build                 # tsc, tipi @kilocode/plugin
+npm test                      # Vitest + coverage v8 (soglie 90%)
 ```
 
-- `/models`, `/model <nome>`: elenco e selezione del modello; i preset vengono riletti.
-- `/status`: stato HTTP, RAM misurata su Windows e configurazione dichiarata nel preset.
-  Device e tensor-split non sono misure di offload; i dati non disponibili sono `N/D`.
-- Chat: streaming con `reasoning_content` o tag `<think>` anche frammentati. La cronologia
-  inviata al turno successivo conserva la risposta finale; un turno interrotto o fallito
-  non viene salvato. Un indicatore mostra l'attesa prima del primo contenuto; `Ctrl+C`
-  interrompe la generazione senza chiudere la TUI. Il limite predefinito è **2048 token di
-  generazione**, configurabile con `--max-tokens` (o `-MaxTokens` nel launcher PowerShell).
-- La barra inferiore mostra modello, contesto stimato, modalità di ragionamento e ultima
-  velocità. Digitando `/` si aprono i completamenti; con `↑` e `↓` si naviga la history di
-  input. I comandi sconosciuti vicini a un comando valido producono un suggerimento.
-- `/bench [n_tokens]`: benchmark HTTP con TTFT osservato dal client e tempi prefill/decode
-  separati quando il server li fornisce. I contatori provengono da `usage`/`timings`;
-  senza questi dati token e velocità restano `N/D`. I frammenti SSE non sono token.
-- `/reasoning off|auto`: per default la TUI invia `reasoning_effort: none` per
-  disattivare il ragionamento nei modelli che lo consentono. `auto` usa la scelta
-  del server; disponibile anche con `--reasoning auto` all'avvio. La scelta vale
-  per chat e `/bench`. Se arriva solo ragionamento senza risposta finale, il turno
-  non viene salvato. Il limite di generazione comprende anche il ragionamento.
-- `/stack status`: versioni, commit e confronto dei file tramite identità, dimensione
-  e SHA-256. Presenza dei file e commit uguali non verificano firma, ABI o inferenza.
-  La ricerca di `geniex.exe` nel PATH vale solo per il percorso predefinito: una
-  directory GenieX esplicita e priva di eseguibile segnala un errore di configurazione.
-- `/stack check`: consulta le release pubblicate di llama.cpp e GenieX, senza eseguire
-  updater. Il confronto fra build llama.cpp è possibile solo quando entrambe sono note.
-- `/stack sync`, `/stack update-llama`: installazione/allineamento automatico alla
-  revisione indicata dal runtime GenieX tramite lo stesso motore PowerShell.
-- `/stack update-geniex`: aggiorna GenieX con il comando ufficiale, poi riallinea il
-  runtime. Prima separa eventuali hard-link legacy per preservare la copia installata.
-- `/server status|start|stop|restart`: controllo HTTP e gestione del router Windows locale.
-  `stop` e `restart` arrestano solo i `llama-server.exe` della directory gestita;
-  altre installazioni locali non vengono toccate.
-  Gli endpoint remoti supportano il solo controllo di stato.
-- `/clear` (o `clear`), `/new`: pulisce la schermata e azzera il contesto, conservando la
-  history dei comandi. `/history` mostra il file di history; `/history clear` o
-  `/clear-history` cancella solo la history di input, senza modificare la conversazione.
-  `/system`, `/temp`, `/tokens`, `/help`, `/exit` gestiscono le altre azioni della sessione.
+Test PowerShell del core engine (invariati dopo il pivot):
 
-La stima di contesto basata sui caratteri non misura la KV cache né verifica i limiti FastRPC.
-Il client HTTP riusa le connessioni e raggiunge direttamente gli endpoint loopback,
-senza passare dai proxy di ambiente. La TUI non misura l'utilizzo NPU/GPU.
+```powershell
+powershell -ExecutionPolicy Bypass -File tests\runtime-readonly.ps1
+powershell -ExecutionPolicy Bypass -File tests\runtime-update.ps1
+powershell -ExecutionPolicy Bypass -File tests\entrypoints.ps1
+powershell -ExecutionPolicy Bypass -File tests\benchmark-profiles.ps1
+```
 
-Verifiche riproducibili senza hardware Qualcomm:
+Regressioni degli helper Python superstiti (`stack_manager`, `kilo_config`):
 
 ```powershell
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-Dettagli della revisione: [docs/REVISIONE_TUI.md](docs/REVISIONE_TUI.md).
+Lo stato di avanzamento del pivot e' registrato in `.kilo/checkpoint.json`
+(CP-0 → CP-5); il branch `backup/pre-kilo-pivot` conserva il punto di ripristino.
+
 
 ## Profilazione e risultati
 

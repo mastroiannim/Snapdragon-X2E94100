@@ -1,0 +1,91 @@
+/**
+ * Adapter sottili verso le API Node reali. Unico punto del plugin che tocca
+ * child_process/fs/promises/fetch: i test li verificano con vi.mock e il resto
+ * della suite inietta fake attraverso OsDeps.
+ */
+import { execFile, spawn } from "node:child_process";
+import { access, readdir, readFile } from "node:fs/promises";
+import type {
+  ExecFn,
+  ExistsFn,
+  FetchFn,
+  ListDirFn,
+  NowFn,
+  OsDeps,
+  ReadFileFn,
+  SleepFn,
+  SpawnFn,
+} from "./types.js";
+
+export const nodeExec: ExecFn = (command, args, options = {}) =>
+  new Promise((resolve) => {
+    execFile(
+      command,
+      args,
+      {
+        cwd: options.cwd,
+        env: options.env,
+        timeout: options.timeoutMs ?? 60_000,
+        windowsHide: true,
+        maxBuffer: 16 * 1024 * 1024,
+      },
+      (error, stdout, stderr) => {
+        const exitCode =
+          error && typeof (error as { code?: unknown }).code === "number"
+            ? ((error as { code: number }).code)
+            : error
+              ? 1
+              : 0;
+        resolve({
+          code: exitCode,
+          stdout: String(stdout ?? ""),
+          stderr: String(stderr ?? ""),
+        });
+      },
+    );
+  });
+
+export const nodeSpawn: SpawnFn = (command, args, options = {}) => {
+  const child = spawn(command, args, {
+    cwd: options.cwd,
+    env: options.env,
+    detached: options.detached ?? true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.unref();
+  return { pid: child.pid };
+};
+
+export const nodeReadFile: ReadFileFn = (path) => readFile(path, "utf8");
+
+export const nodeExists: ExistsFn = async (path) => {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+export const nodeListDir: ListDirFn = (path) => readdir(path);
+
+export const nodeFetch: FetchFn = (url, init) => fetch(url, init);
+
+export const nodeSleep: SleepFn = (ms) =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+export const nodeNow: NowFn = () => Date.now();
+
+export const nodeDeps: OsDeps = {
+  exec: nodeExec,
+  spawn: nodeSpawn,
+  fetch: nodeFetch,
+  readFile: nodeReadFile,
+  exists: nodeExists,
+  listDir: nodeListDir,
+  sleep: nodeSleep,
+  now: nodeNow,
+};

@@ -1,5 +1,4 @@
 """Regressioni dell'inventario e del blocco aggiornamenti."""
-import io
 import os
 import subprocess
 import tempfile
@@ -8,7 +7,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
-from rich.console import Console
 
 import stack_manager as stack
 
@@ -57,11 +55,6 @@ class StackTests(unittest.TestCase):
         result = self.manager.get_stack_status()
         self.assertTrue(result['all_files_aligned'])
         self.assertFalse(result['runtime_files'][0]['is_hardlink'])
-        output = io.StringIO()
-        self.manager.render_stack_dashboard(Console(file=output, width=150))
-        self.assertNotIn('16/16', output.getvalue())
-        self.assertIn('0 hard-link', output.getvalue())
-        self.assertNotIn('WHQL Attivo', output.getvalue())
 
     def test_critical_hash_reused_only_within_same_inspection(self):
         name = 'ggml-hexagon.dll'

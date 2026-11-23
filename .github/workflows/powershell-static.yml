@@ -111,9 +111,6 @@ jobs:
       - name: Verify bootstrap, update, integrity and rollback
         shell: powershell
         run: .\tests\runtime-update.ps1
-      - name: Verify automatic Python and dependency setup
-        shell: powershell
-        run: .\tests\tui-bootstrap.ps1
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'

@@ -1,0 +1,262 @@
+/**
+ * process.ts — Gestione processo llama-server.exe e routing locale.
+ *
+ * Porta router 18803 su 127.0.0.1. Se il server non e' attivo viene avviato
+ * con ADSP_LIBRARY_PATH impostato tassativamente sulla directory runtime
+ * (allocazione FastRPC/HTP). I parametri per HTP0 (NPU) e GPUOpenCL sono
+ * letti da hexagon-models.ini.
+ */
+import { homedir } from "node:os";
+import { join } from "node:path";
+import type { FetchFn, SpawnFn } from "./types.js";
+
+export const ROUTER_PORT = 18803;
+export const ROUTER_HOST = "127.0.0.1";
+
+export interface ModelConfig {
+  name: string;
+  model: string;
+  device: string;
+  tensorSplit?: string;
+  ctxSize?: number;
+  /** Altri flag della sezione INI preservati senza interpretarli. */
+  flags: Record<string, string>;
+}
+
+export interface ModelsIni {
+  globals: Record<string, string>;
+  models: Record<string, ModelConfig>;
+}
+
+/** Parser INI minimale: sezioni [nome], default globali [*], commenti #/;. */
+export function parseModelsIni(text: string): ModelsIni {
+  const globals: Record<string, string> = {};
+  const models: Record<string, ModelConfig> = {};
+  let section: string | null = null;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+    const header = /^\[(.+)\]$/.exec(line);
+    if (header) {
+      section = header[1];
+      if (section !== "*" && !models[section]) {
+        models[section] = { name: section, model: "", device: "HTP0", flags: {} };
+      }
+      continue;
+    }
+    const eq = line.indexOf("=");
+    if (eq < 0 || section === null) continue;
+    const key = line.slice(0, eq).trim();
+    const value = line.slice(eq + 1).trim();
+    if (section === "*") {
+      globals[key] = value;
+      continue;
+    }
+    const entry = models[section];
+    switch (key) {
+      case "model":
+        entry.model = value;
+        break;
+      case "device":
+        entry.device = value;
+        break;
+      case "tensor-split":
+        entry.tensorSplit = value;
+        break;
+      case "ctx-size": {
+        const parsed = Number.parseInt(value, 10);
+        if (Number.isFinite(parsed)) entry.ctxSize = parsed;
+        break;
+      }
+      default:
+        entry.flags[key] = value;
+    }
+  }
+  return { globals, models };
+}
+
+export interface RouterArgsOptions {
+  iniPath: string;
+  modelsDir: string;
+  port?: number;
+  host?: string;
+  modelsMax?: number;
+}
+
+/** Argomenti router: identici al_MODE Router di launch-hexagon.ps1. */
+export function buildRouterArgs(options: RouterArgsOptions): string[] {
+  return [
+    "--host",
+    options.host ?? ROUTER_HOST,
+    "--port",
+    String(options.port ?? ROUTER_PORT),
+    "--jinja",
+    "--agent",
+    "-lv",
+    "3",
+    "--models-dir",
+    options.modelsDir,
+    "--models-preset",
+    options.iniPath,
+    "--models-max",
+    String(options.modelsMax ?? 2),
+  ];
+}
+
+/**
+ * Argomenti per un singolo modello (mode Direct): ctx-size e device dalla
+ * sezione INI, default globali [*] per batching/threads/flash-attn.
+ */
+export function buildDirectArgs(
+  model: ModelConfig,
+  globals: Record<string, string> = {},
+  options: { port?: number; host?: string } = {},
+): string[] {
+  const args = [
+    "--host",
+    options.host ?? ROUTER_HOST,
+    "--port",
+    String(options.port ?? ROUTER_PORT),
+    "--jinja",
+    "--agent",
+    "-np",
+    "1",
+    "-lm",
+    globals["load-mode"] ?? "mlock",
+    "-lv",
+    "3",
+    "-ngl",
+    globals["n-gpu-layers"] ?? "999",
+    "-c",
+    String(model.ctxSize ?? 65_536),
+    "--context-shift",
+    "-b",
+    globals["batch-size"] ?? "4096",
+    "-ub",
+    globals["ubatch-size"] ?? "512",
+    "-tb",
+    globals["threads-batch"] ?? "12",
+    "-t",
+    globals["threads"] ?? "12",
+    "-fit",
+    globals["fit"] ?? "off",
+    "-dev",
+    model.device,
+    "-fa",
+    globals["flash-attn"] ?? "on",
+  ];
+  if (model.tensorSplit) args.push("-ts", model.tensorSplit);
+  args.push("-m", model.model, "--alias", model.name);
+  return args;
+}
+
+/** Ambiente FastRPC/Hexagon: ADSP_LIBRARY_PATH e' obbligatorio per la NPU. */
+export function serverEnv(
+  runtimeDir: string,
+  base: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return {
+    ...base,
+    ADSP_LIBRARY_PATH: runtimeDir,
+    GGML_HEXAGON_OPBATCH: "512",
+    GGML_HEXAGON_VTCM_SIZE: "8M",
+  };
+}
+
+export interface ServerProbeOptions {
+  fetch: FetchFn;
+  port?: number;
+  host?: string;
+  timeoutMs?: number;
+}
+
+/**
+ * True se una qualsiasi risposta HTTP arriva sulla porta router: il processo
+ * e' in ascolto (anche 503 durante il warm-up del grafo HTP).
+ */
+export async function isServerActive(options: ServerProbeOptions): Promise<boolean> {
+  const host = options.host ?? ROUTER_HOST;
+  const port = options.port ?? ROUTER_PORT;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 1_500);
+  try {
+    await options.fetch(`http://${host}:${port}/health`, {
+      signal: controller.signal,
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export interface EnsureServerOptions {
+  fetch: FetchFn;
+  spawn: SpawnFn;
+  runtimeDir: string;
+  serverExe: string;
+  iniPath: string;
+  modelsDir: string;
+  port?: number;
+  host?: string;
+  modelsMax?: number;
+}
+
+export interface EnsureServerResult {
+  started: boolean;
+  pid?: number;
+  reason: string;
+}
+
+/** Avvia il server solo se la porta router non risponde: nessuna interferenza. */
+export async function ensureServer(
+  options: EnsureServerOptions,
+): Promise<EnsureServerResult> {
+  if (await isServerActive(options)) {
+    return {
+      started: false,
+      reason: "llama-server gia' attivo sulla porta router: nessuna interferenza",
+    };
+  }
+  const args = buildRouterArgs(options);
+  const child = options.spawn(options.serverExe, args, {
+    cwd: options.runtimeDir,
+    env: serverEnv(options.runtimeDir),
+    detached: true,
+  });
+  return {
+    started: true,
+    pid: child.pid,
+    reason: "llama-server avviato con ADSP_LIBRARY_PATH sulla directory runtime",
+  };
+}
+
+export interface HexagonPaths {
+  workspaceDir: string;
+  binPath: string;
+  geniexDir: string;
+  geniexExe: string;
+  serverExe: string;
+  modelsDir: string;
+  iniPath: string;
+}
+
+/** Percorsi standard dello stack Hexagon su Windows ARM64. */
+export function defaultPaths(
+  workspaceDir: string,
+  home: string = homedir(),
+  localAppData: string = process.env.LOCALAPPDATA ?? join(home, "AppData", "Local"),
+): HexagonPaths {
+  const binPath = join(home, "llama-cpp", "llama-bin-win-cpu-arm64");
+  const geniexDir = join(localAppData, "GenieX CLI");
+  return {
+    workspaceDir,
+    binPath,
+    geniexDir,
+    geniexExe: join(geniexDir, "geniex.exe"),
+    serverExe: join(binPath, "llama-server.exe"),
+    modelsDir: join(home, ".cache", "geniex", "models"),
+    iniPath: join(workspaceDir, "hexagon-models.ini"),
+  };
+}
