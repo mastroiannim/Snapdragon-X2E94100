@@ -375,8 +375,10 @@ export function createHexagonTools(deps: HexagonToolDeps) {
           .describe("Se true scrive kilo.json nel workspace locale; se false o omesso aggiorna la configurazione globale"),
       },
       async execute(args) {
+        const paths = defaultPaths(deps.workspaceDir);
         const res = await installProviderConfig({
           workspaceDir: args.workspace ? deps.workspaceDir : undefined,
+          iniPath: paths.iniPath,
           readFile: deps.readFile,
         });
         return JSON.stringify(res, null, 2);
