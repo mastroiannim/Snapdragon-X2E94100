@@ -185,6 +185,19 @@ if ($Message -ne "") {
     if ($Pure) {
         $startArgs += "--pure"
     }
-    & $KiloCmd.Source @startArgs
-    exit $LASTEXITCODE
+    $prevTitle = $null
+    try {
+        $prevTitle = $Host.UI.RawUI.WindowTitle
+        $Host.UI.RawUI.WindowTitle = "Hexagon / Kilo Code - Caricamento in corso..."
+    } catch { }
+    Write-Host "Avvio TUI Kilo Code (caricamento plugin e indice progetto, attendere qualche secondo)..." -ForegroundColor Cyan
+    try {
+        & $KiloCmd.Source @startArgs
+        $kiloExit = $LASTEXITCODE
+    } finally {
+        if ($null -ne $prevTitle) {
+            try { $Host.UI.RawUI.WindowTitle = $prevTitle } catch { }
+        }
+    }
+    exit $kiloExit
 }
