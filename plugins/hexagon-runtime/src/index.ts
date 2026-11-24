@@ -16,6 +16,7 @@
  * - tool: hexagon_status, hexagon_sync, hexagon_bench.
  */
 import type { Hooks, Plugin } from "@kilocode/plugin";
+import { syncDiscoveredModelsToIni } from "./discovery.js";
 import { probeHealth, waitForHealth, type HealthResult } from "./health.js";
 import {
   buildHexagonProvider,
@@ -28,6 +29,7 @@ import {
   ensureModelsIni,
   ensureServer,
   parseModelsIni,
+  reloadServerIfStale,
   type EnsureIniResult,
   type EnsureServerResult,
   type ModelsIni,
@@ -86,6 +88,20 @@ export async function bootstrapRuntime(
     exists: deps.exists,
     writeFile: deps.writeFile,
   });
+  if (!ini.generated) {
+    await syncDiscoveredModelsToIni({
+      modelsDir: paths.modelsDir,
+      iniPath: paths.iniPath,
+      workspaceDir: paths.workspaceDir,
+      deps: {
+        listDir: deps.listDir,
+        exists: deps.exists,
+        readFile: deps.readFile,
+        writeFile: deps.writeFile,
+        exec: deps.exec,
+      },
+    }).catch(() => {});
+  }
   const server = await ensureServer({
     fetch: deps.fetch,
     spawn: deps.spawn,
@@ -94,6 +110,19 @@ export async function bootstrapRuntime(
     iniPath: paths.iniPath,
     modelsDir: paths.modelsDir,
   });
+  if (!server.started) {
+    await reloadServerIfStale({
+      fetch: deps.fetch,
+      spawn: deps.spawn,
+      exec: deps.exec,
+      readFile: deps.readFile,
+      sleep: deps.sleep,
+      runtimeDir: paths.binPath,
+      serverExe: paths.serverExe,
+      iniPath: paths.iniPath,
+      modelsDir: paths.modelsDir,
+    }).catch(() => {});
+  }
   const health = await waitForHealth({ fetch: deps.fetch, sleep: deps.sleep, now: deps.now });
   return { sync, ini, server, health };
 }
@@ -175,19 +204,30 @@ export function createHexagonHooks(options: HookOptions): Hooks {
     modelWatcher = startModelWatcherFn({
       modelsDir: paths.modelsDir,
       workspaceDir: paths.workspaceDir,
+      iniPath: paths.iniPath,
+      fetch: deps.fetch,
+      spawn: deps.spawn,
+      runtimeDir: paths.binPath,
+      serverExe: paths.serverExe,
+      sleep: deps.sleep,
       listDir: deps.listDir,
       exists: deps.exists,
       exec: deps.exec,
       readFile: deps.readFile,
       writeFile: deps.writeFile,
       enableAutoBenchmark: true,
+      onModelsDiscovered: (newModels) => {
+        console.log(
+          `[hexagon-runtime] Rilevati e configurati ${newModels.length} nuovi modelli: ${newModels.join(", ")}`,
+        );
+      },
       onQualified: (modelId, success) => {
         if (success) {
           console.log(`[hexagon-runtime] Modello ${modelId} qualificato con successo.`);
         }
       },
     });
-    void modelWatcher.checkNow();
+    void modelWatcher?.checkNow?.();
   };
 
   const stopModelWatcher = (): void => {
@@ -264,6 +304,8 @@ export function createHexagonHooks(options: HookOptions): Hooks {
     tool: createHexagonTools({
       fetch: deps.fetch,
       exec: deps.exec,
+      spawn: deps.spawn,
+      sleep: deps.sleep,
       readFile: deps.readFile,
       writeFile: deps.writeFile,
       listDir: deps.listDir,

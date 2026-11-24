@@ -4,9 +4,10 @@ import {
   inspectGguf,
   isMmprojFile,
   scanModels,
+  syncDiscoveredModelsToIni,
   type GgufMetadata,
 } from "../src/discovery.js";
-import { okExec, recordingExec } from "./helpers.js";
+import { okExec, recordingExec, recordingWriteFile } from "./helpers.js";
 
 describe("discovery.ts — isMmprojFile", () => {
   it("riconosce file di proiezione multimodale", () => {
@@ -337,5 +338,82 @@ describe("scanModels", () => {
 
     expect(models).toHaveLength(1);
     expect(models[0].mmprojPath).toContain("mmproj-customvision-7b-vision-encoder.gguf");
+  });
+});
+
+describe("discovery.ts — syncDiscoveredModelsToIni", () => {
+  it("scopre nuovi modelli da geniex pull e li aggiunge all'INI senza benchmark", async () => {
+    const listDir = vi.fn(async () => [
+      "Ornith-1.5-9B-Q4_0.gguf",
+      "Inkling-2-Mini-UD-Q4_K_M.gguf",
+    ]);
+    const exists = vi.fn(async () => true);
+    const existingIni = `[*]
+flash-attn = on
+
+[Ornith-1.5-9B-Q4_0]
+model = C:/models/Ornith-1.5-9B-Q4_0.gguf
+device = HTP0
+ctx-size = 65536
+`;
+    const storage = new Map<string, string>([["C:/models/hexagon-models.ini", existingIni]]);
+    const readFile = vi.fn(async (p: string) => storage.get(p) ?? "");
+    const { fn: writeFile, calls: writeCalls } = recordingWriteFile();
+
+    const res = await syncDiscoveredModelsToIni({
+      modelsDir: "C:/models",
+      iniPath: "C:/models/hexagon-models.ini",
+      workspaceDir: "C:/workspace",
+      skipInspection: true,
+      deps: {
+        listDir,
+        exists,
+        readFile,
+        writeFile,
+        exec: vi.fn(),
+      },
+    });
+
+    expect(res.iniUpdated).toBe(true);
+    expect(res.addedModels).toEqual(["Inkling-2-Mini-UD-Q4_K_M"]);
+    expect(res.totalModels).toBe(2);
+
+    const updatedIni = writeCalls.find((c) => c.path === "C:/models/hexagon-models.ini")?.content;
+    expect(updatedIni).toBeDefined();
+    expect(updatedIni).toContain("[Inkling-2-Mini-UD-Q4_K_M]");
+    expect(updatedIni).toContain("Inkling-2-Mini-UD-Q4_K_M.gguf");
+    expect(updatedIni).toContain("[Ornith-1.5-9B-Q4_0]");
+  });
+
+  it("se tutti i modelli sono già presenti nell'INI, non scrive nulla", async () => {
+    const listDir = vi.fn(async () => ["Ornith-1.5-9B-Q4_0.gguf"]);
+    const exists = vi.fn(async () => true);
+    const existingIni = `[*]
+flash-attn = on
+
+[Ornith-1.5-9B-Q4_0]
+model = C:/models/Ornith-1.5-9B-Q4_0.gguf
+device = HTP0
+ctx-size = 65536
+`;
+    const readFile = vi.fn(async () => existingIni);
+    const { fn: writeFile, calls: writeCalls } = recordingWriteFile();
+
+    const res = await syncDiscoveredModelsToIni({
+      modelsDir: "C:/models",
+      iniPath: "C:/models/hexagon-models.ini",
+      skipInspection: true,
+      deps: {
+        listDir,
+        exists,
+        readFile,
+        writeFile,
+        exec: vi.fn(),
+      },
+    });
+
+    expect(res.iniUpdated).toBe(false);
+    expect(res.addedModels).toHaveLength(0);
+    expect(writeCalls).toHaveLength(0);
   });
 });

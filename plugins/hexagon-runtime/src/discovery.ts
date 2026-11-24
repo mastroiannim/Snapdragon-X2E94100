@@ -5,9 +5,16 @@
  * multimodali e calcola l'allocazione hardware ottimale (HTP0/GPUOpenCL) per lo Snapdragon X2 Elite.
  */
 import { basename, dirname, join } from "node:path";
+import { installProviderConfig } from "./config.js";
 import { TESTED_CONTEXT_WINDOWS } from "./models.js";
-import { BUNDLED_INSPECT_SCRIPT } from "./process.js";
-import type { ExecFn, ExistsFn, ListDirFn } from "./types.js";
+import { BUNDLED_INSPECT_SCRIPT, parseModelsIni } from "./process.js";
+import type {
+  ExecFn,
+  ExistsFn,
+  ListDirFn,
+  ReadFileFn,
+  WriteFileFn,
+} from "./types.js";
 
 export type ModelStatus = "certified" | "untested" | "incompatible";
 
@@ -279,4 +286,155 @@ export async function scanModels(options: ScanOptions): Promise<DiscoveredModel[
   }
 
   return models;
+}
+
+export interface SyncModelsDeps {
+  listDir: ListDirFn;
+  exists: ExistsFn;
+  readFile: ReadFileFn;
+  writeFile: WriteFileFn;
+  exec: ExecFn;
+}
+
+export interface SyncModelsOptions {
+  modelsDir: string;
+  iniPath: string;
+  workspaceDir?: string;
+  deps: SyncModelsDeps;
+  inspectScript?: string;
+  skipInspection?: boolean;
+}
+
+export interface SyncModelsResult {
+  addedModels: string[];
+  totalModels: number;
+  iniUpdated: boolean;
+}
+
+/**
+ * Sincronizza i modelli scoperti sul disco (.cache/geniex/models) con il file INI
+ * e la configurazione Kilo (kilo.json/kilo.jsonc) calcolando l'allocazione hardware euristica
+ * ottimale senza avviare benchmark pesanti.
+ */
+export async function syncDiscoveredModelsToIni(
+  options: SyncModelsOptions,
+): Promise<SyncModelsResult> {
+  const { modelsDir, iniPath, deps } = options;
+  if (!(await deps.exists(modelsDir))) {
+    return { addedModels: [], totalModels: 0, iniUpdated: false };
+  }
+
+  const discovered = await scanModels({
+    modelsDir,
+    deps: {
+      listDir: deps.listDir,
+      exists: deps.exists,
+      exec: deps.exec,
+    },
+    inspectScript: options.inspectScript,
+    skipInspection: options.skipInspection,
+  });
+
+  let iniText = "";
+  if (await deps.exists(iniPath)) {
+    iniText = await deps.readFile(iniPath).catch(() => "");
+  }
+
+  const parsed = parseModelsIni(iniText);
+  const existingKeys = new Set(Object.keys(parsed.models));
+  const existingFiles = new Set(
+    Object.values(parsed.models).map((m) => basename(m.model).toLowerCase()),
+  );
+
+  const missing = discovered.filter(
+    (m) => !existingKeys.has(m.id) && !existingFiles.has(m.fileName.toLowerCase()),
+  );
+
+  if (missing.length === 0) {
+    return {
+      addedModels: [],
+      totalModels: existingKeys.size,
+      iniUpdated: false,
+    };
+  }
+
+  let baseContent = iniText.trimEnd();
+  if (!baseContent) {
+    baseContent = [
+      "version = 1",
+      "",
+      "# ============================================",
+      "# Configurazione automatica modelli Hexagon",
+      "# ============================================",
+      "",
+      "[*]",
+      "flash-attn = on",
+      "n-gpu-layers = 999",
+      "parallel = 1",
+      "load-mode = mlock",
+      "fit = off",
+      "threads = 12",
+      "threads-batch = 12",
+      "batch-size = 4096",
+      "ubatch-size = 512",
+      "context-shift = true",
+    ].join("\n");
+  }
+
+  const newSections: string[] = [];
+  const added: string[] = [];
+
+  for (const m of missing) {
+    added.push(m.id);
+    const arch = m.metadata?.architecture ?? "gguf";
+    const quant = m.metadata?.quant_name ?? "Q4";
+    newSections.push(
+      `# --- ${m.id} (${m.sizeGb.toFixed(2)} GB, ${arch}, ${quant}) ---`,
+      `# Strategia: ${m.strategy}`,
+      `[${m.id}]`,
+      `model = ${m.filePath}`,
+      `device = ${m.device}`,
+      ...(m.tensorSplit ? [`tensor-split = ${m.tensorSplit}`] : []),
+      `ctx-size = ${m.contextWindow}`,
+      "",
+    );
+  }
+
+  const updatedIniText = baseContent + "\n\n" + newSections.join("\n");
+  await deps.writeFile(iniPath, updatedIniText);
+
+  // Sincronizza anche %LOCALAPPDATA%/Hexagon/hexagon-models.ini se disponibile
+  const localAppData = process.env.LOCALAPPDATA;
+  if (localAppData) {
+    const userIni = join(localAppData, "Hexagon", "hexagon-models.ini");
+    if (userIni.toLowerCase() !== iniPath.toLowerCase()) {
+      await deps.writeFile(userIni, updatedIniText).catch(() => {});
+    }
+  }
+
+  // Sincronizza il workspace se presente un INI locale differente
+  if (options.workspaceDir) {
+    const wsIni = join(options.workspaceDir, "hexagon-models.ini");
+    if (wsIni.toLowerCase() !== iniPath.toLowerCase() && (await deps.exists(wsIni))) {
+      await deps.writeFile(wsIni, updatedIniText).catch(() => {});
+    }
+  }
+
+  // Aggiorna configurazione Kilo provider
+  try {
+    await installProviderConfig({
+      workspaceDir: options.workspaceDir,
+      iniPath,
+      readFile: deps.readFile,
+      writeFile: deps.writeFile,
+    });
+  } catch {
+    /* fallback se la directory .config/kilo non e' accessibile */
+  }
+
+  return {
+    addedModels: added,
+    totalModels: existingKeys.size + added.length,
+    iniUpdated: true,
+  };
 }

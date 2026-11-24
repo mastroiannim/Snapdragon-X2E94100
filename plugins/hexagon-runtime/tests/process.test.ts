@@ -6,14 +6,17 @@ import {
   defaultPaths,
   ensureModelsIni,
   ensureServer,
+  getLoadedModels,
   isServerActive,
   parseJsonPayload,
   parseModelsIni,
   probeRouter,
+  reloadServerIfStale,
   resolveIniPath,
   ROUTER_HOST,
   ROUTER_PORT,
   serverEnv,
+  stopServer,
 } from "../src/process.js";
 import {
   fakeResponse,
@@ -441,5 +444,97 @@ describe("ensureModelsIni: zero-setup INI", () => {
       writeFile,
     });
     expect(result).toEqual({ generated: true, modelCount: 0 });
+  });
+});
+
+describe("getLoadedModels e reloadServerIfStale", () => {
+  it("getLoadedModels restituisce gli id da /v1/models", async () => {
+    const { fn: fetch } = recordingFetch((call) =>
+      call.url.endsWith("/v1/models")
+        ? fakeResponse(200, { data: [{ id: "model-a" }, { id: "model-b" }] })
+        : fakeResponse(503),
+    );
+    const models = await getLoadedModels({ fetch });
+    expect(models).toEqual(["model-a", "model-b"]);
+  });
+
+  it("stopServer esegue taskkill su Windows o pkill su Unix", async () => {
+    const { fn: exec, calls } = recordingExec(() => okExec(""));
+    const success = await stopServer({ exec });
+    expect(success).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args).toContain("llama-server.exe");
+  });
+
+  it("reloadServerIfStale: non riavvia se tutti i modelli configurati sono già caricati", async () => {
+    const iniContent = `[model-a]
+model = C:/models/model-a.gguf
+device = HTP0
+`;
+    const { fn: fetch } = recordingFetch((call) =>
+      call.url.endsWith("/v1/models")
+        ? fakeResponse(200, { data: [{ id: "model-a" }] })
+        : fakeResponse(200, { status: "ok" }),
+    );
+    const { fn: spawn, calls: spawnCalls } = recordingSpawn();
+    const { fn: exec, calls: execCalls } = recordingExec(() => okExec(""));
+
+    const result = await reloadServerIfStale({
+      fetch,
+      spawn,
+      exec,
+      readFile: async () => iniContent,
+      runtimeDir: "C:/bin",
+      serverExe: "C:/bin/llama-server.exe",
+      iniPath: "C:/models/hexagon-models.ini",
+      modelsDir: "C:/models",
+    });
+
+    expect(result.reloaded).toBe(false);
+    expect(result.missingModels).toHaveLength(0);
+    expect(execCalls).toHaveLength(0);
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("reloadServerIfStale: riavvia il server quando rileva modelli mancanti", async () => {
+    const iniContent = `[model-a]
+model = C:/models/model-a.gguf
+device = HTP0
+
+[Inkling-2-Mini-UD-Q4_K_M]
+model = C:/models/Inkling-2-Mini-UD-Q4_K_M.gguf
+device = HTP0,GPUOpenCL
+`;
+    let killed = false;
+    const { fn: fetch } = recordingFetch((call) => {
+      if (killed) {
+        throw new Error("ECONNREFUSED");
+      }
+      return call.url.endsWith("/v1/models")
+        ? fakeResponse(200, { data: [{ id: "model-a" }] })
+        : fakeResponse(200, { status: "ok" });
+    });
+    const { fn: spawn, calls: spawnCalls } = recordingSpawn(9999);
+    const { fn: exec, calls: execCalls } = recordingExec(() => {
+      killed = true;
+      return okExec("");
+    });
+
+    const result = await reloadServerIfStale({
+      fetch,
+      spawn,
+      exec,
+      readFile: async () => iniContent,
+      runtimeDir: "C:/bin",
+      serverExe: "C:/bin/llama-server.exe",
+      iniPath: "C:/models/hexagon-models.ini",
+      modelsDir: "C:/models",
+    });
+
+    expect(result.reloaded).toBe(true);
+    expect(result.missingModels).toEqual(["Inkling-2-Mini-UD-Q4_K_M"]);
+    expect(execCalls).toHaveLength(1);
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0].command).toContain("llama-server.exe");
   });
 });

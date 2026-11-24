@@ -9,11 +9,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { tool } from "@kilocode/plugin";
 import { installProviderConfig } from "./config.js";
-import { scanModels } from "./discovery.js";
+import {
+  scanModels,
+  syncDiscoveredModelsToIni,
+  type SyncModelsResult,
+} from "./discovery.js";
 import { nodeExists, nodeListDir, nodeNow } from "./os.js";
 import {
   BUNDLED_BENCH_SCRIPT,
   defaultPaths,
+  reloadServerIfStale,
   ROUTER_HOST,
   ROUTER_PORT,
 } from "./process.js";
@@ -26,6 +31,8 @@ import type {
   ListDirFn,
   NowFn,
   ReadFileFn,
+  SleepFn,
+  SpawnFn,
   WriteFileFn,
 } from "./types.js";
 
@@ -247,6 +254,8 @@ export interface HexagonToolDeps {
   writeFile?: WriteFileFn;
   listDir?: ListDirFn;
   exists?: ExistsFn;
+  spawn?: SpawnFn;
+  sleep?: SleepFn;
   modelsDir?: string;
   workspaceDir: string;
   sync: (options: { force?: boolean }) => Promise<SyncOutcome>;
@@ -267,10 +276,54 @@ export function createHexagonTools(deps: HexagonToolDeps) {
     hexagon_sync: tool({
       description:
         "Forza il riallineamento del runtime llama.cpp ARM64 al commit GenieX " +
-        "eseguendo sync-geniex.ps1 -Apply -NoStopServer.",
+        "eseguendo sync-geniex.ps1 -Apply -NoStopServer ed esegue la sincronizzazione " +
+        "dei modelli GGUF rilevati con il router locale.",
       args: {},
       async execute() {
-        return JSON.stringify(await deps.sync({ force: true }), null, 2);
+        const syncRes = await deps.sync({ force: true });
+        const paths = defaultPaths(deps.workspaceDir);
+        let catalogRes: SyncModelsResult = { addedModels: [], totalModels: 0, iniUpdated: false };
+        let routerReloaded = false;
+        if (deps.writeFile && deps.listDir && deps.exists) {
+          catalogRes = await syncDiscoveredModelsToIni({
+            modelsDir: deps.modelsDir ?? paths.modelsDir,
+            iniPath: paths.iniPath,
+            workspaceDir: deps.workspaceDir,
+            deps: {
+              listDir: deps.listDir,
+              exists: deps.exists,
+              readFile: deps.readFile,
+              writeFile: deps.writeFile,
+              exec: deps.exec,
+            },
+          }).catch(() => ({ addedModels: [], totalModels: 0, iniUpdated: false }));
+
+          if (catalogRes.addedModels.length > 0 && deps.spawn) {
+            const reload = await reloadServerIfStale({
+              fetch: deps.fetch,
+              spawn: deps.spawn,
+              exec: deps.exec,
+              readFile: deps.readFile,
+              sleep: deps.sleep,
+              runtimeDir: paths.binPath,
+              serverExe: paths.serverExe,
+              iniPath: paths.iniPath,
+              modelsDir: deps.modelsDir ?? paths.modelsDir,
+            }).catch(() => ({ reloaded: false }));
+            routerReloaded = reload.reloaded;
+          }
+        }
+        return JSON.stringify(
+          {
+            ...syncRes,
+            catalog: {
+              ...catalogRes,
+              routerReloaded,
+            },
+          },
+          null,
+          2,
+        );
       },
     }),
     hexagon_bench: tool({

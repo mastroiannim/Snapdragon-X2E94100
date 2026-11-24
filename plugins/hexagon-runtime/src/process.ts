@@ -10,7 +10,14 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExecFn, ExistsFn, FetchFn, SpawnFn, WriteFileFn } from "./types.js";
+import type {
+  ExecFn,
+  ExistsFn,
+  FetchFn,
+  ReadFileFn,
+  SpawnFn,
+  WriteFileFn,
+} from "./types.js";
 
 export const BUNDLED_ASSETS_DIR = fileURLToPath(new URL("../assets", import.meta.url));
 export const BUNDLED_INI_PATH = join(BUNDLED_ASSETS_DIR, "hexagon-models.ini");
@@ -336,6 +343,119 @@ export async function ensureServer(
     started: true,
     pid: child.pid,
     reason: "llama-server avviato con ADSP_LIBRARY_PATH sulla directory runtime",
+  };
+}
+
+export interface StopServerOptions {
+  exec: ExecFn;
+}
+
+/**
+ * Termina i processi llama-server.exe attivi.
+ */
+export async function stopServer(options: StopServerOptions): Promise<boolean> {
+  const isWin = process.platform === "win32";
+  const cmd = isWin ? "taskkill" : "pkill";
+  const args = isWin ? ["/F", "/IM", "llama-server.exe"] : ["-f", "llama-server"];
+  try {
+    const res = await options.exec(cmd, args);
+    return res.code === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Recupera l'elenco dei model ID correntemente serviti dall'endpoint /v1/models del router.
+ */
+export async function getLoadedModels(
+  options: ServerProbeOptions,
+): Promise<string[]> {
+  const host = options.host ?? ROUTER_HOST;
+  const port = options.port ?? ROUTER_PORT;
+  try {
+    const res = await fetchWithTimeout(options, `http://${host}:${port}/v1/models`);
+    if (res.ok) {
+      const body = (await res.json().catch(() => null)) as
+        | { data?: Array<{ id?: string }> }
+        | null;
+      if (body && Array.isArray(body.data)) {
+        return body.data.map((m) => m.id ?? "").filter(Boolean);
+      }
+    }
+  } catch {
+    /* router non risponde o errore di rete */
+  }
+  return [];
+}
+
+export interface ReloadIfStaleOptions extends EnsureServerOptions {
+  exec: ExecFn;
+  readFile?: ReadFileFn;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export interface ReloadIfStaleResult {
+  reloaded: boolean;
+  reason: string;
+  missingModels: string[];
+}
+
+/**
+ * Verifica se il router llama-server attivo e' disallineato rispetto ai modelli
+ * definiti in hexagon-models.ini (ad es. dopo un geniex pull). Se rileva modelli mancanti,
+ * arresta il vecchio processo e riavvia il server con il preset aggiornato.
+ */
+export async function reloadServerIfStale(
+  options: ReloadIfStaleOptions,
+): Promise<ReloadIfStaleResult> {
+  const probe = await probeRouter(options);
+  if (!probe.listening || !probe.identified) {
+    const startRes = await ensureServer(options);
+    return {
+      reloaded: startRes.started,
+      reason: startRes.reason,
+      missingModels: [],
+    };
+  }
+
+  let iniText = "";
+  if (options.readFile) {
+    try {
+      iniText = await options.readFile(options.iniPath);
+    } catch {
+      return { reloaded: false, reason: "Impossibile leggere iniPath", missingModels: [] };
+    }
+  }
+  const ini = parseModelsIni(iniText);
+  const configuredModels = Object.keys(ini.models);
+  if (configuredModels.length === 0) {
+    return { reloaded: false, reason: "Nessun modello configurato nell'INI", missingModels: [] };
+  }
+
+  const loadedModels = await getLoadedModels(options);
+  const loadedSet = new Set(loadedModels);
+  const missingModels = configuredModels.filter((id) => !loadedSet.has(id));
+
+  if (missingModels.length === 0) {
+    return {
+      reloaded: false,
+      reason: "Tutti i modelli configurati sono già caricati nel router",
+      missingModels: [],
+    };
+  }
+
+  // Modelli mancanti: riavvio pulito
+  await stopServer({ exec: options.exec });
+  if (options.sleep) {
+    await options.sleep(500);
+  }
+
+  const res = await ensureServer(options);
+  return {
+    reloaded: true,
+    reason: `llama-server riavviato per caricare ${missingModels.length} modelli mancanti: ${missingModels.join(", ")}`,
+    missingModels,
   };
 }
 
