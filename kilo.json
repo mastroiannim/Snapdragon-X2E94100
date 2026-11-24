@@ -61,13 +61,6 @@
             "output": 16384
           }
         },
-        "Inkling-2-Mini-UD-Q4_K_M": {
-          "name": "Inkling-2-Mini-UD-Q4_K_M (HTP0,GPUOpenCL)",
-          "limit": {
-            "context": 131072,
-            "output": 16384
-          }
-        },
         "LFM2.5-24B-A2B-QAD-Q4_0": {
           "name": "LFM2.5-24B-A2B-QAD-Q4_0 (HTP0)",
           "limit": {

@@ -75,6 +75,20 @@ export function isMmprojFile(fileName: string): boolean {
 }
 
 /**
+ * Verifica se l'architettura GGUF e' supportata dal runtime llama.cpp attualmente installato
+ * (Snapdragon X2 Elite fork Qualcomm GenieX commit 93cf736).
+ */
+export function isArchitectureSupported(architecture?: string): boolean {
+  if (!architecture) return true;
+  const lower = architecture.toLowerCase().trim();
+  // inkling2_loop e' un'architettura looped transformer introdotta in PR upstream successiva a 93cf736
+  if (lower === "inkling2_loop" || lower.startsWith("inkling")) {
+    return false;
+  }
+  return true;
+}
+
+/**
  * Calcola l'allocazione hardware ottimale basata sui metadati GGUF
  * e sui vincoli hardware dello Snapdragon X2 Elite (limite DMA FastRPC < 1 GiB).
  */
@@ -270,16 +284,26 @@ export async function scanModels(options: ScanOptions): Promise<DiscoveredModel[
       };
     }
 
+    const isSupported = isArchitectureSupported(meta?.architecture);
+    const status: ModelStatus = !isSupported
+      ? "incompatible"
+      : isCertified
+        ? "certified"
+        : "untested";
+    const strategy = !isSupported
+      ? `Incompatibile: architettura '${meta?.architecture ?? "sconosciuta"}' non supportata dal runtime llama.cpp installato`
+      : config.strategy;
+
     models.push({
       id,
       fileName,
       filePath,
       sizeGb: meta ? meta.size_gb : 0,
-      status: isCertified ? "certified" : "untested",
+      status,
       device: config.device,
       tensorSplit: config.tensorSplit,
       contextWindow: isCertified ? (TESTED_CONTEXT_WINDOWS[id] ?? config.contextSize) : config.contextSize,
-      strategy: config.strategy,
+      strategy,
       metadata: meta,
       mmprojPath,
     });
@@ -314,7 +338,7 @@ export interface SyncModelsResult {
 /**
  * Sincronizza i modelli scoperti sul disco (.cache/geniex/models) con il file INI
  * e la configurazione Kilo (kilo.json/kilo.jsonc) calcolando l'allocazione hardware euristica
- * ottimale senza avviare benchmark pesanti.
+ * ottimale senza avviare benchmark pesanti. Filtra e rimuove i modelli con architetture incompatibili.
  */
 export async function syncDiscoveredModelsToIni(
   options: SyncModelsOptions,
@@ -346,11 +370,61 @@ export async function syncDiscoveredModelsToIni(
     Object.values(parsed.models).map((m) => basename(m.model).toLowerCase()),
   );
 
+  // Rimuove eventuali modelli con architettura incompatibile precedentemente salvati nell'INI
+  const incompatibleIds = new Set(
+    discovered.filter((m) => m.status === "incompatible").map((m) => m.id),
+  );
+  let shouldRewriteExisting = false;
+  let cleanedIniText = iniText;
+  for (const incId of incompatibleIds) {
+    if (existingKeys.has(incId)) {
+      const pattern = new RegExp(
+        `(?:#[^\\r\\n]*\\r?\\n)*\\[${incId.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&")}\\][\\s\\S]*?(?=(?:\\r?\\n\\[)|$)`,
+        "g",
+      );
+      cleanedIniText = cleanedIniText.replace(pattern, "").trimEnd();
+      existingKeys.delete(incId);
+      shouldRewriteExisting = true;
+    }
+  }
+
   const missing = discovered.filter(
-    (m) => !existingKeys.has(m.id) && !existingFiles.has(m.fileName.toLowerCase()),
+    (m) =>
+      m.status !== "incompatible" &&
+      !existingKeys.has(m.id) &&
+      !existingFiles.has(m.fileName.toLowerCase()),
   );
 
   if (missing.length === 0) {
+    if (shouldRewriteExisting) {
+      await deps.writeFile(iniPath, cleanedIniText);
+      const localAppData = process.env.LOCALAPPDATA;
+      if (localAppData) {
+        const userIni = join(localAppData, "Hexagon", "hexagon-models.ini");
+        if (userIni.toLowerCase() !== iniPath.toLowerCase()) {
+          await deps.writeFile(userIni, cleanedIniText).catch(() => {});
+        }
+      }
+      if (options.workspaceDir) {
+        const wsIni = join(options.workspaceDir, "hexagon-models.ini");
+        if (wsIni.toLowerCase() !== iniPath.toLowerCase() && (await deps.exists(wsIni))) {
+          await deps.writeFile(wsIni, cleanedIniText).catch(() => {});
+        }
+      }
+      try {
+        await installProviderConfig({
+          workspaceDir: options.workspaceDir,
+          iniPath,
+          readFile: deps.readFile,
+          writeFile: deps.writeFile,
+        });
+      } catch {}
+      return {
+        addedModels: [],
+        totalModels: existingKeys.size,
+        iniUpdated: true,
+      };
+    }
     return {
       addedModels: [],
       totalModels: existingKeys.size,
@@ -358,7 +432,7 @@ export async function syncDiscoveredModelsToIni(
     };
   }
 
-  let baseContent = iniText.trimEnd();
+  let baseContent = cleanedIniText.trimEnd();
   if (!baseContent) {
     baseContent = [
       "version = 1",
