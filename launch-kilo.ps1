@@ -191,8 +191,17 @@ if ($Message -ne "") {
         $Host.UI.RawUI.WindowTitle = "Hexagon / Kilo Code - Caricamento in corso..."
     } catch { }
     Write-Host "Avvio TUI Kilo Code (caricamento plugin e indice progetto, attendere qualche secondo)..." -ForegroundColor Cyan
+
+    # kilo.cmd esegue `title %COMSPEC%` prima di lanciare node, azzerando il titolo finestra.
+    # Se disponibile, invochiamo direttamente l'entrypoint Node di @kilocode/cli.
+    $kiloEntry = Join-Path (Split-Path -Parent $KiloCmd.Source) "node_modules\@kilocode\cli\bin\kilo"
+    $nodeCmd = Get-Command "node" -ErrorAction SilentlyContinue | Select-Object -First 1
     try {
-        & $KiloCmd.Source @startArgs
+        if ($nodeCmd -and (Test-Path -LiteralPath $kiloEntry -PathType Leaf)) {
+            & $nodeCmd.Source $kiloEntry @startArgs
+        } else {
+            & $KiloCmd.Source @startArgs
+        }
         $kiloExit = $LASTEXITCODE
     } finally {
         if ($null -ne $prevTitle) {
