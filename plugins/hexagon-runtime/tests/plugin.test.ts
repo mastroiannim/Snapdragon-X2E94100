@@ -66,6 +66,7 @@ describe("descrittore e ingresso del plugin", () => {
       "hexagon_bench",
       "hexagon_models",
       "hexagon_qualify",
+      "hexagon_restart",
       "hexagon_setup",
       "hexagon_status",
       "hexagon_sync",

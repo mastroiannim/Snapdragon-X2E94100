@@ -414,6 +414,43 @@ ctx-size = 65536
 
     expect(res.iniUpdated).toBe(false);
     expect(res.addedModels).toHaveLength(0);
+    expect(res.removedModels).toHaveLength(0);
     expect(writeCalls).toHaveLength(0);
+  });
+
+  it("rimuove dall'INI i modelli eliminati da disco", async () => {
+    const listDir = vi.fn(async () => ["Ornith-1.5-9B-Q4_0.gguf"]);
+    const exists = vi.fn(async (p: string) => !p.includes("Deleted-Model"));
+    const existingIni = `[*]
+flash-attn = on
+
+# --- Ornith-1.5-9B-Q4_0 ---
+[Ornith-1.5-9B-Q4_0]
+model = C:/models/Ornith-1.5-9B-Q4_0.gguf
+device = HTP0
+ctx-size = 65536
+
+# --- Deleted-Model ---
+[Deleted-Model]
+model = C:/models/Deleted-Model.gguf
+device = HTP0
+ctx-size = 32768
+`;
+    const readFile = vi.fn(async () => existingIni);
+    const { fn: writeFile, calls: writeCalls } = recordingWriteFile();
+
+    const res = await syncDiscoveredModelsToIni({
+      modelsDir: "C:/models",
+      iniPath: "C:/models/hexagon-models.ini",
+      skipInspection: true,
+      deps: { listDir, exists, readFile, writeFile, exec: vi.fn() },
+    });
+
+    expect(res.iniUpdated).toBe(true);
+    expect(res.removedModels).toEqual(["Deleted-Model"]);
+    expect(res.totalModels).toBe(1);
+    const updatedIni = writeCalls.find((c) => c.path === "C:/models/hexagon-models.ini")?.content;
+    expect(updatedIni).toContain("[Ornith-1.5-9B-Q4_0]");
+    expect(updatedIni).not.toContain("[Deleted-Model]");
   });
 });

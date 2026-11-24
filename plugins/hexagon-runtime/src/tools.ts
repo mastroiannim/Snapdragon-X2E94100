@@ -14,11 +14,12 @@ import {
   syncDiscoveredModelsToIni,
   type SyncModelsResult,
 } from "./discovery.js";
-import { nodeExists, nodeListDir, nodeNow } from "./os.js";
+import { nodeExists, nodeListDir, nodeNow, nodeSpawn } from "./os.js";
 import {
   BUNDLED_BENCH_SCRIPT,
   defaultPaths,
   reloadServerIfStale,
+  restartServer,
   ROUTER_HOST,
   ROUTER_PORT,
 } from "./process.js";
@@ -293,7 +294,12 @@ export function createHexagonTools(deps: HexagonToolDeps) {
       async execute() {
         const syncRes = await deps.sync({ force: true });
         const paths = defaultPaths(deps.workspaceDir);
-        let catalogRes: SyncModelsResult = { addedModels: [], totalModels: 0, iniUpdated: false };
+        let catalogRes: SyncModelsResult = {
+          addedModels: [],
+          removedModels: [],
+          totalModels: 0,
+          iniUpdated: false,
+        };
         let routerReloaded = false;
         if (deps.writeFile && deps.listDir && deps.exists) {
           catalogRes = await syncDiscoveredModelsToIni({
@@ -307,9 +313,14 @@ export function createHexagonTools(deps: HexagonToolDeps) {
               writeFile: deps.writeFile,
               exec: deps.exec,
             },
-          }).catch(() => ({ addedModels: [], totalModels: 0, iniUpdated: false }));
+          }).catch(() => ({
+            addedModels: [],
+            removedModels: [],
+            totalModels: 0,
+            iniUpdated: false,
+          }));
 
-          if (catalogRes.addedModels.length > 0 && deps.spawn) {
+          if (deps.spawn) {
             const reload = await reloadServerIfStale({
               fetch: deps.fetch,
               spawn: deps.spawn,
@@ -343,6 +354,26 @@ export function createHexagonTools(deps: HexagonToolDeps) {
           null,
           2,
         );
+      },
+    }),
+    hexagon_restart: tool({
+      description:
+        "Arresta e riavvia in modo deterministico il router llama-server su 127.0.0.1:18803 " +
+        "ricaricando hexagon-models.ini e verificando /health al termine.",
+      args: {},
+      async execute() {
+        const paths = defaultPaths(deps.workspaceDir);
+        const res = await restartServer({
+          fetch: deps.fetch,
+          spawn: deps.spawn ?? nodeSpawn,
+          exec: deps.exec,
+          sleep: deps.sleep,
+          runtimeDir: paths.binPath,
+          serverExe: paths.serverExe,
+          iniPath: paths.iniPath,
+          modelsDir: deps.modelsDir ?? paths.modelsDir,
+        });
+        return JSON.stringify(res, null, 2);
       },
     }),
     hexagon_bench: tool({

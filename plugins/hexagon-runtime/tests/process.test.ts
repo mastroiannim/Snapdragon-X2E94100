@@ -13,6 +13,7 @@ import {
   probeRouter,
   reloadServerIfStale,
   resolveIniPath,
+  restartServer,
   ROUTER_HOST,
   ROUTER_PORT,
   serverEnv,
@@ -536,5 +537,78 @@ device = HTP0,GPUOpenCL
     expect(execCalls).toHaveLength(1);
     expect(spawnCalls).toHaveLength(1);
     expect(spawnCalls[0].command).toContain("llama-server.exe");
+  });
+
+  it("reloadServerIfStale: riavvia il server quando sul router restano modelli rimossi dall'INI", async () => {
+    const iniContent = `[model-a]
+model = C:/models/model-a.gguf
+device = HTP0
+`;
+    let killed = false;
+    const { fn: fetch } = recordingFetch((call) => {
+      if (killed) throw new Error("ECONNREFUSED");
+      return call.url.endsWith("/v1/models")
+        ? fakeResponse(200, { data: [{ id: "model-a" }, { id: "removed-model" }] })
+        : fakeResponse(200, { status: "ok" });
+    });
+    const { fn: spawn, calls: spawnCalls } = recordingSpawn(8888);
+    const { fn: exec, calls: execCalls } = recordingExec(() => {
+      killed = true;
+      return okExec("");
+    });
+
+    const result = await reloadServerIfStale({
+      fetch,
+      spawn,
+      exec,
+      readFile: async () => iniContent,
+      runtimeDir: "C:/bin",
+      serverExe: "C:/bin/llama-server.exe",
+      iniPath: "C:/models/hexagon-models.ini",
+      modelsDir: "C:/models",
+    });
+
+    expect(result.reloaded).toBe(true);
+    expect(result.staleModels).toEqual(["removed-model"]);
+    expect(execCalls).toHaveLength(1);
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  it("restartServer: arresta, riavvia, attende /health e legge /v1/models", async () => {
+    let killed = false;
+    let spawned = false;
+    const { fn: fetch } = recordingFetch((call) => {
+      if (killed && !spawned) throw new Error("ECONNREFUSED");
+      return call.url.endsWith("/v1/models")
+        ? fakeResponse(200, { data: [{ id: "model-a" }] })
+        : fakeResponse(200, { status: "ok" });
+    });
+    const { fn: spawn } = recordingSpawn(7777);
+    const spawnWrapper: typeof spawn = (...args) => {
+      spawned = true;
+      return spawn(...args);
+    };
+    const { fn: exec } = recordingExec(() => {
+      killed = true;
+      return okExec("");
+    });
+
+    const result = await restartServer({
+      fetch,
+      spawn: spawnWrapper,
+      exec,
+      sleep: async () => {},
+      runtimeDir: "C:/bin",
+      serverExe: "C:/bin/llama-server.exe",
+      iniPath: "C:/models/hexagon-models.ini",
+      modelsDir: "C:/models",
+    });
+
+    expect(result.stopped).toBe(true);
+    expect(result.started).toBe(true);
+    expect(result.restarted).toBe(true);
+    expect(result.pid).toBe(7777);
+    expect(result.health.ready).toBe(true);
+    expect(result.loadedModels).toEqual(["model-a"]);
   });
 });

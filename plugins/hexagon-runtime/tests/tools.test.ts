@@ -10,7 +10,7 @@ import {
 } from "../src/tools.js";
 import { BUNDLED_BENCH_SCRIPT } from "../src/process.js";
 import type { SyncOutcome } from "../src/sync.js";
-import { fakeResponse, okExec, recordingExec, recordingFetch } from "./helpers.js";
+import { fakeResponse, okExec, recordingExec, recordingFetch, recordingSpawn } from "./helpers.js";
 
 const BENCH_MARKDOWN = `# Benchmark & PMIC Energy Report (Auto-Generated)
 
@@ -316,6 +316,7 @@ describe("createHexagonTools", () => {
       "hexagon_bench",
       "hexagon_models",
       "hexagon_qualify",
+      "hexagon_restart",
       "hexagon_setup",
       "hexagon_status",
       "hexagon_sync",
@@ -448,11 +449,43 @@ describe("createHexagonTools", () => {
     expect(parsedErr.runtime.error).toContain("check fallito");
   });
 
+  it("hexagon_restart: arresta, riavvia e restituisce stato health/modelli", async () => {
+    let killed = false;
+    let spawned = false;
+    const { fn: fetch } = recordingFetch((call) => {
+      if (killed && !spawned) throw new Error("ECONNREFUSED");
+      return call.url.endsWith("/v1/models")
+        ? fakeResponse(200, { data: [{ id: "Ornith-1.5-9B-Q4_0" }] })
+        : fakeResponse(200, { status: "ok" });
+    });
+    const { fn: exec } = recordingExec(() => {
+      killed = true;
+      return okExec("");
+    });
+    const { fn: spawn } = recordingSpawn(5555);
+    const { deps } = makeDeps();
+    const tools = createHexagonTools({
+      ...deps,
+      fetch,
+      exec,
+      sleep: async () => {},
+      spawn: (...args) => {
+        spawned = true;
+        return spawn(...args);
+      },
+    });
+    const parsed = JSON.parse(await tools.hexagon_restart.execute({}, undefined as never));
+    expect(parsed.restarted).toBe(true);
+    expect(parsed.health.ready).toBe(true);
+    expect(parsed.loadedModels).toEqual(["Ornith-1.5-9B-Q4_0"]);
+  });
+
   it("descrizioni dei tool presenti", () => {
     const { deps } = makeDeps();
     const tools = createHexagonTools(deps);
     expect(tools.hexagon_status.description).toContain("Snapdragon");
     expect(tools.hexagon_sync.description).toContain("riallineamento atomico");
+    expect(tools.hexagon_restart.description).toContain("riavvia");
     expect(tools.hexagon_bench.description).toContain("token/s");
     expect(tools.hexagon_setup.description).toContain("kilo.json");
     expect(tools.hexagon_models.description).toContain("Elenca tutti i modelli GGUF");

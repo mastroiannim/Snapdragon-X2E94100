@@ -10,11 +10,14 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { waitForHealth, type HealthResult } from "./health.js";
 import type {
   ExecFn,
   ExistsFn,
   FetchFn,
+  NowFn,
   ReadFileFn,
+  SleepFn,
   SpawnFn,
   WriteFileFn,
 } from "./types.js";
@@ -330,7 +333,7 @@ export async function ensureServer(
   if (probe.listening) {
     throw new Error(
       `Porta ${options.port ?? ROUTER_PORT} occupata da un processo non identificato ` +
-        "come llama-server: avvio annullato per non interferire.",
+      "come llama-server: avvio annullato per non interferire.",
     );
   }
   const args = buildRouterArgs(options);
@@ -392,18 +395,64 @@ export async function getLoadedModels(
 export interface ReloadIfStaleOptions extends EnsureServerOptions {
   exec: ExecFn;
   readFile?: ReadFileFn;
-  sleep?: (ms: number) => Promise<void>;
+  sleep?: SleepFn;
 }
 
 export interface ReloadIfStaleResult {
   reloaded: boolean;
   reason: string;
   missingModels: string[];
+  staleModels?: string[];
+}
+
+export interface RestartServerOptions extends EnsureServerOptions {
+  exec: ExecFn;
+  sleep?: SleepFn;
+  now?: NowFn;
+}
+
+export interface RestartServerResult {
+  restarted: boolean;
+  stopped: boolean;
+  started: boolean;
+  pid?: number;
+  reason: string;
+  health: HealthResult;
+  loadedModels: string[];
+}
+
+/**
+ * Riavvia in modo deterministico il router llama-server (stop -> breve pausa ->
+ * avvio -> attesa /health -> lettura /v1/models).
+ */
+export async function restartServer(
+  options: RestartServerOptions,
+): Promise<RestartServerResult> {
+  const stopped = await stopServer({ exec: options.exec });
+  if (options.sleep) {
+    await options.sleep(500);
+  }
+  const startRes = await ensureServer(options);
+  const health = await waitForHealth({
+    fetch: options.fetch,
+    sleep: options.sleep,
+    now: options.now,
+  }).catch(() => ({ ready: false, attempts: 0, latencyMs: 0 }));
+  const loadedModels = health.ready ? await getLoadedModels(options) : [];
+  return {
+    restarted: startRes.started,
+    stopped,
+    started: startRes.started,
+    ...(startRes.pid !== undefined ? { pid: startRes.pid } : {}),
+    reason: startRes.reason,
+    health,
+    loadedModels,
+  };
 }
 
 /**
  * Verifica se il router llama-server attivo e' disallineato rispetto ai modelli
- * definiti in hexagon-models.ini (ad es. dopo un geniex pull). Se rileva modelli mancanti,
+ * definiti in hexagon-models.ini (modelli aggiunti o rimossi). Se rileva differenze,
  * arresta il vecchio processo e riavvia il server con il preset aggiornato.
  */
 export async function reloadServerIfStale(
@@ -416,6 +465,7 @@ export async function reloadServerIfStale(
       reloaded: startRes.started,
       reason: startRes.reason,
       missingModels: [],
+      staleModels: [],
     };
   }
 
@@ -424,38 +474,45 @@ export async function reloadServerIfStale(
     try {
       iniText = await options.readFile(options.iniPath);
     } catch {
-      return { reloaded: false, reason: "Impossibile leggere iniPath", missingModels: [] };
+      return { reloaded: false, reason: "Impossibile leggere iniPath", missingModels: [], staleModels: [] };
     }
   }
   const ini = parseModelsIni(iniText);
   const configuredModels = Object.keys(ini.models);
   if (configuredModels.length === 0) {
-    return { reloaded: false, reason: "Nessun modello configurato nell'INI", missingModels: [] };
+    return { reloaded: false, reason: "Nessun modello configurato nell'INI", missingModels: [], staleModels: [] };
   }
 
   const loadedModels = await getLoadedModels(options);
   const loadedSet = new Set(loadedModels);
+  const configuredSet = new Set(configuredModels);
   const missingModels = configuredModels.filter((id) => !loadedSet.has(id));
+  const staleModels = loadedModels.filter((id) => !configuredSet.has(id));
 
-  if (missingModels.length === 0) {
+  if (missingModels.length === 0 && staleModels.length === 0) {
     return {
       reloaded: false,
-      reason: "Tutti i modelli configurati sono già caricati nel router",
+      reason: "Tutti i modelli configurati sono già allineati sul router",
       missingModels: [],
+      staleModels: [],
     };
   }
 
-  // Modelli mancanti: riavvio pulito
+  // Modelli aggiunti o rimossi: riavvio pulito
   await stopServer({ exec: options.exec });
   if (options.sleep) {
     await options.sleep(500);
   }
 
-  const res = await ensureServer(options);
+  await ensureServer(options);
+  const parts: string[] = [];
+  if (missingModels.length > 0) parts.push(`${missingModels.length} mancanti (${missingModels.join(", ")})`);
+  if (staleModels.length > 0) parts.push(`${staleModels.length} rimossi (${staleModels.join(", ")})`);
   return {
     reloaded: true,
-    reason: `llama-server riavviato per caricare ${missingModels.length} modelli mancanti: ${missingModels.join(", ")}`,
+    reason: `llama-server riavviato per riallineare modelli: ${parts.join("; ")}`,
     missingModels,
+    staleModels,
   };
 }
 
@@ -530,7 +587,7 @@ export async function ensureModelsIni(
   if (result.code !== 0) {
     throw new Error(
       `Generazione hexagon-models.ini fallita (launch-hexagon.ps1 exit ${result.code}): ` +
-        (result.stderr.trim() || result.stdout.trim() || "output vuoto"),
+      (result.stderr.trim() || result.stdout.trim() || "output vuoto"),
     );
   }
   const payload = parseJsonPayload(result.stdout);
@@ -538,7 +595,7 @@ export async function ensureModelsIni(
   if (typeof content !== "string" || content.trim().length === 0) {
     throw new Error(
       "launch-hexagon.ps1 non ha proposto contenuto INI (ini_content assente): " +
-        "verificare la cache modelli GGUF.",
+      "verificare la cache modelli GGUF.",
     );
   }
   await options.writeFile(options.iniPath, content);

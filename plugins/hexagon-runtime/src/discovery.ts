@@ -328,6 +328,7 @@ export interface SyncModelsOptions {
 
 export interface SyncModelsResult {
   addedModels: string[];
+  removedModels: string[];
   totalModels: number;
   iniUpdated: boolean;
 }
@@ -335,14 +336,15 @@ export interface SyncModelsResult {
 /**
  * Sincronizza i modelli scoperti sul disco (.cache/geniex/models) con il file INI
  * e la configurazione Kilo (kilo.json/kilo.jsonc) calcolando l'allocazione hardware euristica
- * ottimale senza avviare benchmark pesanti. Filtra e rimuove i modelli con architetture incompatibili.
+ * ottimale senza avviare benchmark pesanti. Aggiunge nuovi modelli e rimuove voci i cui file
+ * non esistono piu' su disco.
  */
 export async function syncDiscoveredModelsToIni(
   options: SyncModelsOptions,
 ): Promise<SyncModelsResult> {
   const { modelsDir, iniPath, deps } = options;
   if (!(await deps.exists(modelsDir))) {
-    return { addedModels: [], totalModels: 0, iniUpdated: false };
+    return { addedModels: [], removedModels: [], totalModels: 0, iniUpdated: false };
   }
 
   const discovered = await scanModels({
@@ -362,9 +364,25 @@ export async function syncDiscoveredModelsToIni(
   }
 
   const parsed = parseModelsIni(iniText);
-  const existingKeys = new Set(Object.keys(parsed.models));
+  const removedModels: string[] = [];
+  let baseContent = iniText;
+
+  for (const [id, cfg] of Object.entries(parsed.models)) {
+    if (!cfg.model || !(await deps.exists(cfg.model))) {
+      removedModels.push(id);
+      const escaped = id.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
+      const sectionPattern = new RegExp(
+        `(?:^|\\r?\\n)(?:#[^\\r\\n]*\\r?\\n)*\\[${escaped}\\][\\s\\S]*?(?=(?:\\r?\\n#[^\\r\\n]*\\r?\\n)*\\r?\\n\\[|\\r?\\n\\[|$)`,
+        "g",
+      );
+      baseContent = baseContent.replace(sectionPattern, "");
+    }
+  }
+
+  const remainingParsed = removedModels.length > 0 ? parseModelsIni(baseContent) : parsed;
+  const existingKeys = new Set(Object.keys(remainingParsed.models));
   const existingFiles = new Set(
-    Object.values(parsed.models).map((m) => basename(m.model).toLowerCase()),
+    Object.values(remainingParsed.models).map((m) => basename(m.model).toLowerCase()),
   );
 
   const missing = discovered.filter(
@@ -374,15 +392,16 @@ export async function syncDiscoveredModelsToIni(
       !existingFiles.has(m.fileName.toLowerCase()),
   );
 
-  if (missing.length === 0) {
+  if (missing.length === 0 && removedModels.length === 0) {
     return {
       addedModels: [],
+      removedModels: [],
       totalModels: existingKeys.size,
       iniUpdated: false,
     };
   }
 
-  let baseContent = iniText.trimEnd();
+  baseContent = baseContent.trimEnd();
   if (!baseContent) {
     baseContent = [
       "version = 1",
@@ -424,7 +443,10 @@ export async function syncDiscoveredModelsToIni(
     );
   }
 
-  const updatedIniText = baseContent + "\n\n" + newSections.join("\n");
+  const updatedIniText =
+    newSections.length > 0
+      ? baseContent + "\n\n" + newSections.join("\n")
+      : baseContent + "\n";
   await deps.writeFile(iniPath, updatedIniText);
 
   // Sincronizza anche %LOCALAPPDATA%/Hexagon/hexagon-models.ini se disponibile
@@ -458,6 +480,7 @@ export async function syncDiscoveredModelsToIni(
 
   return {
     addedModels: added,
+    removedModels,
     totalModels: existingKeys.size + added.length,
     iniUpdated: true,
   };
