@@ -420,8 +420,8 @@ if ($Mode -eq "Router") {
         $seenAliases[$alias] = $true
         $meta = [GgufModelMeta]::Parse($file.FullName)
         if (-not $meta) { continue }
-        if ($meta.Architecture -eq "clip" -or $meta.Architecture -eq "" -or $meta.Architecture -like "inkling*") {
-            # Architettura non supportata dalla versione corrente di llama.cpp (Qualcomm GenieX 93cf736)
+        if ($meta.Architecture -eq "clip" -or $meta.Architecture -eq "") {
+            # Artefatto non autonomo (es. proiettore multimodale clip)
             continue
         }
 

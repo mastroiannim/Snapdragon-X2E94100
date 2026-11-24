@@ -83,15 +83,27 @@ function Get-FrontendRuntime([string]$Directory) {
     } catch { return $null }
 }
 
-function Test-GenieFiles($Genie, [string]$Directory) {
+function Get-GenieFileDrift($Genie, [string]$Directory) {
+    $missing = [System.Collections.Generic.List[string]]::new()
+    $stale = [System.Collections.Generic.List[string]]::new()
     foreach ($file in $Genie.Files) {
         $target = Join-Path $Directory $file.Name
-        if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { return $false }
+        if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
+            $missing.Add($file.Name)
+            continue
+        }
         if ((Get-Item -LiteralPath $target).Length -ne $file.Length -or
             (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash -ne
-            (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash) { return $false }
+            (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash) {
+            $stale.Add($file.Name)
+        }
     }
-    return $true
+    return [pscustomobject]@{ Missing = @($missing); Stale = @($stale) }
+}
+
+function Test-GenieFiles($Genie, [string]$Directory) {
+    $drift = Get-GenieFileDrift $Genie $Directory
+    return ($drift.Missing.Count -eq 0 -and $drift.Stale.Count -eq 0)
 }
 
 function Test-FrontendRuntime($Frontend, [string]$Commit) {
@@ -379,4 +391,29 @@ function Sync-HexagonRuntime {
         Backup = $(if ($oldMoved) { $backup } else { '' }); Message = 'Runtime installato/aggiornato e verificato; backup precedente conservato se presente.' }
 }
 
-Export-ModuleMember -Function Sync-HexagonRuntime, Get-GenieRuntime, Invoke-RuntimeNative
+function Get-HexagonRuntimeStatus {
+    param([Parameter(Mandatory)][string]$BinPath, [Parameter(Mandatory)][string]$GenieXDir)
+    $BinPath = [IO.Path]::GetFullPath($BinPath).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $GenieXDir = [IO.Path]::GetFullPath($GenieXDir).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $genie = Get-GenieRuntime $GenieXDir
+    $frontend = Get-FrontendRuntime $BinPath
+    $commitAligned = ($null -ne $frontend -and (Test-CommitEqual $frontend.Commit $genie.Commit))
+    $frontendOk = (Test-FrontendRuntime $frontend $genie.Commit) -and (Test-FrontendFiles $BinPath)
+    $drift = Get-GenieFileDrift $genie $BinPath
+    $genieFilesOk = ($drift.Missing.Count -eq 0 -and $drift.Stale.Count -eq 0)
+    $processes = @(Get-RuntimeProcesses $BinPath)
+    return [pscustomobject]@{
+        Aligned        = ($frontendOk -and $genieFilesOk)
+        CommitAligned  = $commitAligned
+        FrontendOk     = $frontendOk
+        GenieFilesOk   = $genieFilesOk
+        GenieXCommit   = $genie.Commit
+        FrontendCommit = $(if ($frontend) { $frontend.Commit } else { $null })
+        MissingFiles   = @($drift.Missing)
+        StaleFiles     = @($drift.Stale)
+        ServerRunning  = ($processes.Count -gt 0)
+        ProcessCount   = $processes.Count
+    }
+}
+
+Export-ModuleMember -Function Sync-HexagonRuntime, Get-GenieRuntime, Invoke-RuntimeNative, Get-HexagonRuntimeStatus

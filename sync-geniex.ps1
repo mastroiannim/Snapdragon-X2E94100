@@ -15,12 +15,20 @@ param(
     [switch]$NoStopServer,
     [switch]$UseHardLinks,
     [switch]$UpdateGenieX,
+    [switch]$CheckOnly,
     [switch]$Json
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object Text.UTF8Encoding($false)
 try {
     Import-Module (Join-Path $PSScriptRoot 'runtime-update.psm1') -Force
+    if ($CheckOnly) {
+        $status = Get-HexagonRuntimeStatus -BinPath $BinPath -GenieXDir $GenieXDir
+        if ($Json) { $status | ConvertTo-Json -Depth 6 -Compress } else {
+            Write-Host "Aligned: $($status.Aligned) (GenieX=$($status.GenieXCommit), Frontend=$($status.FrontendCommit), Stale=$($status.StaleFiles.Count), Missing=$($status.MissingFiles.Count))"
+        }
+        exit 0
+    }
     if ($UpdateGenieX) {
         # Prima separa le copie installate da eventuali hard-link legacy a GenieX.
         [void](Sync-HexagonRuntime -BinPath $BinPath -GenieXDir $GenieXDir -Apply -Force -NoStopServer:$NoStopServer)

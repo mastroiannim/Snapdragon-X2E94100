@@ -34,7 +34,7 @@ import {
   type EnsureServerResult,
   type ModelsIni,
 } from "./process.js";
-import { ensureRuntime, type SyncOutcome } from "./sync.js";
+import { checkRuntime, ensureRuntime, type SyncOutcome } from "./sync.js";
 import { createHexagonTools } from "./tools.js";
 import type { OsDeps } from "./types.js";
 import {
@@ -79,6 +79,7 @@ export async function bootstrapRuntime(
     workspaceDir: paths.workspaceDir,
     binPath: paths.binPath,
     geniexDir: paths.geniexDir,
+    stopServer: true,
     deps,
   });
   const ini = await ensureModelsIni({
@@ -312,7 +313,7 @@ export function createHexagonHooks(options: HookOptions): Hooks {
       exists: deps.exists,
       modelsDir: paths.modelsDir,
       workspaceDir: paths.workspaceDir,
-      sync: ({ force } = {}) =>
+      sync: ({ force, stopServer } = {}) =>
         ensureRuntime({
           paths: {
             geniexExe: paths.geniexExe,
@@ -323,8 +324,22 @@ export function createHexagonHooks(options: HookOptions): Hooks {
           binPath: paths.binPath,
           geniexDir: paths.geniexDir,
           force,
+          stopServer: stopServer ?? true,
           deps,
         }),
+      checkRuntime: () =>
+        checkRuntime(
+          {
+            geniexExe: paths.geniexExe,
+            llamaServerExe: paths.serverExe,
+            runtimeDir: paths.binPath,
+          },
+          deps,
+          {
+            workspaceDir: paths.workspaceDir,
+            geniexDir: paths.geniexDir,
+          },
+        ),
     }),
   };
 }

@@ -254,12 +254,49 @@ describe("ensureRuntime", () => {
     geniexDir: "C:/genie",
   };
 
-  it("runtime allineato: nessun sync invoked", async () => {
+  it("runtime allineato: nessun sync -Apply invocato", async () => {
     const { deps, calls } = alignedDeps();
     const outcome = await ensureRuntime({ ...options, deps });
     expect(outcome.updated).toBe(false);
     expect(outcome.check.needsSync).toBe(false);
-    expect(calls.some((call) => call.command === "powershell")).toBe(false);
+    expect(
+      calls.some((call) => call.command === "powershell" && call.args.includes("-Apply")),
+    ).toBe(false);
+  });
+
+  it("commit allineato ma DLL stale da -CheckOnly: trigger sync con stopServer", async () => {
+    let synced = false;
+    const exists = vi.fn(async () => true);
+    const listDir = vi.fn(async () => ALL_RUNTIME_FILES);
+    const { fn: exec, calls } = recordingExec((call) => {
+      if (call.command === "powershell" && call.args.includes("-CheckOnly")) {
+        return okExec(
+          synced
+            ? '{"Aligned":true,"CommitAligned":true,"MissingFiles":[],"StaleFiles":[],"ServerRunning":true}'
+            : '{"Aligned":false,"CommitAligned":true,"MissingFiles":[],"StaleFiles":["ggml-hexagon.dll"],"ServerRunning":true}',
+        );
+      }
+      if (call.command === "powershell" && call.args.includes("-Apply")) {
+        synced = true;
+        return okExec('{"Message":"DLL aggiornate","Files":["ggml-hexagon.dll"]}');
+      }
+      if (call.command === PATHS.geniexExe) {
+        return okExec("LlamaCPP Runtime Hash: 19cce6919\n");
+      }
+      return okExec("version: 11938 (19cce6919)");
+    });
+    const outcome = await ensureRuntime({
+      ...options,
+      stopServer: true,
+      deps: { exec, exists, listDir },
+    });
+    expect(outcome.updated).toBe(true);
+    expect(outcome.check.needsSync).toBe(false);
+    const applyCall = calls.find(
+      (call) => call.command === "powershell" && call.args.includes("-Apply"),
+    );
+    expect(applyCall).toBeDefined();
+    expect(applyCall?.args).not.toContain("-NoStopServer");
   });
 
   it("mismatch: trigger sync-geniex.ps1 e re-check", async () => {

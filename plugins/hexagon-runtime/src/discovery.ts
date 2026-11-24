@@ -75,17 +75,14 @@ export function isMmprojFile(fileName: string): boolean {
 }
 
 /**
- * Verifica se l'architettura GGUF e' supportata dal runtime llama.cpp attualmente installato
- * (Snapdragon X2 Elite fork Qualcomm GenieX commit 93cf736).
+ * Verifica se l'architettura GGUF e' un modello autonomo caricabile.
+ * Non filtra a priori architetture LLM: se il runtime corrente non la supporta,
+ * sara' llama-server / Kilo a sollevare l'errore in fase di caricamento.
  */
 export function isArchitectureSupported(architecture?: string): boolean {
   if (!architecture) return true;
   const lower = architecture.toLowerCase().trim();
-  // inkling2_loop e' un'architettura looped transformer introdotta in PR upstream successiva a 93cf736
-  if (lower === "inkling2_loop" || lower.startsWith("inkling")) {
-    return false;
-  }
-  return true;
+  return lower !== "clip";
 }
 
 /**
@@ -370,24 +367,6 @@ export async function syncDiscoveredModelsToIni(
     Object.values(parsed.models).map((m) => basename(m.model).toLowerCase()),
   );
 
-  // Rimuove eventuali modelli con architettura incompatibile precedentemente salvati nell'INI
-  const incompatibleIds = new Set(
-    discovered.filter((m) => m.status === "incompatible").map((m) => m.id),
-  );
-  let shouldRewriteExisting = false;
-  let cleanedIniText = iniText;
-  for (const incId of incompatibleIds) {
-    if (existingKeys.has(incId)) {
-      const pattern = new RegExp(
-        `(?:#[^\\r\\n]*\\r?\\n)*\\[${incId.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&")}\\][\\s\\S]*?(?=(?:\\r?\\n\\[)|$)`,
-        "g",
-      );
-      cleanedIniText = cleanedIniText.replace(pattern, "").trimEnd();
-      existingKeys.delete(incId);
-      shouldRewriteExisting = true;
-    }
-  }
-
   const missing = discovered.filter(
     (m) =>
       m.status !== "incompatible" &&
@@ -396,35 +375,6 @@ export async function syncDiscoveredModelsToIni(
   );
 
   if (missing.length === 0) {
-    if (shouldRewriteExisting) {
-      await deps.writeFile(iniPath, cleanedIniText);
-      const localAppData = process.env.LOCALAPPDATA;
-      if (localAppData) {
-        const userIni = join(localAppData, "Hexagon", "hexagon-models.ini");
-        if (userIni.toLowerCase() !== iniPath.toLowerCase()) {
-          await deps.writeFile(userIni, cleanedIniText).catch(() => {});
-        }
-      }
-      if (options.workspaceDir) {
-        const wsIni = join(options.workspaceDir, "hexagon-models.ini");
-        if (wsIni.toLowerCase() !== iniPath.toLowerCase() && (await deps.exists(wsIni))) {
-          await deps.writeFile(wsIni, cleanedIniText).catch(() => {});
-        }
-      }
-      try {
-        await installProviderConfig({
-          workspaceDir: options.workspaceDir,
-          iniPath,
-          readFile: deps.readFile,
-          writeFile: deps.writeFile,
-        });
-      } catch {}
-      return {
-        addedModels: [],
-        totalModels: existingKeys.size,
-        iniUpdated: true,
-      };
-    }
     return {
       addedModels: [],
       totalModels: existingKeys.size,
@@ -432,7 +382,7 @@ export async function syncDiscoveredModelsToIni(
     };
   }
 
-  let baseContent = cleanedIniText.trimEnd();
+  let baseContent = iniText.trimEnd();
   if (!baseContent) {
     baseContent = [
       "version = 1",

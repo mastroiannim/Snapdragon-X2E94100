@@ -421,11 +421,38 @@ describe("createHexagonTools", () => {
     expect(parsed.status).toBe("certified");
   });
 
+  it("hexagon_status include runtime checkRuntime quando fornito e gestisce errori", async () => {
+    const { deps } = makeDeps();
+    const tools = createHexagonTools({
+      ...deps,
+      checkRuntime: async () => ({
+        geniexHash: "93cf736",
+        llamaCommit: "93cf736",
+        commitAligned: true,
+        missingFiles: [],
+        staleFiles: ["ggml-hexagon.dll"],
+        needsSync: true,
+      }),
+    });
+    const parsed = JSON.parse(await tools.hexagon_status.execute({}, undefined as never));
+    expect(parsed.runtime.needsSync).toBe(true);
+    expect(parsed.runtime.staleFiles).toEqual(["ggml-hexagon.dll"]);
+
+    const toolsErr = createHexagonTools({
+      ...deps,
+      checkRuntime: async () => {
+        throw new Error("check fallito");
+      },
+    });
+    const parsedErr = JSON.parse(await toolsErr.hexagon_status.execute({}, undefined as never));
+    expect(parsedErr.runtime.error).toContain("check fallito");
+  });
+
   it("descrizioni dei tool presenti", () => {
     const { deps } = makeDeps();
     const tools = createHexagonTools(deps);
     expect(tools.hexagon_status.description).toContain("Snapdragon");
-    expect(tools.hexagon_sync.description).toContain("sync-geniex");
+    expect(tools.hexagon_sync.description).toContain("riallineamento atomico");
     expect(tools.hexagon_bench.description).toContain("token/s");
     expect(tools.hexagon_setup.description).toContain("kilo.json");
     expect(tools.hexagon_models.description).toContain("Elenca tutti i modelli GGUF");

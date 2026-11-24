@@ -34,7 +34,15 @@ export interface RuntimeCheck {
   llamaCommit: string | null;
   commitAligned: boolean;
   missingFiles: string[];
+  staleFiles?: string[];
+  serverRunning?: boolean;
   needsSync: boolean;
+}
+
+export interface CheckRuntimeOptions {
+  workspaceDir?: string;
+  geniexDir?: string;
+  syncScript?: string;
 }
 
 export interface SyncOutcome {
@@ -70,6 +78,7 @@ export function sameCommit(left: string | null, right: string | null): boolean {
 export async function checkRuntime(
   paths: RuntimePaths,
   deps: SyncDeps,
+  options?: CheckRuntimeOptions,
 ): Promise<RuntimeCheck> {
   if (!(await deps.exists(paths.geniexExe))) {
     throw new Error(
@@ -117,13 +126,74 @@ export async function checkRuntime(
   }
   if (!hasHtpSo) missingFiles.push("libggml-htp-v*.so");
 
-  const commitAligned = sameCommit(geniexHash, llamaCommit);
+  let commitAligned = sameCommit(geniexHash, llamaCommit);
+  let staleFiles: string[] | undefined;
+  let serverRunning: boolean | undefined;
+  let scriptAligned: boolean | undefined;
+
+  if (options?.geniexDir) {
+    try {
+      const script =
+        options.syncScript ??
+        (await resolveSyncScript(options.workspaceDir, deps.exists));
+      const checkRes = await deps.exec(
+        "powershell",
+        [
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          script,
+          "-CheckOnly",
+          "-Json",
+          "-BinPath",
+          paths.runtimeDir,
+          "-GenieXDir",
+          options.geniexDir,
+        ],
+        { cwd: dirname(script), timeoutMs: 30_000 },
+      );
+      if (checkRes.code === 0) {
+        const lines = checkRes.stdout.trim().split(/\r?\n/).filter(Boolean);
+        const lastLine = lines[lines.length - 1] ?? "";
+        const parsed = JSON.parse(lastLine) as {
+          Aligned?: boolean;
+          CommitAligned?: boolean;
+          MissingFiles?: string[];
+          StaleFiles?: string[];
+          ServerRunning?: boolean;
+        };
+        if (typeof parsed.Aligned === "boolean") {
+          scriptAligned = parsed.Aligned;
+          if (typeof parsed.CommitAligned === "boolean") {
+            commitAligned = parsed.CommitAligned;
+          }
+          if (Array.isArray(parsed.MissingFiles)) {
+            for (const f of parsed.MissingFiles) {
+              if (!missingFiles.includes(f)) missingFiles.push(f);
+            }
+          }
+          if (Array.isArray(parsed.StaleFiles)) {
+            staleFiles = parsed.StaleFiles;
+          }
+          if (typeof parsed.ServerRunning === "boolean") {
+            serverRunning = parsed.ServerRunning;
+          }
+        }
+      }
+    } catch {
+      /* fallback al controllo base se -CheckOnly non disponibile */
+    }
+  }
+
+  const hasStale = Array.isArray(staleFiles) && staleFiles.length > 0;
   return {
     geniexHash,
     llamaCommit,
     commitAligned,
     missingFiles,
-    needsSync: !commitAligned || missingFiles.length > 0,
+    ...(staleFiles !== undefined ? { staleFiles } : {}),
+    ...(serverRunning !== undefined ? { serverRunning } : {}),
+    needsSync: !commitAligned || missingFiles.length > 0 || hasStale || scriptAligned === false,
   };
 }
 
@@ -154,29 +224,29 @@ export async function resolveSyncScript(
  */
 export async function runSyncScript(
   workspaceDir: string,
-  paths: { binPath: string; geniexDir: string; syncScript?: string },
+  paths: { binPath: string; geniexDir: string; syncScript?: string; stopServer?: boolean },
   deps: { exec: ExecFn; exists?: ExistsFn },
 ): Promise<SyncScriptResult> {
   const script =
     paths.syncScript ??
     (await resolveSyncScript(workspaceDir, deps.exists));
-  const result = await deps.exec(
-    "powershell",
-    [
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      script,
-      "-Apply",
-      "-NoStopServer",
-      "-Json",
-      "-BinPath",
-      paths.binPath,
-      "-GenieXDir",
-      paths.geniexDir,
-    ],
-    { cwd: dirname(script), timeoutMs: 900_000 },
-  );
+  const args = [
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    script,
+    "-Apply",
+    ...(paths.stopServer ? [] : ["-NoStopServer"]),
+    "-Json",
+    "-BinPath",
+    paths.binPath,
+    "-GenieXDir",
+    paths.geniexDir,
+  ];
+  const result = await deps.exec("powershell", args, {
+    cwd: dirname(script),
+    timeoutMs: 900_000,
+  });
   const lines = result.stdout.trim().split(/\r?\n/).filter(Boolean);
   const lastLine = lines[lines.length - 1] ?? "";
   let parsed: { Message?: unknown; Error?: unknown; Files?: unknown; Backup?: unknown } = {};
@@ -210,6 +280,7 @@ export interface EnsureRuntimeOptions {
   geniexDir: string;
   syncScript?: string;
   force?: boolean;
+  stopServer?: boolean;
   deps: SyncDeps;
 }
 
@@ -217,7 +288,12 @@ export interface EnsureRuntimeOptions {
 export async function ensureRuntime(
   options: EnsureRuntimeOptions,
 ): Promise<SyncOutcome> {
-  const before = await checkRuntime(options.paths, options.deps);
+  const checkOpts: CheckRuntimeOptions = {
+    workspaceDir: options.workspaceDir,
+    geniexDir: options.geniexDir,
+    syncScript: options.syncScript,
+  };
+  const before = await checkRuntime(options.paths, options.deps, checkOpts);
   if (!options.force && !before.needsSync) {
     return {
       updated: false,
@@ -228,10 +304,15 @@ export async function ensureRuntime(
   }
   const sync = await runSyncScript(
     options.workspaceDir,
-    { binPath: options.binPath, geniexDir: options.geniexDir, syncScript: options.syncScript },
+    {
+      binPath: options.binPath,
+      geniexDir: options.geniexDir,
+      syncScript: options.syncScript,
+      stopServer: options.stopServer,
+    },
     options.deps,
   );
-  const after = await checkRuntime(options.paths, options.deps);
+  const after = await checkRuntime(options.paths, options.deps, checkOpts);
   return {
     updated: true,
     message: sync.message,

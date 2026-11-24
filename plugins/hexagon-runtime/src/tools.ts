@@ -22,8 +22,9 @@ import {
   ROUTER_HOST,
   ROUTER_PORT,
 } from "./process.js";
+import { waitForHealth, type HealthResult } from "./health.js";
 import { qualifyModel } from "./qualify.js";
-import type { SyncOutcome } from "./sync.js";
+import type { RuntimeCheck, SyncOutcome } from "./sync.js";
 import type {
   ExecFn,
   ExistsFn,
@@ -40,6 +41,7 @@ export interface StatusReport {
   router: { host: string; port: number; active: boolean; ready: boolean };
   latencyMs: number | null;
   loadedModels: string[];
+  runtime?: RuntimeCheck | { error: string };
   error?: string;
 }
 
@@ -258,7 +260,8 @@ export interface HexagonToolDeps {
   sleep?: SleepFn;
   modelsDir?: string;
   workspaceDir: string;
-  sync: (options: { force?: boolean }) => Promise<SyncOutcome>;
+  sync: (options: { force?: boolean; stopServer?: boolean }) => Promise<SyncOutcome>;
+  checkRuntime?: () => Promise<RuntimeCheck>;
 }
 
 /** Definizioni tool Kilo (zod) con output JSON stabile. */
@@ -267,17 +270,25 @@ export function createHexagonTools(deps: HexagonToolDeps) {
     hexagon_status: tool({
       description:
         "Stato del runtime Hexagon locale (Snapdragon X2 Elite): router llama-server " +
-        "su 127.0.0.1:18803, latenza /health e modelli caricati.",
+        "su 127.0.0.1:18803, latenza /health, modelli caricati e allineamento binario " +
+        "GenieX (commit e SHA-256 DLL). Se runtime.needsSync e' true, chiama direttamente " +
+        "hexagon_sync senza eseguire comandi shell manuali.",
       args: {},
       async execute() {
-        return JSON.stringify(await collectStatus({ fetch: deps.fetch }), null, 2);
+        const status = await collectStatus({ fetch: deps.fetch });
+        if (deps.checkRuntime) {
+          status.runtime = await deps.checkRuntime().catch((error: unknown) => ({
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        }
+        return JSON.stringify(status, null, 2);
       },
     }),
     hexagon_sync: tool({
       description:
-        "Forza il riallineamento del runtime llama.cpp ARM64 al commit GenieX " +
-        "eseguendo sync-geniex.ps1 -Apply -NoStopServer ed esegue la sincronizzazione " +
-        "dei modelli GGUF rilevati con il router locale.",
+        "Esegue in modo deterministico il riallineamento atomico del runtime llama.cpp ARM64 " +
+        "al commit/DLL GenieX (stop eventuale server attivo, swap con backup, riavvio automatico) " +
+        "e sincronizza i modelli GGUF nel router locale verificando /health al termine.",
       args: {},
       async execute() {
         const syncRes = await deps.sync({ force: true });
@@ -313,9 +324,17 @@ export function createHexagonTools(deps: HexagonToolDeps) {
             routerReloaded = reload.reloaded;
           }
         }
+        let health: HealthResult | undefined;
+        if (syncRes.updated || routerReloaded) {
+          health = await waitForHealth({
+            fetch: deps.fetch,
+            sleep: deps.sleep,
+          }).catch(() => undefined);
+        }
         return JSON.stringify(
           {
             ...syncRes,
+            ...(health ? { health } : {}),
             catalog: {
               ...catalogRes,
               routerReloaded,
