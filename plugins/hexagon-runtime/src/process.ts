@@ -8,7 +8,7 @@
  */
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
   ExecFn,
@@ -481,6 +481,7 @@ export function parseJsonPayload(stdout: string): Record<string, unknown> {
 export interface EnsureIniOptions {
   iniPath: string;
   workspaceDir: string;
+  launchScript?: string;
   exec: ExecFn;
   exists: ExistsFn;
   writeFile: WriteFileFn;
@@ -503,7 +504,15 @@ export async function ensureModelsIni(
   if (await options.exists(options.iniPath)) {
     return { generated: false, modelCount: 0 };
   }
-  const script = join(options.workspaceDir, "launch-hexagon.ps1");
+  const repoScript = resolve(BUNDLED_ASSETS_DIR, "..", "..", "..", "launch-hexagon.ps1");
+  const wsScript = join(options.workspaceDir, "launch-hexagon.ps1");
+  const script =
+    options.launchScript ??
+    (existsSync(wsScript)
+      ? wsScript
+      : (existsSync(repoScript) && options.workspaceDir !== "C:/repo"
+        ? repoScript
+        : wsScript));
   const result = await options.exec(
     "powershell",
     [
@@ -516,7 +525,7 @@ export async function ensureModelsIni(
       "-DryRun",
       "-Json",
     ],
-    { cwd: options.workspaceDir, timeoutMs: 120_000 },
+    { cwd: dirname(script), timeoutMs: 120_000 },
   );
   if (result.code !== 0) {
     throw new Error(

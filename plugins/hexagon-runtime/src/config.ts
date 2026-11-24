@@ -8,6 +8,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   buildHexagonProvider as baseBuildHexagonProvider,
   outputLimitFor,
@@ -25,6 +26,22 @@ import type { ReadFileFn, WriteFileFn } from "./types.js";
 export const RECOMMENDED_MAIN_MODEL = "Ornith-1.5-9B-Q4_0";
 export const RECOMMENDED_SMALL_MODEL = "MiniCPM5-2B-Q4_K_M";
 export const GLOBAL_CONFIG_NAME = "kilo.jsonc";
+export const RESOLVED_PLUGIN_DIR = fileURLToPath(new URL("..", import.meta.url))
+  .replace(/\\/g, "/")
+  .replace(/\/+$/, "");
+
+export function resolvePluginSpecifier(
+  options: { workspaceDir?: string; pluginSpecifier?: string } = {},
+): string {
+  if (options.pluginSpecifier) return options.pluginSpecifier;
+  if (
+    options.workspaceDir &&
+    existsSync(join(options.workspaceDir, "plugins", "hexagon-runtime"))
+  ) {
+    return "./plugins/hexagon-runtime";
+  }
+  return RESOLVED_PLUGIN_DIR;
+}
 
 export { outputLimitFor as calculateOutputLimit, outputLimitFor };
 
@@ -73,6 +90,7 @@ export interface SetupConfigOptions {
   port?: number;
   mainModel?: string;
   smallModel?: string;
+  pluginSpecifier?: string;
   readFile?: ReadFileFn;
   writeFile?: WriteFileFn;
 }
@@ -151,12 +169,16 @@ export async function installProviderConfig(
   const mergedProviders = { ...existingProviders, hexagon: provider };
 
   const existingPlugins = Array.isArray(existing.plugin) ? existing.plugin : [];
-  const defaultPlugin = options.workspaceDir && existsSync(join(options.workspaceDir, "plugins", "hexagon-runtime"))
-    ? "./plugins/hexagon-runtime"
-    : "@hexagon/kilo-plugin";
-  const mergedPlugins = existingPlugins.includes(defaultPlugin)
-    ? existingPlugins
-    : [...existingPlugins, defaultPlugin];
+  const defaultPlugin = resolvePluginSpecifier(options);
+  // Sostituisce eventuali specifier astratti non risolvibili ("@hexagon/kilo-plugin") con il percorso effettivo
+  const cleanedPlugins = existingPlugins.map((p) =>
+    p === "@hexagon/kilo-plugin" && defaultPlugin !== "@hexagon/kilo-plugin"
+      ? defaultPlugin
+      : p,
+  );
+  const mergedPlugins = cleanedPlugins.includes(defaultPlugin)
+    ? cleanedPlugins
+    : [...cleanedPlugins, defaultPlugin];
 
   const mergedConfig: KiloConfig = {
     $schema: existing.$schema ?? "https://app.kilo.ai/config.json",

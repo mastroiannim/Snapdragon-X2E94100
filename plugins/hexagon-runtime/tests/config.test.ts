@@ -6,6 +6,7 @@ import {
   RECOMMENDED_MAIN_MODEL,
   RECOMMENDED_SMALL_MODEL,
   resolveGlobalConfigPath,
+  RESOLVED_PLUGIN_DIR,
   stripJsonComments,
 } from "../src/config.js";
 
@@ -114,7 +115,7 @@ describe("installProviderConfig", () => {
     writtenFiles.set(
       target,
       JSON.stringify({
-        plugin: ["@hexagon/kilo-plugin"],
+        plugin: [RESOLVED_PLUGIN_DIR],
       }),
     );
 
@@ -133,9 +134,35 @@ describe("installProviderConfig", () => {
 
     expect(res.updated).toBe(true);
     const parsed = JSON.parse(writtenFiles.get(res.targetPath)!);
-    expect(parsed.plugin).toEqual(["@hexagon/kilo-plugin"]);
+    expect(parsed.plugin).toEqual([RESOLVED_PLUGIN_DIR]);
     expect(parsed.model).toBe("hexagon/solo-modello");
     expect(parsed.small_model).toBe("hexagon/solo-modello");
+  });
+
+  it("migra @hexagon/kilo-plugin non risolvibile al percorso effettivo", async () => {
+    const writtenFiles = new Map<string, string>();
+    const target = "C:\\test-config\\kilo\\kilo.json";
+    writtenFiles.set(
+      target,
+      JSON.stringify({
+        plugin: ["@hexagon/kilo-plugin"],
+      }),
+    );
+
+    const readFile = vi.fn(async (path: string) => writtenFiles.get(path)!);
+    const writeFile = vi.fn(async (path: string, content: string) => {
+      writtenFiles.set(path, content);
+    });
+
+    const res = await installProviderConfig({
+      configDir: "C:/test-config/kilo",
+      readFile,
+      writeFile,
+    });
+
+    expect(res.updated).toBe(true);
+    const parsed = JSON.parse(writtenFiles.get(res.targetPath)!);
+    expect(parsed.plugin).toEqual([RESOLVED_PLUGIN_DIR]);
   });
 
   it("usa percorso relativo se il plugin esiste nel workspace", async () => {
