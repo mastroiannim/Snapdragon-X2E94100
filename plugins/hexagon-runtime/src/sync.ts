@@ -474,6 +474,7 @@ export interface EnsureRuntimeOptions {
   syncScript?: string;
   force?: boolean;
   stopServer?: boolean;
+  beforeCheck?: RuntimeCheck;
   deps: SyncDeps;
 }
 
@@ -486,7 +487,9 @@ export async function ensureRuntime(
     geniexDir: options.geniexDir,
     syncScript: options.syncScript,
   };
-  const before = await checkRuntime(options.paths, options.deps, checkOpts);
+  const before =
+    options.beforeCheck ??
+    (await checkRuntime(options.paths, options.deps, checkOpts));
   if (!options.force && !before.needsSync) {
     return {
       updated: false,

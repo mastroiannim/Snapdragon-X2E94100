@@ -126,7 +126,29 @@ try {
     $rejectedReport = Join-Path $testRoot 'rejected.md'
     . $source -BinPath $testRoot -ModelsDir $testRoot -Models 'fixture.gguf' -Repetitions 1 -ReportPath $rejectedReport -LogDir $logDir
     Assert-True (-not (Test-Path -LiteralPath $rejectedReport)) 'Rejected JSON was published'
-    'BENCHMARK_PROFILE_TESTS=PASS (5 profiles, pp/tg, invalid JSON, report and rejection path)'
+
+    # Specific -Device and -TensorSplit must execute ONLY that single profile.
+    $script:multipleResults = $false
+    $script:benchCalls = @()
+    $scopedReport = Join-Path $testRoot 'scoped-hybrid.md'
+    . $source -BinPath $testRoot -ModelsDir $testRoot -Models 'fixture.gguf' -Device 'HTP0,GPUOpenCL' -TensorSplit '85,15' -Repetitions 1 -ReportPath $scopedReport -LogDir $logDir
+    Assert-True ($profiles.Count -eq 1) 'Expected single scoped profile'
+    Assert-True ($profiles[0].Args -ceq '-dev HTP0/GPUOpenCL -ts 85/15') 'Scoped hybrid profile arguments mismatch'
+    Assert-True ($script:benchCalls.Count -eq 2) 'Expected only pp512 and tg128 for scoped profile'
+    $scopedText = Get-Content -LiteralPath $scopedReport -Raw
+    Assert-True ($scopedText.Contains('**HTP0/GPUOpenCL (85/15)**')) 'Scoped report missing expected hybrid profile label'
+
+    $script:benchCalls = @()
+    $npuReport = Join-Path $testRoot 'scoped-npu.md'
+    . $source -BinPath $testRoot -ModelsDir $testRoot -Models 'fixture.gguf' -Device 'HTP0' -Repetitions 1 -ReportPath $npuReport -LogDir $logDir
+    Assert-True ($profiles.Count -eq 1 -and $profiles[0].Args -ceq '-dev HTP0') 'Scoped HTP0 profile mismatch'
+    Assert-True ($script:benchCalls.Count -eq 2) 'Expected only pp512 and tg128 for scoped HTP0 profile'
+
+    Assert-Rejected { . $source -BinPath $testRoot -ModelsDir $testRoot -Models @() -TensorSplit '80,20' -SkipReportWrite } 'TensorSplit without Device was accepted'
+    Assert-Rejected { . $source -BinPath $testRoot -ModelsDir $testRoot -Models @() -Device 'HTP0' -TensorSplit '80,20' -SkipReportWrite } 'Mismatched TensorSplit weight count was accepted'
+    Assert-Rejected { . $source -BinPath $testRoot -ModelsDir $testRoot -Models @() -Device 'HTP0;rm -rf' -SkipReportWrite } 'Invalid Device characters were accepted'
+
+    'BENCHMARK_PROFILE_TESTS=PASS (5 profiles, scoped Device/TensorSplit, pp/tg, invalid JSON, report and rejection path)'
 } finally {
     $env:ADSP_LIBRARY_PATH = $savedAdsp
     $resolved = [IO.Path]::GetFullPath($testRoot)

@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { generateModelsIni } from "./discovery.js";
 import { waitForHealth, type HealthResult } from "./health.js";
 import { nodeListDir, nodeWriteFile } from "./os.js";
+import type { ModelsRegistry } from "./qualify.js";
 import type {
   ExecFn,
   ExistsFn,
@@ -359,20 +360,283 @@ export async function ensureServer(
   };
 }
 
-export interface StopServerOptions {
+export interface RouterProcessInfo {
+  pid: number;
+  parentPid?: number;
+  executablePath?: string;
+  commandLine?: string;
+}
+
+export interface ManagedRouterScope {
+  serverExe?: string;
+  iniPath?: string;
+  modelsDir?: string;
+  port?: number;
+  host?: string;
+}
+
+export interface StopServerOptions extends ManagedRouterScope {
   exec: ExecFn;
+  platform?: NodeJS.Platform;
+}
+
+function normalizePathForCompare(pathValue: string): string {
+  const slashed = pathValue.trim().replace(/[\\/]+/g, "/");
+  const trimmed = slashed.length > 1 ? slashed.replace(/\/+$/, "") : slashed;
+  return process.platform === "win32" ? trimmed.toLowerCase() : trimmed;
+}
+
+/** Tokenizza una command line gestendo argomenti quotati con apici doppi o singoli. */
+export function tokenizeCommandLine(commandLine: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let inQuote: '"' | "'" | null = null;
+  let hasToken = false;
+
+  for (let i = 0; i < commandLine.length; i++) {
+    const ch = commandLine[i];
+    if (inQuote) {
+      if (ch === inQuote) {
+        inQuote = null;
+      } else {
+        current += ch;
+      }
+      hasToken = true;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      inQuote = ch;
+      hasToken = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (hasToken) {
+        tokens.push(current);
+        current = "";
+        hasToken = false;
+      }
+      continue;
+    }
+    current += ch;
+    hasToken = true;
+  }
+  if (hasToken) {
+    tokens.push(current);
+  }
+  return tokens;
+}
+
+function hasCliFlag(args: string[], flag: string): boolean {
+  return args.some((a) => a === flag || a.startsWith(`${flag}=`));
+}
+
+function getCliFlagValue(args: string[], flag: string): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === flag) {
+      return args[i + 1];
+    }
+    if (arg.startsWith(`${flag}=`)) {
+      return arg.slice(flag.length + 1);
+    }
+  }
+  return undefined;
 }
 
 /**
- * Termina i processi llama-server.exe attivi.
+ * Verifica rigorosa che un processo llama-server corrisponda al Router gestito:
+ * - ExecutablePath verificato rispetto a serverExe (se fornito);
+ * - Esclude processi Direct-mode (-m / --model);
+ * - Richiede --models-preset (allineato a iniPath se fornito) e --port allineato;
+ * - Verifica --models-dir e --host se presenti nello scope.
+ */
+export function isManagedRouterProcess(
+  proc: RouterProcessInfo,
+  scope: ManagedRouterScope = {},
+): boolean {
+  if (!Number.isInteger(proc.pid) || proc.pid <= 0) return false;
+  if (!proc.commandLine || !proc.commandLine.trim()) return false;
+
+  const tokens = tokenizeCommandLine(proc.commandLine);
+  if (tokens.length === 0) return false;
+
+  const exeCandidate = proc.executablePath?.trim() || "";
+  if (scope.serverExe) {
+    if (!exeCandidate) return false;
+    if (normalizePathForCompare(exeCandidate) !== normalizePathForCompare(scope.serverExe)) {
+      return false;
+    }
+  } else {
+    const exeName = normalizePathForCompare(exeCandidate || tokens[0]).split("/").pop() ?? "";
+    if (exeName !== "llama-server.exe" && exeName !== "llama-server") {
+      return false;
+    }
+  }
+
+  const args = tokens.slice(1);
+  if (hasCliFlag(args, "-m") || hasCliFlag(args, "--model")) {
+    return false;
+  }
+
+  const preset = getCliFlagValue(args, "--models-preset");
+  if (!preset) return false;
+  if (scope.iniPath && normalizePathForCompare(preset) !== normalizePathForCompare(scope.iniPath)) {
+    return false;
+  }
+
+  const port = getCliFlagValue(args, "--port");
+  if (port !== String(scope.port ?? ROUTER_PORT)) {
+    return false;
+  }
+
+  if (scope.modelsDir) {
+    const modelsDirArg = getCliFlagValue(args, "--models-dir");
+    if (!modelsDirArg || normalizePathForCompare(modelsDirArg) !== normalizePathForCompare(scope.modelsDir)) {
+      return false;
+    }
+  }
+
+  if (scope.host) {
+    const hostArg = getCliFlagValue(args, "--host");
+    if (hostArg && hostArg.trim() !== scope.host.trim()) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/** Parsing output JSON (PowerShell Get-CimInstance) o testuale (`ps`) dei processi llama-server. */
+export function parseProcessListPayload(stdout: string): RouterProcessInfo[] {
+  const trimmed = stdout.trim();
+  if (!trimmed) return [];
+  if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      const items = Array.isArray(parsed) ? parsed : [parsed];
+      const out: RouterProcessInfo[] = [];
+      for (const item of items) {
+        if (!item || typeof item !== "object") continue;
+        const rec = item as Record<string, unknown>;
+        const rawPid = rec.ProcessId ?? rec.pid;
+        const pid = typeof rawPid === "number" ? rawPid : Number.parseInt(String(rawPid ?? ""), 10);
+        if (!Number.isInteger(pid) || pid <= 0) continue;
+        const rawParent = rec.ParentProcessId ?? rec.parentPid;
+        const parentPid =
+          typeof rawParent === "number"
+            ? rawParent
+            : rawParent !== undefined
+              ? Number.parseInt(String(rawParent), 10)
+              : undefined;
+        out.push({
+          pid,
+          ...(Number.isInteger(parentPid) ? { parentPid } : {}),
+          executablePath:
+            typeof (rec.ExecutablePath ?? rec.executablePath) === "string"
+              ? String(rec.ExecutablePath ?? rec.executablePath)
+              : undefined,
+          commandLine:
+            typeof (rec.CommandLine ?? rec.commandLine) === "string"
+              ? String(rec.CommandLine ?? rec.commandLine)
+              : undefined,
+        });
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  const out: RouterProcessInfo[] = [];
+  for (const line of trimmed.split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+    if (!match) continue;
+    const pid = Number.parseInt(match[1], 10);
+    const parentPid = Number.parseInt(match[2], 10);
+    const commandLine = match[3].trim();
+    const firstToken = tokenizeCommandLine(commandLine)[0] ?? "";
+    if (!firstToken.toLowerCase().includes("llama-server")) continue;
+    out.push({
+      pid,
+      parentPid,
+      executablePath: firstToken,
+      commandLine,
+    });
+  }
+  return out;
+}
+
+export async function listLlamaServerProcesses(
+  exec: ExecFn,
+  platform: NodeJS.Platform = process.platform,
+): Promise<RouterProcessInfo[]> {
+  const isWin = platform === "win32";
+  const cmd = isWin ? "powershell" : "ps";
+  const args = isWin
+    ? [
+        "-NoProfile",
+        "-Command",
+        "$p = @(Get-CimInstance Win32_Process -Filter 'Name=''llama-server.exe''' -ErrorAction Stop | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine); ConvertTo-Json -InputObject $p -Compress",
+      ]
+    : ["-eo", "pid=,ppid=,args="];
+  const res = await exec(cmd, args, { timeoutMs: 15_000 });
+  if (res.code !== 0) return [];
+  return parseProcessListPayload(res.stdout);
+}
+
+export function findManagedRouterProcesses(
+  processes: RouterProcessInfo[],
+  scope: ManagedRouterScope = {},
+): RouterProcessInfo[] {
+  return processes.filter((proc) => isManagedRouterProcess(proc, scope));
+}
+
+function collectDescendantPids(allProcs: RouterProcessInfo[], rootPids: number[]): number[] {
+  const seen = new Set<number>(rootPids);
+  const queue = [...rootPids];
+  while (queue.length > 0) {
+    const parent = queue.shift()!;
+    for (const proc of allProcs) {
+      if (proc.parentPid === parent && !seen.has(proc.pid)) {
+        seen.add(proc.pid);
+        queue.push(proc.pid);
+      }
+    }
+  }
+  return [...seen];
+}
+
+async function stopMatchedRouterProcesses(
+  allProcs: RouterProcessInfo[],
+  managedRoots: RouterProcessInfo[],
+  exec: ExecFn,
+  platform: NodeJS.Platform,
+): Promise<boolean> {
+  if (managedRoots.length === 0) {
+    return false;
+  }
+  const rootPids = managedRoots.map((p) => p.pid);
+  if (platform === "win32") {
+    const pidArgs = rootPids.flatMap((pid) => ["/PID", String(pid)]);
+    const res = await exec("taskkill", ["/F", "/T", ...pidArgs]);
+    return res.code === 0;
+  }
+  const pidsToKill = collectDescendantPids(allProcs, rootPids);
+  const res = await exec("kill", ["-TERM", ...pidsToKill.map(String)]);
+  return res.code === 0;
+}
+
+/**
+ * Termina in modo scoped esclusivamente i processi Router gestiti (verificati per
+ * ExecutablePath e argomenti Router --models-preset/--port). Non tocca mai server
+ * Direct-mode o istanze esterne su altre porte/directory.
  */
 export async function stopServer(options: StopServerOptions): Promise<boolean> {
-  const isWin = process.platform === "win32";
-  const cmd = isWin ? "taskkill" : "pkill";
-  const args = isWin ? ["/F", "/IM", "llama-server.exe"] : ["-f", "llama-server"];
+  const platform = options.platform ?? process.platform;
   try {
-    const res = await options.exec(cmd, args);
-    return res.code === 0;
+    const allProcs = await listLlamaServerProcesses(options.exec, platform);
+    const managedRoots = findManagedRouterProcesses(allProcs, options);
+    return await stopMatchedRouterProcesses(allProcs, managedRoots, options.exec, platform);
   } catch {
     return false;
   }
@@ -406,6 +670,7 @@ export interface ReloadIfStaleOptions extends EnsureServerOptions {
   exec: ExecFn;
   readFile?: ReadFileFn;
   sleep?: SleepFn;
+  platform?: NodeJS.Platform;
 }
 
 export interface ReloadIfStaleResult {
@@ -419,6 +684,7 @@ export interface RestartServerOptions extends EnsureServerOptions {
   exec: ExecFn;
   sleep?: SleepFn;
   now?: NowFn;
+  platform?: NodeJS.Platform;
 }
 
 export interface RestartServerResult {
@@ -432,13 +698,21 @@ export interface RestartServerResult {
 }
 
 /**
- * Riavvia in modo deterministico il router llama-server (stop -> breve pausa ->
+ * Riavvia in modo deterministico il router llama-server (stop scoped -> breve pausa ->
  * avvio -> attesa /health -> lettura /v1/models).
  */
 export async function restartServer(
   options: RestartServerOptions,
 ): Promise<RestartServerResult> {
-  const stopped = await stopServer({ exec: options.exec });
+  const stopped = await stopServer({
+    exec: options.exec,
+    serverExe: options.serverExe,
+    iniPath: options.iniPath,
+    modelsDir: options.modelsDir,
+    port: options.port,
+    host: options.host,
+    platform: options.platform,
+  });
   if (options.sleep) {
     await options.sleep(500);
   }
@@ -463,7 +737,8 @@ export async function restartServer(
 /**
  * Verifica se il router llama-server attivo e' disallineato rispetto ai modelli
  * definiti in hexagon-models.ini (modelli aggiunti o rimossi). Se rileva differenze,
- * arresta il vecchio processo e riavvia il server con il preset aggiornato.
+ * verifica che il processo attivo sia un Router gestito (ExecutablePath e argomenti
+ * verificati) prima di arrestarlo e riavviarlo con il preset aggiornato.
  */
 export async function reloadServerIfStale(
   options: ReloadIfStaleOptions,
@@ -508,8 +783,36 @@ export async function reloadServerIfStale(
     };
   }
 
-  // Modelli aggiunti o rimossi: riavvio pulito
-  await stopServer({ exec: options.exec });
+  const scope: ManagedRouterScope = {
+    serverExe: options.serverExe,
+    iniPath: options.iniPath,
+    modelsDir: options.modelsDir,
+    port: options.port,
+    host: options.host,
+  };
+  const runningProcs = await listLlamaServerProcesses(
+    options.exec,
+    options.platform,
+  ).catch(() => []);
+  const managed = findManagedRouterProcesses(runningProcs, scope);
+  if (managed.length === 0) {
+    return {
+      reloaded: false,
+      reason:
+        "Server attivo sulla porta router non riconosciuto come Router gestito " +
+        "(ExecutablePath o argomenti non verificati): nessun riavvio eseguito",
+      missingModels,
+      staleModels,
+    };
+  }
+
+  // Modelli aggiunti o rimossi su Router gestito: riavvio pulito scoped
+  await stopMatchedRouterProcesses(
+    runningProcs,
+    managed,
+    options.exec,
+    options.platform ?? process.platform,
+  ).catch(() => false);
   if (options.sleep) {
     await options.sleep(500);
   }
@@ -552,11 +855,14 @@ export interface EnsureIniOptions {
   exec: ExecFn;
   exists: ExistsFn;
   writeFile: WriteFileFn;
+  readFile?: ReadFileFn;
   listDir?: ListDirFn;
   isDirectory?: IsDirFn;
   mkdir?: MkdirFn;
   inspectScript?: string;
   skipInspection?: boolean;
+  registryPath?: string;
+  registry?: ModelsRegistry;
 }
 
 export interface EnsureIniResult {
@@ -592,9 +898,12 @@ export async function ensureModelsIni(
       exists: options.exists,
       exec: options.exec,
       isDirectory: options.isDirectory,
+      readFile: options.readFile,
     },
     inspectScript: options.inspectScript,
     skipInspection: options.skipInspection,
+    registryPath: options.registryPath,
+    registry: options.registry,
   });
 
   const targetDir = dirname(options.iniPath);

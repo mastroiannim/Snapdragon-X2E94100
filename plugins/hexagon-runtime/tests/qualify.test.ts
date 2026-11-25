@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   defaultRegistryPath,
   loadRegistry,
+  matchesConfiguredProfile,
   qualifyModel,
   saveRegistry,
   type QualificationProfile,
@@ -33,12 +34,15 @@ afterEach(() => {
 });
 
 describe("qualify.ts — loadRegistry e saveRegistry", () => {
-  it("loadRegistry: ritorna record vuoto se il file non esiste", async () => {
+  it("loadRegistry: ritorna record vuoto se il file non esiste o contiene JSON non oggetto", async () => {
     const readFile = vi.fn(async () => {
       throw new Error("File not found");
     });
     const reg = await loadRegistry("/virtual/registry.json", { readFile });
     expect(reg).toEqual({});
+
+    expect(await loadRegistry("/v/null.json", { readFile: async () => "null" })).toEqual({});
+    expect(await loadRegistry("/v/arr.json", { readFile: async () => "[]" })).toEqual({});
   });
 
   it("saveRegistry e loadRegistry: persistenza mockata con exists/mkdir", async () => {
@@ -158,7 +162,7 @@ describe("qualifyModel", () => {
     expect(storage.get("/virtual/registry.json")).toContain("test-model");
   });
 
-  it("gestisce report vuoto senza righe pp/tg (metriche a 0, potenze undefined)", async () => {
+  it("rifiuta report vuoto senza righe valide marcandolo incompatible", async () => {
     const storage = new Map<string, string>();
     const { fn: exec } = recordingExec(() => okExec(""));
     const readFile = vi.fn(async (p: string) => {
@@ -180,10 +184,113 @@ describe("qualifyModel", () => {
       registryPath: "/virtual/registry.json",
     });
 
+    expect(result.status).toBe("incompatible");
+    expect(result.error).toContain("HTP0");
+    expect(storage.get("/virtual/registry.json")).toContain("incompatible");
+  });
+
+  it("matchesConfiguredProfile e qualifyModel: passa -Device/-TensorSplit ed estrae esclusivamente il profilo configurato", async () => {
+    expect(matchesConfiguredProfile("HTP0", "HTP0")).toBe(true);
+    expect(matchesConfiguredProfile("HTP0 (100% NPU)", "HTP0")).toBe(true);
+    expect(matchesConfiguredProfile("GPUOpenCL (100% GPU)", "HTP0")).toBe(false);
+    expect(matchesConfiguredProfile("HTP0/GPUOpenCL (85/15)", "HTP0,GPUOpenCL", "85,15")).toBe(true);
+    expect(matchesConfiguredProfile("HTP0/GPUOpenCL (85.00/15.00)", "HTP0,GPUOpenCL", "85,15")).toBe(true);
+    expect(matchesConfiguredProfile("HTP0/GPUOpenCL (75/25)", "HTP0,GPUOpenCL", "85,15")).toBe(false);
+    expect(matchesConfiguredProfile("HTP0/GPUOpenCL (75/25)", "HTP0,GPUOpenCL")).toBe(false);
+    expect(matchesConfiguredProfile("HTP0/GPUOpenCL", "HTP0,GPUOpenCL")).toBe(true);
+    expect(matchesConfiguredProfile("()", "HTP0")).toBe(false);
+
+    const multiReport = `# Benchmark Report
+| Modello | Profilo | Test | Velocita' (t/s) | NPU (W) | GPU (W) | CPU (W) | RAM (W) | INFRA (W) | SoC Tot (W) | Sistema (W) |
+| :--- | :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| \`flint.gguf\` | **HTP0 (100% NPU)** | \`pp512\` | **111.0** ± 1 | 10.0 | 0.1 | 2.0 | 1.0 | 1.0 | **14.1** | **18.0** |
+| \`flint.gguf\` | **HTP0 (100% NPU)** | \`tg128\` | **12.0** ± 1 | 9.5 | 0.1 | 2.0 | 1.0 | 1.0 | **13.7** | **17.5** |
+| \`flint.gguf\` | **HTP0/GPUOpenCL (75/25)** | \`pp512\` | **222.0** ± 1 | 11.0 | 4.0 | 2.0 | 1.0 | 1.0 | **19.0** | **23.0** |
+| \`flint.gguf\` | **HTP0/GPUOpenCL (85/15)** | \`pp512\` | **540.5** ± 2 | 15.2 | 3.1 | 2.5 | 2.0 | 1.0 | **23.8** | **29.0** |
+| \`flint.gguf\` | **HTP0/GPUOpenCL (85/15)** | \`tg128\` | **38.4** ± 1 | 14.8 | 3.0 | 2.5 | 2.0 | 1.0 | **23.3** | **28.5** |
+`;
+    const hybridModel: DiscoveredModel = {
+      id: "flint",
+      fileName: "flint.gguf",
+      filePath: "/virtual/models/flint.gguf",
+      sizeGb: 23.3,
+      status: "untested",
+      device: "HTP0,GPUOpenCL",
+      tensorSplit: "85,15",
+      contextWindow: 131_072,
+      strategy: "MoE 85/15",
+    };
+
+    const storage = new Map<string, string>();
+    const { fn: exec, calls } = recordingExec(() => okExec(""));
+    const readFile = vi.fn(async (p: string) => (p.endsWith(".md") ? multiReport : storage.get(p) ?? "{}"));
+    const writeFile = vi.fn(async (p: string, c: string) => {
+      storage.set(p, c);
+    });
+
+    const result = await qualifyModel({
+      model: hybridModel,
+      workspaceDir: "/virtual/ws",
+      exec,
+      readFile,
+      writeFile,
+      exists: async () => true,
+      mkdir: async () => {},
+      registryPath: "/virtual/registry.json",
+    });
+
+    expect(calls[0].args).toContain("-Device");
+    expect(calls[0].args[calls[0].args.indexOf("-Device") + 1]).toBe("HTP0,GPUOpenCL");
+    expect(calls[0].args).toContain("-TensorSplit");
+    expect(calls[0].args[calls[0].args.indexOf("-TensorSplit") + 1]).toBe("85,15");
     expect(result.status).toBe("certified");
-    expect(result.metrics?.prefillTokPerSec).toBe(0);
-    expect(result.metrics?.genTokPerSec).toBe(0);
-    expect(result.metrics?.npuWatts).toBeUndefined();
+    expect(result.metrics?.prefillTokPerSec).toBe(540.5);
+    expect(result.metrics?.genTokPerSec).toBe(38.4);
+    expect(result.metrics?.npuWatts).toBe(15.2);
+    expect(result.metrics?.gpuWatts).toBe(3.1);
+    expect(result.metrics?.socWatts).toBe(23.8);
+
+    // Report contenente solo altro profilo -> incompatible, mai metriche sbagliate
+    const wrongOnlyReport = `| Modello | Profilo | Test | Velocita' (t/s) |
+| :--- | :--- | :---: | ---: |
+| \`flint.gguf\` | **HTP0 (100% NPU)** | \`pp512\` | **111.0** |
+| \`flint.gguf\` | **HTP0 (100% NPU)** | \`tg128\` | **12.0** |
+`;
+    const mismatchRes = await qualifyModel({
+      model: hybridModel,
+      workspaceDir: "/virtual/ws",
+      exec,
+      readFile: async (p) => (p.endsWith(".md") ? wrongOnlyReport : "{}"),
+      writeFile,
+      exists: async () => true,
+      mkdir: async () => {},
+      registryPath: "/virtual/registry.json",
+    });
+    expect(mismatchRes.status).toBe("incompatible");
+    expect(mismatchRes.tensorSplit).toBe("85,15");
+    expect(mismatchRes.error).toContain("HTP0,GPUOpenCL (85,15)");
+
+    // Report con sola riga tg128 e telemetria PMIC opzionale
+    const tgOnlyReport = `| Modello | Profilo | Test | Velocita' (t/s) | NPU (W) | GPU (W) | CPU (W) | RAM (W) | INFRA (W) | SoC Tot (W) | Sistema (W) |
+| :--- | :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| \`test.gguf\` | **HTP0 (100% NPU)** | \`tg128\` | **42.5** ± 1 | 12.0 | 0.4 | 2.0 | 1.0 | 1.0 | **16.4** | **21.0** |
+`;
+    const tgOnlyRes = await qualifyModel({
+      model,
+      workspaceDir: "/virtual/ws",
+      exec,
+      readFile: async (p) => (p.endsWith(".md") ? tgOnlyReport : "{}"),
+      writeFile,
+      exists: async () => true,
+      mkdir: async () => {},
+      registryPath: "/virtual/registry.json",
+    });
+    expect(tgOnlyRes.status).toBe("certified");
+    expect(tgOnlyRes.metrics?.prefillTokPerSec).toBe(0);
+    expect(tgOnlyRes.metrics?.genTokPerSec).toBe(42.5);
+    expect(tgOnlyRes.metrics?.npuWatts).toBe(12.0);
+    expect(tgOnlyRes.metrics?.gpuWatts).toBe(0.4);
+    expect(tgOnlyRes.metrics?.socWatts).toBe(16.4);
   });
 
   it("registra incompatible con errore in caso di crash (Error e non-Error)", async () => {

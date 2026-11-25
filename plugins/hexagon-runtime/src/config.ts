@@ -22,6 +22,11 @@ import {
   ROUTER_PORT,
   type ModelsIni,
 } from "./process.js";
+import {
+  defaultRegistryPath,
+  loadRegistry,
+  type ModelsRegistry,
+} from "./qualify.js";
 import type { MkdirFn, NowFn, ReadFileFn, WriteFileFn } from "./types.js";
 
 export const RECOMMENDED_MAIN_MODEL = "Ornith-1.5-9B-Q4_0";
@@ -52,24 +57,30 @@ export function resolvePluginSpecifier(
 export { outputLimitFor as calculateOutputLimit, outputLimitFor };
 
 /**
- * Costruisce l'oggetto provider per Kilo Code con host, porta e modelli live opzionali.
+ * Costruisce l'oggetto provider per Kilo Code con host, porta, modelli live opzionali
+ * e stato dal registro models-registry.json.
  */
 export function buildHexagonProvider(
   ini?: ModelsIni,
-  options: { host?: string; port?: number; liveModels?: string[] } = {},
+  options: {
+    host?: string;
+    port?: number;
+    liveModels?: string[];
+    registry?: ModelsRegistry;
+  } = {},
 ): HexagonProviderConfig {
-  const base = baseBuildHexagonProvider(ini);
+  const base = baseBuildHexagonProvider(ini, options.registry);
   if (options.liveModels) {
     for (const mid of options.liveModels) {
-      if (mid && !base.models[mid]) {
-        base.models[mid] = {
-          name: `${mid} (HTP0)`,
-          limit: {
-            context: DEFAULT_CONTEXT_WINDOW,
-            output: outputLimitFor(DEFAULT_CONTEXT_WINDOW),
-          },
-        };
-      }
+      if (!mid || base.models[mid]) continue;
+      if (options.registry?.[mid]?.status === "incompatible") continue;
+      base.models[mid] = {
+        name: `${mid} (HTP0)`,
+        limit: {
+          context: DEFAULT_CONTEXT_WINDOW,
+          output: outputLimitFor(DEFAULT_CONTEXT_WINDOW),
+        },
+      };
     }
   }
   if (options.host || options.port) {
@@ -108,6 +119,8 @@ export interface SetupConfigOptions {
   workspaceDir?: string;
   configDir?: string;
   iniPath?: string;
+  registryPath?: string;
+  registry?: ModelsRegistry;
   host?: string;
   port?: number;
   liveModels?: string[];
@@ -218,10 +231,23 @@ export async function installProviderConfig(
     /* fallback: parsing INI vuoto */
   }
   const ini = parseModelsIni(iniContent);
+  let registry = options.registry;
+  if (
+    !registry &&
+    (options.registryPath ||
+      (options.readFile && options.exists) ||
+      (!options.readFile && !options.exists))
+  ) {
+    const regPath = options.registryPath ?? defaultRegistryPath();
+    if (await exists(regPath)) {
+      registry = await loadRegistry(regPath, { readFile });
+    }
+  }
   const provider = buildHexagonProvider(ini, {
     host: options.host,
     port: options.port,
     liveModels: options.liveModels,
+    registry,
   });
   const modelKeys = Object.keys(provider.models);
 

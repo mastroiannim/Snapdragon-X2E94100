@@ -65,6 +65,15 @@ describe("watcher.ts — startModelWatcher", () => {
       storage.set(p, c);
     });
 
+    const routerProc = [
+      {
+        ProcessId: 8001,
+        ParentProcessId: 1,
+        ExecutablePath: "/virtual/bin/llama-server.exe",
+        CommandLine:
+          '"/virtual/bin/llama-server.exe" --host 127.0.0.1 --port 18803 --models-dir /virtual/models --models-preset /virtual/hexagon-models.ini',
+      },
+    ];
     let killed = false;
     const { fn: fetch } = recordingFetch((call) => {
       if (killed) throw new Error("ECONNREFUSED");
@@ -80,7 +89,15 @@ describe("watcher.ts — startModelWatcher", () => {
     });
     const { fn: spawn, calls: spawnCalls } = recordingSpawn(3333);
     const { fn: exec } = recordingExec((call) => {
-      if (call.command === "taskkill" || call.command === "pkill") {
+      if (call.command === "powershell" && call.args.some((a) => a.includes("Win32_Process"))) {
+        return okExec(JSON.stringify(routerProc));
+      }
+      if (call.command === "ps") {
+        return okExec(
+          "8001 1 /virtual/bin/llama-server.exe --host 127.0.0.1 --port 18803 --models-dir /virtual/models --models-preset /virtual/hexagon-models.ini",
+        );
+      }
+      if (call.command === "taskkill" || call.command === "kill" || call.command === "pkill") {
         killed = true;
       }
       if (call.args.some((a) => a.includes("inspect-gguf"))) {
@@ -332,6 +349,77 @@ describe("watcher.ts — startModelWatcher", () => {
       watcher.stop();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("startModelWatcher non rilancia MAI benchmark su modelli INCOMPATIBLE (pre-esistenti o falliti al tick 1)", async () => {
+    const listDir = vi.fn(async () => ["incompat-pre.gguf", "will-fail.gguf"]);
+    const exists = vi.fn(async (p: string) => !p.endsWith("kilo.json"));
+    const storage = new Map<string, string>([
+      [
+        "/virtual/registry.json",
+        JSON.stringify({
+          "incompat-pre": {
+            modelId: "incompat-pre",
+            status: "incompatible",
+            device: "HTP0",
+            contextWindow: 16384,
+            error: "0xC0000005",
+            timestamp: "2026-11-25T00:00:00Z",
+          },
+        }),
+      ],
+      [
+        "/virtual/hexagon-models.ini",
+        "[*]\nthreads = 12\n\n[will-fail]\nmodel = /virtual/models/will-fail.gguf\ndevice = HTP0\nctx-size = 65536\n",
+      ],
+    ]);
+    const benchCalls: string[] = [];
+    const exec = vi.fn(async (_cmd: string, args: string[]) => {
+      if (args.some((a) => a.includes("benchmark-hexagon"))) {
+        const modelArg = args[args.indexOf("-Models") + 1] ?? "";
+        benchCalls.push(modelArg);
+        return { code: 1, stdout: "", stderr: "Crash HTP" };
+      }
+      return okExec("");
+    });
+    const onQualified = vi.fn();
+
+    const watcher = startModelWatcher({
+      modelsDir: "/virtual/models",
+      workspaceDir: "/virtual/workspace",
+      iniPath: "/virtual/hexagon-models.ini",
+      configDir: "/virtual/config",
+      registryPath: "/virtual/registry.json",
+      listDir,
+      exists,
+      exec,
+      readFile: async (p) => storage.get(p) ?? "{}",
+      writeFile: async (p, c) => {
+        storage.set(p, c);
+      },
+      mkdir: async () => {},
+      intervalMs: 100_000,
+      enableAutoBenchmark: true,
+      onQualified,
+    });
+
+    try {
+      // Tick 1: incompat-pre viene ignorato; will-fail viene testato una volta e marcato incompatible
+      const tick1 = await watcher.checkNow();
+      expect(tick1.find((m) => m.id === "incompat-pre")?.status).toBe("incompatible");
+      expect(benchCalls).toEqual(["will-fail.gguf"]);
+      expect(onQualified).toHaveBeenCalledTimes(1);
+      expect(onQualified).toHaveBeenCalledWith("will-fail", false);
+      expect(storage.get("/virtual/hexagon-models.ini")).not.toContain("[will-fail]");
+
+      // Tick 2: nessun benchmark rilanciato su entrambi i modelli INCOMPATIBLE
+      const tick2 = await watcher.checkNow();
+      expect(tick2.every((m) => m.status === "incompatible")).toBe(true);
+      expect(benchCalls).toEqual(["will-fail.gguf"]);
+      expect(onQualified).toHaveBeenCalledTimes(1);
+    } finally {
+      watcher.stop();
     }
   });
 });

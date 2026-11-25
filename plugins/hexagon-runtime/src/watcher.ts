@@ -65,56 +65,69 @@ export function startModelWatcher(options: ModelWatcherOptions): ModelWatcher {
   let running = false;
   let stopped = false;
 
+  const syncCatalogAndReload = async (notifyDiscovery: boolean): Promise<void> => {
+    if (!options.writeFile || !options.iniPath) return;
+    try {
+      const syncRes = await syncDiscoveredModelsToIni({
+        modelsDir: options.modelsDir,
+        iniPath: options.iniPath,
+        workspaceDir: options.workspaceDir,
+        configDir: options.configDir,
+        registryPath: options.registryPath,
+        deps: {
+          listDir: options.listDir,
+          exists: options.exists,
+          readFile: options.readFile,
+          writeFile: options.writeFile,
+          exec: options.exec,
+          mkdir: options.mkdir,
+        },
+      });
+      if (notifyDiscovery && syncRes.addedModels.length > 0 && options.onModelsDiscovered) {
+        options.onModelsDiscovered(syncRes.addedModels);
+      }
+      if (
+        syncRes.iniUpdated &&
+        options.fetch &&
+        options.spawn &&
+        options.runtimeDir &&
+        options.serverExe
+      ) {
+        await reloadServerIfStale({
+          fetch: options.fetch,
+          spawn: options.spawn,
+          exec: options.exec,
+          readFile: options.readFile,
+          sleep: options.sleep,
+          runtimeDir: options.runtimeDir,
+          serverExe: options.serverExe,
+          iniPath: options.iniPath,
+          modelsDir: options.modelsDir,
+        });
+      }
+    } catch (syncErr) {
+      if (options.onError) options.onError(syncErr);
+    }
+  };
+
   const checkNow = async (): Promise<DiscoveredModel[]> => {
     if (running || stopped) return [];
     running = true;
     try {
       // 1. Sincronizzazione automatica e leggera del catalogo modelli (senza benchmark)
-      if (options.writeFile && options.iniPath) {
-        try {
-          const syncRes = await syncDiscoveredModelsToIni({
-            modelsDir: options.modelsDir,
-            iniPath: options.iniPath,
-            workspaceDir: options.workspaceDir,
-            configDir: options.configDir,
-            deps: {
-              listDir: options.listDir,
-              exists: options.exists,
-              readFile: options.readFile,
-              writeFile: options.writeFile,
-              exec: options.exec,
-              mkdir: options.mkdir,
-            },
-          });
-          if (syncRes.addedModels.length > 0) {
-            if (options.onModelsDiscovered) {
-              options.onModelsDiscovered(syncRes.addedModels);
-            }
-            if (options.fetch && options.spawn && options.runtimeDir && options.serverExe) {
-              await reloadServerIfStale({
-                fetch: options.fetch,
-                spawn: options.spawn,
-                exec: options.exec,
-                readFile: options.readFile,
-                sleep: options.sleep,
-                runtimeDir: options.runtimeDir,
-                serverExe: options.serverExe,
-                iniPath: options.iniPath,
-                modelsDir: options.modelsDir,
-              });
-            }
-          }
-        } catch (syncErr) {
-          if (options.onError) options.onError(syncErr);
-        }
-      }
+      await syncCatalogAndReload(true);
 
       const registry: ModelsRegistry = await loadRegistry(options.registryPath, {
         readFile: options.readFile,
       });
       const certifiedIds = new Set(
         Object.entries(registry)
-          .filter(([_, prof]) => prof.status === "certified")
+          .filter(([_, prof]) => prof?.status === "certified")
+          .map(([id]) => id),
+      );
+      const incompatibleIds = new Set(
+        Object.entries(registry)
+          .filter(([_, prof]) => prof?.status === "incompatible")
           .map(([id]) => id),
       );
 
@@ -124,11 +137,15 @@ export function startModelWatcher(options: ModelWatcherOptions): ModelWatcher {
           listDir: options.listDir,
           exists: options.exists,
           exec: options.exec,
+          readFile: options.readFile,
         },
+        registry,
         certifiedIds,
+        incompatibleIds,
       });
 
       const untested = discovered.filter((m) => m.status === "untested");
+      let markedIncompatible = false;
       if (options.enableAutoBenchmark) {
         for (const model of untested) {
           if (stopped) break;
@@ -143,6 +160,9 @@ export function startModelWatcher(options: ModelWatcherOptions): ModelWatcher {
             mkdir: options.mkdir,
             registryPath: options.registryPath,
           });
+          if (res.status === "incompatible") {
+            markedIncompatible = true;
+          }
           if (options.onQualified) {
             options.onQualified(model.id, res.status === "certified");
           }
@@ -151,6 +171,10 @@ export function startModelWatcher(options: ModelWatcherOptions): ModelWatcher {
         console.warn(
           `[hexagon-runtime] Rilevati ${untested.length} modelli non testati. Benchmark automatico ignorato (richiede consenso esplicito per evitare saturazione memoria).`,
         );
+      }
+
+      if (markedIncompatible && !stopped) {
+        await syncCatalogAndReload(false);
       }
 
       return discovered;

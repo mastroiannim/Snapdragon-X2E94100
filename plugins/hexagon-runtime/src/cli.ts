@@ -21,6 +21,7 @@ import {
   ROUTER_HOST,
   ROUTER_PORT,
 } from "./process.js";
+import { defaultRegistryPath } from "./qualify.js";
 import { inspectRuntimeStatus } from "./sync.js";
 import { validateKiloConfig } from "./validate.js";
 
@@ -145,6 +146,7 @@ async function main(): Promise<void> {
       modelsDir: paths.modelsDir,
       iniPath: paths.iniPath,
       workspaceDir: paths.workspaceDir,
+      registryPath: defaultRegistryPath(),
       deps: nodeDeps,
     });
     console.log(`[hexagon-plugin] Modelli totali nel catalogo: ${res.totalModels}`);

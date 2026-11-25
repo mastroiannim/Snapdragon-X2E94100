@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { Hooks, PluginInput } from "@kilocode/plugin";
 import pluginInit, {
@@ -5,6 +6,7 @@ import pluginInit, {
   createHexagonHooks,
   plugin,
 } from "../src/index.js";
+import { defaultPaths } from "../src/process.js";
 import type { WatchdogOptions } from "../src/watchdog.js";
 import type { ModelWatcherOptions } from "../src/watcher.js";
 import type { SpawnFn } from "../src/types.js";
@@ -436,6 +438,382 @@ describe("bootstrapRuntime", () => {
     expect(calls.some((c) => c.args.some((a) => a.includes("launch-hexagon.ps1")))).toBe(false);
     expect(calls.some((c) => c.args.some((a) => a.includes("inspect-gguf.ps1")))).toBe(true);
   });
+
+  it("NESSUN DOPPIO RIAVVIO durante update runtime + nuova discovery su Router gestito attivo", async () => {
+    const paths = defaultPaths("/virtual/repo");
+    const iniPath = "/virtual/repo/hexagon-models.ini";
+    const modelsDir = "/virtual/models";
+    const storage = new Map<string, string>([
+      [
+        iniPath,
+        "[*]\nthreads = 12\n\n[Ornith-1.5-9B-Q4_0]\nmodel = /virtual/models/Ornith-1.5-9B-Q4_0.gguf\ndevice = HTP0\nctx-size = 65536\n",
+      ],
+    ]);
+    let synced = false;
+    let serverRunning = true;
+    const events: string[] = [];
+
+    const runningRouterProc = [
+      {
+        ProcessId: 9001,
+        ParentProcessId: 1,
+        ExecutablePath: paths.serverExe,
+        CommandLine: `"${paths.serverExe}" --host 127.0.0.1 --port 18803 --models-dir ${modelsDir} --models-preset ${iniPath}`,
+      },
+    ];
+
+    const { fn: exec, calls } = recordingExec((call) => {
+      if (call.command === "powershell" && call.args.some((a) => a.includes("Win32_Process"))) {
+        return okExec(serverRunning ? JSON.stringify(runningRouterProc) : "[]");
+      }
+      if (call.command === "ps") {
+        return okExec(
+          serverRunning
+            ? `9001 1 "${paths.serverExe}" --host 127.0.0.1 --port 18803 --models-dir ${modelsDir} --models-preset ${iniPath}`
+            : "",
+        );
+      }
+      if (call.command === "taskkill" || call.command === "kill") {
+        events.push("stopServer");
+        serverRunning = false;
+        return okExec("");
+      }
+      if (call.command === "powershell" && call.args.includes("-Apply")) {
+        events.push("sync-geniex");
+        synced = true;
+        return okExec('{"Message":"runtime aggiornato","Files":["ggml-hexagon.dll"]}');
+      }
+      if (call.command.endsWith("geniex.exe")) {
+        return okExec(GENIEX_VERSION_OUTPUT);
+      }
+      return okExec(synced ? LLAMA_VERSION_OUTPUT : "version: 11000 (0000000)");
+    });
+
+    const { fn: fetch } = recordingFetch((call) => {
+      if (!serverRunning) throw new Error("ECONNREFUSED");
+      if (call.url.endsWith("/v1/models")) {
+        const ini = storage.get(iniPath) ?? "";
+        const ids = ini.includes("[nuovo-modello]")
+          ? ["Ornith-1.5-9B-Q4_0", "nuovo-modello"]
+          : ["Ornith-1.5-9B-Q4_0"];
+        return {
+          status: 200,
+          ok: true,
+          json: async () => ({ object: "list", data: ids.map((id) => ({ id })) }),
+          text: async () => "",
+        };
+      }
+      return routerResponse(call.url);
+    });
+
+    const { fn: spawnBase, calls: spawnCalls } = recordingSpawn(9002);
+    const spawn: SpawnFn = (command, args, opts) => {
+      events.push("spawnServer");
+      serverRunning = true;
+      return spawnBase(command, args, opts);
+    };
+
+    const result = await bootstrapRuntime({
+      workspaceDir: "/virtual/repo",
+      modelsDir,
+      iniPath,
+      configDir: "/virtual/config",
+      registryPath: "/virtual/registry.json",
+      mkdir: async () => {},
+      deps: {
+        exec,
+        fetch,
+        spawn,
+        exists: async (p) => !p.endsWith("kilo.json"),
+        listDir: async (d) =>
+          d.includes("models")
+            ? ["Ornith-1.5-9B-Q4_0.gguf", "nuovo-modello.gguf"]
+            : ALL_RUNTIME_FILES,
+        readFile: async (p) => storage.get(p) ?? "",
+        writeFile: async (p, c) => {
+          if (p === iniPath) events.push("updateIni");
+          storage.set(p, c);
+        },
+        sleep: async () => {},
+        now: () => 0,
+      },
+    });
+
+    expect(result.sync.updated).toBe(true);
+    expect(result.catalog?.addedModels).toEqual(["nuovo-modello"]);
+    expect(result.server.started).toBe(true);
+    expect(result.reload?.reloaded).toBe(false);
+    // Verifica: 1 solo stop, -NoStopServer a sync-geniex, update INI prima di spawn, 1 solo avvio!
+    expect(events).toEqual(["stopServer", "sync-geniex", "updateIni", "spawnServer"]);
+    expect(spawnCalls).toHaveLength(1);
+    const applyCall = calls.find((c) => c.args.includes("-Apply"));
+    expect(applyCall?.args).toContain("-NoStopServer");
+  });
+
+  it("bootstrapRuntime allineato + nuova discovery: waitForHealth prima di reloadServerIfStale e nessun riavvio su Direct-mode", async () => {
+    const paths = defaultPaths("/virtual/repo");
+    const iniPath = "/virtual/repo/hexagon-models.ini";
+    const modelsDir = "/virtual/models";
+    const storage = new Map<string, string>([
+      [
+        iniPath,
+        "[*]\nthreads = 12\n\n[Ornith-1.5-9B-Q4_0]\nmodel = /virtual/models/Ornith-1.5-9B-Q4_0.gguf\ndevice = HTP0\nctx-size = 65536\n",
+      ],
+    ]);
+    const directProc = [
+      {
+        ProcessId: 9111,
+        ParentProcessId: 1,
+        ExecutablePath: paths.serverExe,
+        CommandLine: `"${paths.serverExe}" --port 18803 -m /virtual/models/Ornith-1.5-9B-Q4_0.gguf`,
+      },
+    ];
+    const { fn: exec, calls } = recordingExec((call) => {
+      if (call.command === "powershell" && call.args.some((a) => a.includes("Win32_Process"))) {
+        return okExec(JSON.stringify(directProc));
+      }
+      if (call.command === "ps") {
+        return okExec(`9111 1 "${paths.serverExe}" --port 18803 -m /virtual/models/Ornith-1.5-9B-Q4_0.gguf`);
+      }
+      if (call.command.endsWith("geniex.exe")) return okExec(GENIEX_VERSION_OUTPUT);
+      return okExec(LLAMA_VERSION_OUTPUT);
+    });
+    const { fn: fetch } = recordingFetch((call) =>
+      call.url.endsWith("/v1/models")
+        ? fakeResponse(200, { object: "list", data: [{ id: "Ornith-1.5-9B-Q4_0" }] })
+        : routerResponse(call.url),
+    );
+    const { fn: spawn, calls: spawnCalls } = recordingSpawn();
+
+    const result = await bootstrapRuntime({
+      workspaceDir: "/virtual/repo",
+      modelsDir,
+      iniPath,
+      configDir: "/virtual/config",
+      registryPath: "/virtual/registry.json",
+      mkdir: async () => {},
+      deps: {
+        exec,
+        fetch,
+        spawn,
+        exists: async (p) => !p.endsWith("kilo.json"),
+        listDir: async (d) =>
+          d.includes("models") ? ["Ornith-1.5-9B-Q4_0.gguf", "extra.gguf"] : ALL_RUNTIME_FILES,
+        readFile: async (p) => storage.get(p) ?? "",
+        writeFile: async (p, c) => {
+          storage.set(p, c);
+        },
+        sleep: async () => {},
+        now: () => 0,
+      },
+    });
+
+    expect(result.catalog?.addedModels).toEqual(["extra"]);
+    expect(result.reload?.reloaded).toBe(false);
+    expect(spawnCalls).toHaveLength(0);
+    expect(calls.some((c) => c.command === "taskkill" || c.command === "kill")).toBe(false);
+  });
+
+  it("bootstrapRuntime allineato + nuova discovery su Router gestito: reload post-health e waitForHealth", async () => {
+    const paths = defaultPaths("/virtual/repo");
+    const iniPath = "/virtual/repo/hexagon-models.ini";
+    const modelsDir = "/virtual/models";
+    const storage = new Map<string, string>([
+      [
+        iniPath,
+        "[*]\nthreads = 12\n\n[Ornith-1.5-9B-Q4_0]\nmodel = /virtual/models/Ornith-1.5-9B-Q4_0.gguf\ndevice = HTP0\nctx-size = 65536\n",
+      ],
+    ]);
+    let serverRunning = true;
+    let reloadedOnce = false;
+    const routerProc = [
+      {
+        ProcessId: 9333,
+        ParentProcessId: 1,
+        ExecutablePath: paths.serverExe,
+        CommandLine: `"${paths.serverExe}" --host 127.0.0.1 --port 18803 --models-dir ${modelsDir} --models-preset ${iniPath}`,
+      },
+    ];
+    const { fn: exec } = recordingExec((call) => {
+      if (call.command === "powershell" && call.args.some((a) => a.includes("Win32_Process"))) {
+        return okExec(JSON.stringify(routerProc));
+      }
+      if (call.command === "ps") {
+        return okExec(
+          `9333 1 "${paths.serverExe}" --host 127.0.0.1 --port 18803 --models-dir ${modelsDir} --models-preset ${iniPath}`,
+        );
+      }
+      if (call.command === "taskkill" || call.command === "kill") {
+        serverRunning = false;
+        return okExec("");
+      }
+      if (call.command.endsWith("geniex.exe")) return okExec(GENIEX_VERSION_OUTPUT);
+      return okExec(LLAMA_VERSION_OUTPUT);
+    });
+    const { fn: fetch, calls: fetchCalls } = recordingFetch((call) => {
+      if (!serverRunning) throw new Error("ECONNREFUSED");
+      if (call.url.endsWith("/v1/models")) {
+        return fakeResponse(200, {
+          object: "list",
+          data: reloadedOnce
+            ? [{ id: "Ornith-1.5-9B-Q4_0" }, { id: "extra" }]
+            : [{ id: "Ornith-1.5-9B-Q4_0" }],
+        });
+      }
+      return routerResponse(call.url);
+    });
+    const { fn: spawnBase, calls: spawnCalls } = recordingSpawn(9334);
+    const spawn: SpawnFn = (command, args, opts) => {
+      serverRunning = true;
+      reloadedOnce = true;
+      return spawnBase(command, args, opts);
+    };
+
+    const result = await bootstrapRuntime({
+      workspaceDir: "/virtual/repo",
+      modelsDir,
+      iniPath,
+      configDir: "/virtual/config",
+      registryPath: "/virtual/registry.json",
+      mkdir: async () => {},
+      deps: {
+        exec,
+        fetch,
+        spawn,
+        exists: async (p) => !p.endsWith("kilo.json"),
+        listDir: async (d) =>
+          d.includes("models") ? ["Ornith-1.5-9B-Q4_0.gguf", "extra.gguf"] : ALL_RUNTIME_FILES,
+        readFile: async (p) => storage.get(p) ?? "",
+        writeFile: async (p, c) => {
+          storage.set(p, c);
+        },
+        sleep: async () => {},
+        now: () => 0,
+      },
+    });
+
+    expect(result.sync.updated).toBe(false);
+    expect(result.catalog?.addedModels).toEqual(["extra"]);
+    expect(result.reload?.reloaded).toBe(true);
+    expect(result.health.ready).toBe(true);
+    expect(spawnCalls).toHaveLength(1);
+    expect(fetchCalls.filter((c) => c.url.endsWith("/health")).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("bootstrapRuntime tenta ripristino server se ensureRuntime fallisce dopo stopServer scoped", async () => {
+    const paths = defaultPaths("/virtual/repo");
+    const iniPath = "/virtual/repo/hexagon-models.ini";
+    const modelsDir = "/virtual/models";
+    let serverUp = true;
+    const routerProc = [
+      {
+        ProcessId: 9222,
+        ParentProcessId: 1,
+        ExecutablePath: paths.serverExe,
+        CommandLine: `"${paths.serverExe}" --host 127.0.0.1 --port 18803 --models-dir ${modelsDir} --models-preset ${iniPath}`,
+      },
+    ];
+    const { fn: exec } = recordingExec((call) => {
+      if (call.command === "powershell" && call.args.some((a) => a.includes("Win32_Process"))) {
+        return okExec(JSON.stringify(routerProc));
+      }
+      if (call.command === "ps") {
+        return okExec(
+          `9222 1 "${paths.serverExe}" --host 127.0.0.1 --port 18803 --models-dir ${modelsDir} --models-preset ${iniPath}`,
+        );
+      }
+      if (call.command === "taskkill" || call.command === "kill") {
+        serverUp = false;
+        return okExec("");
+      }
+      if (call.command === "powershell" && call.args.includes("-Apply")) {
+        return { code: 1, stdout: '{"Error":"download fallito"}', stderr: "" };
+      }
+      if (call.command.endsWith("geniex.exe")) return okExec(GENIEX_VERSION_OUTPUT);
+      return okExec("version: 11000 (0000000)");
+    });
+    const { fn: spawn, calls: spawnCalls } = recordingSpawn(9223);
+    await expect(
+      bootstrapRuntime({
+        workspaceDir: "/virtual/repo",
+        modelsDir,
+        iniPath,
+        deps: {
+          exec,
+          fetch: async () => {
+            if (!serverUp) throw new Error("down");
+            return routerResponse("http://127.0.0.1:18803/health");
+          },
+          spawn,
+          exists: async () => true,
+          listDir: async () => ALL_RUNTIME_FILES,
+          readFile: async () => "",
+          writeFile: async () => {},
+          sleep: async () => {},
+          now: () => 0,
+        },
+      }),
+    ).rejects.toThrow(/download fallito/);
+    expect(spawnCalls).toHaveLength(1);
+  });
+
+  it("runBootstrapCycle copre fallback senza listDir e propagazione errori catalogo se non ignorati", async () => {
+    const { runBootstrapCycle } = await import("../src/bootstrap.js");
+    const paths = defaultPaths("/virtual/repo");
+    const { fn: exec } = recordingExec((call) => {
+      if (call.command === "powershell" && call.args.includes("-Apply")) {
+        return okExec('{"Message":"allineato","Files":[]}');
+      }
+      return call.command.endsWith("geniex.exe")
+        ? okExec(GENIEX_VERSION_OUTPUT)
+        : okExec(LLAMA_VERSION_OUTPUT);
+    });
+    const cycleNoListDir = await runBootstrapCycle({
+      workspaceDir: paths.workspaceDir,
+      runtimeDir: paths.binPath,
+      geniexDir: paths.geniexDir,
+      geniexExe: paths.geniexExe,
+      serverExe: paths.serverExe,
+      modelsDir: paths.modelsDir,
+      iniPath: "/virtual/repo/hexagon-models.ini",
+      deps: {
+        exec,
+        fetch: recordingFetch((c) => routerResponse(c.url)).fn,
+        exists: async () => true,
+        readFile: async () => "",
+        sleep: async () => {},
+        now: () => 0,
+      },
+    });
+    expect(cycleNoListDir.sync.updated).toBe(true);
+    expect(cycleNoListDir.health?.ready).toBe(true);
+
+    await expect(
+      runBootstrapCycle({
+        workspaceDir: paths.workspaceDir,
+        runtimeDir: paths.binPath,
+        geniexDir: paths.geniexDir,
+        geniexExe: paths.geniexExe,
+        serverExe: paths.serverExe,
+        modelsDir: paths.modelsDir,
+        iniPath: "/virtual/repo/hexagon-models.ini",
+        ignoreCatalogErrors: false,
+        deps: {
+          exec,
+          fetch: recordingFetch((c) => routerResponse(c.url)).fn,
+          exists: async () => true,
+          readFile: async () => "",
+          writeFile: async () => {},
+          listDir: async (d) => {
+            if (d.includes("models")) throw new Error("catalog fail");
+            return ALL_RUNTIME_FILES;
+          },
+          sleep: async () => {},
+          now: () => 0,
+        },
+      }),
+    ).rejects.toThrow(/catalog fail/);
+  });
 });
 
 describe("hook config: provider hexagon dinamico", () => {
@@ -530,6 +908,55 @@ describe("hook config: provider hexagon dinamico", () => {
     const input = {} as ConfigInput;
     await hooks.config!(input);
     expect(Object.keys(input.provider?.hexagon?.models ?? {})).toHaveLength(4);
+  });
+
+  it("hook config propaga CERTIFIED e rimuove INCOMPATIBLE da models-registry.json", async () => {
+    const regPath = "/virtual/registry/models-registry.json";
+    const hooks = createHexagonHooks({
+      workspaceDir: "/virtual/repo",
+      iniPath: "/virtual/repo/hexagon-models.ini",
+      registryPath: regPath,
+      deps: {
+        exists: async (p) => p === "/virtual/repo/hexagon-models.ini" || p === regPath,
+        readFile: async (p) =>
+          p === regPath
+            ? JSON.stringify({
+                "Ornith-1.5-9B-Q4_0": {
+                  modelId: "Ornith-1.5-9B-Q4_0",
+                  status: "incompatible",
+                  device: "HTP0",
+                  contextWindow: 65536,
+                  error: "Crash 0x200",
+                  timestamp: "2026-11-25T00:00:00Z",
+                },
+                "extra-model": {
+                  modelId: "extra-model",
+                  status: "certified",
+                  device: "HTP0,GPUOpenCL",
+                  contextWindow: 131_072,
+                  timestamp: "2026-11-25T00:00:00Z",
+                },
+              })
+            : INI_TEXT,
+      },
+    });
+    const input = {
+      provider: {
+        hexagon: {
+          models: {
+            "Ornith-1.5-9B-Q4_0": { name: "stale" },
+          },
+        },
+      },
+    } as unknown as ConfigInput;
+    await hooks.config!(input);
+    const models = input.provider?.hexagon?.models;
+    expect(models?.["Ornith-1.5-9B-Q4_0"]).toBeUndefined();
+    expect(models?.["extra-model"]).toEqual({
+      name: "extra-model (HTP0,GPUOpenCL)",
+      limit: { context: 131_072, output: 16_384 },
+    });
+    expect(input.model).toBe("hexagon/MiniCPM5-2B-Q4_K_M");
   });
 });
 
@@ -719,10 +1146,13 @@ describe("wiring tool sync e status negli hook", () => {
     );
     expect(parsed.updated).toBe(true);
     expect(parsed.message).toBe("forzato");
-    const powershell = calls.find((call) => call.command === "powershell");
-    expect(powershell?.args[powershell.args.indexOf("-File") + 1]).toContain(
+    const applyCall = calls.find(
+      (call) => call.command === "powershell" && call.args.includes("-Apply"),
+    );
+    expect(applyCall?.args[applyCall.args.indexOf("-File") + 1]).toContain(
       "sync-geniex.ps1",
     );
+    expect(applyCall?.args).toContain("-NoStopServer");
 
     const status = JSON.parse(
       await hooks.tool!.hexagon_status.execute({}, undefined as never),

@@ -6,6 +6,7 @@
  * si usa il ctx-size della sezione INI, con fallback prudente a 65.536.
  */
 import { ROUTER_PORT, type ModelsIni } from "./process.js";
+import type { ModelsRegistry } from "./qualify.js";
 
 export const LOCAL_PROVIDER_ID = "hexagon";
 
@@ -22,7 +23,15 @@ export function isLocalModel(providerID: string): boolean {
   return providerID === LOCAL_PROVIDER_ID;
 }
 
-export function contextWindowFor(modelId: string, ini?: ModelsIni): number {
+export function contextWindowFor(
+  modelId: string,
+  ini?: ModelsIni,
+  registry?: ModelsRegistry,
+): number {
+  const reg = registry?.[modelId];
+  if (reg?.status === "certified" && typeof reg.contextWindow === "number" && reg.contextWindow > 0) {
+    return reg.contextWindow;
+  }
   const tested = TESTED_CONTEXT_WINDOWS[modelId];
   if (tested !== undefined) return tested;
   const fromIni = ini?.models?.[modelId]?.ctxSize;
@@ -36,29 +45,106 @@ export interface ModelDescriptor {
   contextWindow: number;
   device?: string;
   tested: boolean;
+  status: "certified" | "untested" | "incompatible";
 }
 
-/** Catalogo: modelli testati + sezioni INI, senza duplicati. */
-export function listKnownModels(ini?: ModelsIni): ModelDescriptor[] {
+/**
+ * Catalogo: modelli testati + sezioni INI + registro models-registry.json, senza duplicati.
+ * Propaga lo stato CERTIFIED/INCOMPATIBLE empirico dal registro locale.
+ */
+export function listKnownModels(
+  ini?: ModelsIni,
+  registry?: ModelsRegistry,
+): ModelDescriptor[] {
   const descriptors = new Map<string, ModelDescriptor>();
   const modelsMap = ini?.models ?? {};
+  const regMap = registry ?? {};
+
   for (const [id, contextWindow] of Object.entries(TESTED_CONTEXT_WINDOWS)) {
-    descriptors.set(id, {
-      id,
-      contextWindow,
-      device: modelsMap[id]?.device,
-      tested: true,
-    });
+    const reg = regMap[id];
+    const iniDevice = modelsMap[id]?.device;
+    if (reg?.status === "incompatible") {
+      descriptors.set(id, {
+        id,
+        contextWindow: reg.contextWindow > 0 ? reg.contextWindow : contextWindow,
+        device: reg.device || iniDevice,
+        tested: false,
+        status: "incompatible",
+      });
+    } else if (reg?.status === "certified") {
+      descriptors.set(id, {
+        id,
+        contextWindow: reg.contextWindow > 0 ? reg.contextWindow : contextWindow,
+        device: reg.device || iniDevice,
+        tested: true,
+        status: "certified",
+      });
+    } else {
+      descriptors.set(id, {
+        id,
+        contextWindow,
+        device: iniDevice,
+        tested: true,
+        status: "certified",
+      });
+    }
   }
+
   for (const [id, config] of Object.entries(modelsMap)) {
     if (descriptors.has(id)) continue;
-    descriptors.set(id, {
-      id,
-      contextWindow: contextWindowFor(id, ini),
-      device: config.device,
-      tested: false,
-    });
+    const reg = regMap[id];
+    if (reg?.status === "incompatible") {
+      descriptors.set(id, {
+        id,
+        contextWindow: contextWindowFor(id, ini, registry),
+        device: reg.device || config.device,
+        tested: false,
+        status: "incompatible",
+      });
+    } else if (reg?.status === "certified") {
+      descriptors.set(id, {
+        id,
+        contextWindow: contextWindowFor(id, ini, registry),
+        device: reg.device || config.device,
+        tested: true,
+        status: "certified",
+      });
+    } else {
+      descriptors.set(id, {
+        id,
+        contextWindow: contextWindowFor(id, ini, registry),
+        device: config.device,
+        tested: false,
+        status: "untested",
+      });
+    }
   }
+
+  for (const [id, prof] of Object.entries(regMap)) {
+    if (descriptors.has(id) || !prof) continue;
+    const ctx =
+      typeof prof.contextWindow === "number" && prof.contextWindow > 0
+        ? prof.contextWindow
+        : DEFAULT_CONTEXT_WINDOW;
+    if (prof.status === "incompatible") {
+      descriptors.set(id, {
+        id,
+        contextWindow: ctx,
+        device: prof.device,
+        tested: false,
+        status: "incompatible",
+      });
+    } else if (prof.status === "certified") {
+      descriptors.set(id, {
+        id,
+        contextWindow: ctx,
+        device: prof.device,
+        tested: true,
+        status: "certified",
+      });
+    }
+  }
+
   return [...descriptors.values()];
 }
 
@@ -81,12 +167,16 @@ export interface HexagonProviderConfig {
 
 /**
  * Configurazione dinamica del provider hexagon: catalogo testato + sezioni
- * INI, contesti reali e limiti di output derivati. Usata dall'hook `config`
- * per arricchire la configurazione Kilo a runtime senza toccare kilo.json.
+ * INI + models-registry.json (esclude modelli INCOMPATIBLE, promuove CERTIFIED).
+ * Usata dall'hook `config` per arricchire la configurazione Kilo a runtime.
  */
-export function buildHexagonProvider(ini?: ModelsIni): HexagonProviderConfig {
+export function buildHexagonProvider(
+  ini?: ModelsIni,
+  registry?: ModelsRegistry,
+): HexagonProviderConfig {
   const models: HexagonProviderConfig["models"] = {};
-  for (const descriptor of listKnownModels(ini)) {
+  for (const descriptor of listKnownModels(ini, registry)) {
+    if (descriptor.status === "incompatible") continue;
     const device = descriptor.device ?? "HTP0";
     models[descriptor.id] = {
       name: `${descriptor.id} (${device})`,

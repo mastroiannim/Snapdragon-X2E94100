@@ -9,7 +9,7 @@ import {
   resolveBenchScript,
   runBenchmark,
 } from "../src/tools.js";
-import { BUNDLED_BENCH_SCRIPT } from "../src/process.js";
+import { BUNDLED_BENCH_SCRIPT, defaultPaths } from "../src/process.js";
 import type { SyncOutcome } from "../src/sync.js";
 import { fakeResponse, okExec, recordingExec, recordingFetch, recordingSpawn } from "./helpers.js";
 
@@ -408,14 +408,56 @@ describe("createHexagonTools", () => {
     expect(raw).toContain("\n");
   });
 
-  it("hexagon_models: lista modelli locali con classificazione", async () => {
-    const { deps } = makeDeps();
-    const tools = createHexagonTools(deps);
+  it("hexagon_models: lista modelli locali propagando CERTIFIED e INCOMPATIBLE da models-registry.json", async () => {
+    const { deps, written } = makeDeps();
+    written.set(
+      "/virtual/registry/models-registry.json",
+      JSON.stringify({
+        "custom-cert": {
+          modelId: "custom-cert",
+          status: "certified",
+          device: "HTP0,GPUOpenCL",
+          tensorSplit: "80,20",
+          contextWindow: 131_072,
+          metrics: { prefillTokPerSec: 500, genTokPerSec: 42, device: "HTP0,GPUOpenCL" },
+          timestamp: "2026-11-25T00:00:00Z",
+        },
+        "custom-bad": {
+          modelId: "custom-bad",
+          status: "incompatible",
+          device: "HTP0",
+          contextWindow: 16_384,
+          error: "Crash 0x200",
+          timestamp: "2026-11-25T00:00:00Z",
+        },
+      }),
+    );
+    const tools = createHexagonTools({
+      ...deps,
+      listDir: async () => [
+        "Ornith-1.5-9B-Q4_0.gguf",
+        "custom-cert.gguf",
+        "custom-bad.gguf",
+      ],
+    });
     const raw = await tools.hexagon_models.execute({}, undefined as never);
-    const parsed = JSON.parse(raw);
-    expect(Array.isArray(parsed)).toBe(true);
-    expect(parsed[0].id).toBe("Ornith-1.5-9B-Q4_0");
-    expect(parsed[0].status).toBe("certified");
+    const parsed = JSON.parse(raw) as Array<{
+      id: string;
+      status: string;
+      device: string;
+      tensorSplit?: string;
+      error?: string;
+    }>;
+    expect(parsed.find((m) => m.id === "Ornith-1.5-9B-Q4_0")?.status).toBe("certified");
+    expect(parsed.find((m) => m.id === "custom-cert")).toMatchObject({
+      status: "certified",
+      device: "HTP0,GPUOpenCL",
+      tensorSplit: "80,20",
+    });
+    expect(parsed.find((m) => m.id === "custom-bad")).toMatchObject({
+      status: "incompatible",
+      error: "Crash 0x200",
+    });
   });
 
   it("hexagon_qualify: qualifica un modello esistente e salva sul registry isolato", async () => {
@@ -528,14 +570,82 @@ describe("createHexagonTools", () => {
     expect(errParsed.catalog.iniUpdated).toBe(false);
     expect(errParsed.catalog.routerReloaded).toBe(false);
     expect(errParsed.health).toBeUndefined();
+
+    // Con ignoreServerErrors e reloadServerIfStale che fallisce dopo ensureServer ok
+    const reloadErrTools = createHexagonTools({
+      ...deps,
+      sync: async () => ({ ...syncOutcome, updated: false }),
+      fetch: async (url) =>
+        url.endsWith("/v1/models")
+          ? fakeResponse(200, { object: "list", data: [] })
+          : routerResponse(url),
+      readFile: async () => {
+        throw new Error("read boom");
+      },
+      listDir: async () => [],
+      exists: async (p) => p.endsWith("hexagon-models.ini"),
+    });
+    const reloadErrParsed = JSON.parse(
+      await reloadErrTools.hexagon_sync.execute({}, undefined as never),
+    );
+    expect(reloadErrParsed.catalog.routerReloaded).toBe(false);
+
+    // Con ignoreServerErrors=true e reloadServerIfStale riuscito ma health post-reload fallito
+    let postReloadDown = false;
+    const defaultServerExe = defaultPaths(deps.workspaceDir).serverExe;
+    const routerProc = [
+      {
+        ProcessId: 6601,
+        ParentProcessId: 1,
+        ExecutablePath: defaultServerExe,
+        CommandLine:
+          `"${defaultServerExe}" --host 127.0.0.1 --port 18803 --models-dir /virtual/models --models-preset /virtual/ini/hexagon-models.ini`,
+      },
+    ];
+    const postReloadHealthFailTools = createHexagonTools({
+      ...deps,
+      sync: async () => ({ ...syncOutcome, updated: false }),
+      exec: async (cmd, args) => {
+        if (cmd === "powershell" && args.some((a) => a.includes("Win32_Process"))) {
+          return okExec(JSON.stringify(routerProc));
+        }
+        if (cmd === "ps") {
+          return okExec(
+            `6601 1 "${defaultServerExe}" --host 127.0.0.1 --port 18803 --models-dir /virtual/models --models-preset /virtual/ini/hexagon-models.ini`,
+          );
+        }
+        return okExec("");
+      },
+      fetch: async (url) => {
+        if (postReloadDown) throw new Error("down after reload");
+        if (url.endsWith("/v1/models")) {
+          return fakeResponse(200, { object: "list", data: [] });
+        }
+        return routerResponse(url);
+      },
+      spawn: (...args) => {
+        postReloadDown = true;
+        return deps.spawn(...args);
+      },
+    });
+    const postReloadParsed = JSON.parse(
+      await postReloadHealthFailTools.hexagon_sync.execute({}, undefined as never),
+    );
+    expect(postReloadParsed.catalog.routerReloaded).toBe(true);
+    expect(postReloadParsed.health).toBeUndefined();
   });
 
-  it("hexagon_bench: token/s nel JSON", async () => {
+  it("hexagon_bench: token/s nel JSON e forwarding -Device/-TensorSplit", async () => {
+    const { fn: exec, calls } = recordingExec(() => okExec());
     const { deps } = makeDeps();
-    const tools = createHexagonTools(deps);
+    const tools = createHexagonTools({ ...deps, exec });
     const parsed = JSON.parse(
       await tools.hexagon_bench.execute(
-        { model: "Ornith-1.5-9B-Q4_0" },
+        {
+          model: "Ornith-1.5-9B-Q4_0",
+          device: "HTP0,GPUOpenCL",
+          tensorSplit: "75,25",
+        },
         undefined as never,
       ),
     );
@@ -543,6 +653,10 @@ describe("createHexagonTools", () => {
     expect(parsed.results[0].npuW).toBe(14.2);
     expect(parsed.results[0].socW).toBe(21.9);
     expect(parsed.model).toBe("Ornith-1.5-9B-Q4_0");
+    expect(calls[0].args).toContain("-Device");
+    expect(calls[0].args[calls[0].args.indexOf("-Device") + 1]).toBe("HTP0,GPUOpenCL");
+    expect(calls[0].args).toContain("-TensorSplit");
+    expect(calls[0].args[calls[0].args.indexOf("-TensorSplit") + 1]).toBe("75,25");
   });
 
   it("hexagon_qualify: errore se modello non esiste", async () => {
@@ -600,6 +714,15 @@ describe("createHexagonTools", () => {
     });
     const parsedErr = JSON.parse(await toolsErr.hexagon_status.execute({}, undefined as never));
     expect(parsedErr.runtime.error).toContain("check fallito");
+
+    const toolsStrErr = createHexagonTools({
+      ...deps,
+      checkRuntime: async () => {
+        throw "raw-check-failure";
+      },
+    });
+    const parsedStrErr = JSON.parse(await toolsStrErr.hexagon_status.execute({}, undefined as never));
+    expect(parsedStrErr.runtime.error).toBe("raw-check-failure");
   });
 
   it("hexagon_restart: arresta, riavvia e restituisce stato health/modelli", async () => {
@@ -663,6 +786,37 @@ describe("createHexagonTools", () => {
       await toolsMinimalDefaults.hexagon_qualify.execute({ model: "absent" }, undefined as never),
     );
     expect(qualMissing.error).toContain("non trovato");
+
+    // Default modelsDir da defaultPaths quando omesso (exists=false evita letture su disco)
+    const toolsDefaultModelsDir = createHexagonTools({
+      fetch,
+      exec: async () => okExec(),
+      readFile: async () => "",
+      exists: async () => false,
+      workspaceDir: "/virtual/nonexistent-ws-for-tools",
+      sync: async () => syncOutcome,
+    });
+    expect(JSON.parse(await toolsDefaultModelsDir.hexagon_models.execute({}, undefined as never))).toEqual([]);
+    const qualDefaultMissing = JSON.parse(
+      await toolsDefaultModelsDir.hexagon_qualify.execute({ model: "absent" }, undefined as never),
+    );
+    expect(qualDefaultMissing.error).toContain("non trovato");
+
+    // Copre default iniPath, listDir fallback su bootstrap (no listDir) e ignoreIniErrors
+    const toolsNoIniPath = createHexagonTools({
+      fetch,
+      exec: async () => okExec(),
+      readFile: async () => "",
+      writeFile: async () => {},
+      exists: async () => false,
+      spawn: (...args) => deps.spawn(...args),
+      sleep: async () => {},
+      workspaceDir: "/virtual/nonexistent-ws-for-tools",
+      modelsDir: "/virtual/nonexistent-models-dir",
+      sync: async () => ({ ...syncOutcome, updated: false }),
+    });
+    const noIniSync = JSON.parse(await toolsNoIniPath.hexagon_sync.execute({}, undefined as never));
+    expect(noIniSync.catalog.iniUpdated).toBe(false);
   });
 
   it("descrizioni dei tool presenti", () => {

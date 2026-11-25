@@ -9,10 +9,13 @@ import {
   defaultPaths,
   ensureModelsIni,
   ensureServer,
+  findManagedRouterProcesses,
   getLoadedModels,
+  isManagedRouterProcess,
   isServerActive,
   parseJsonPayload,
   parseModelsIni,
+  parseProcessListPayload,
   probeRouter,
   reloadServerIfStale,
   resolveIniPath,
@@ -21,6 +24,7 @@ import {
   ROUTER_PORT,
   serverEnv,
   stopServer,
+  tokenizeCommandLine,
 } from "../src/process.js";
 import {
   fakeResponse,
@@ -522,12 +526,110 @@ describe("getLoadedModels e reloadServerIfStale", () => {
     expect(models).toEqual(["model-a", "model-b"]);
   });
 
-  it("stopServer esegue taskkill su Windows o pkill su Unix", async () => {
-    const { fn: exec, calls } = recordingExec(() => okExec(""));
-    const success = await stopServer({ exec });
+  it("stopServer scoped: uccide solo PID di Router gestiti verificati e ignora Direct-mode o altre istanze", async () => {
+    const procs = [
+      {
+        ProcessId: 1001,
+        ParentProcessId: 1,
+        ExecutablePath: "C:/bin/llama-server.exe",
+        CommandLine:
+          '"C:/bin/llama-server.exe" --host 127.0.0.1 --port 18803 --jinja --agent -lv 3 --models-dir C:/models --models-preset C:/models/hexagon-models.ini --models-max 2',
+      },
+      {
+        ProcessId: 2002,
+        ParentProcessId: 1,
+        ExecutablePath: "C:/bin/llama-server.exe",
+        CommandLine:
+          '"C:/bin/llama-server.exe" --host 127.0.0.1 --port 18804 -m C:/models/x.gguf --alias x',
+      },
+      {
+        ProcessId: 3003,
+        ParentProcessId: 1,
+        ExecutablePath: "D:/other/llama-server.exe",
+        CommandLine:
+          '"D:/other/llama-server.exe" --host 127.0.0.1 --port 18803 --models-dir C:/models --models-preset C:/models/hexagon-models.ini',
+      },
+    ];
+    const { fn: exec, calls } = recordingExec((call) => {
+      if (call.command === "powershell") return okExec(JSON.stringify(procs));
+      return okExec("");
+    });
+    const success = await stopServer({
+      exec,
+      serverExe: "C:/bin/llama-server.exe",
+      iniPath: "C:/models/hexagon-models.ini",
+      modelsDir: "C:/models",
+      port: 18803,
+      platform: "win32",
+    });
     expect(success).toBe(true);
-    expect(calls).toHaveLength(1);
-    expect(calls[0].args).toContain("llama-server.exe");
+    expect(calls).toHaveLength(2);
+    expect(calls[1].command).toBe("taskkill");
+    expect(calls[1].args).toEqual(["/F", "/T", "/PID", "1001"]);
+    expect(calls[1].args).not.toContain("/IM");
+    expect(calls[1].args).not.toContain("2002");
+    expect(calls[1].args).not.toContain("3003");
+  });
+
+  it("stopServer su Unix uccide radice e discendenti via kill -TERM e gestisce tokenize/parseProcessListPayload", async () => {
+    expect(tokenizeCommandLine(`"C:\\My App\\llama-server.exe" --port=18803 'arg 2'`)).toEqual([
+      "C:\\My App\\llama-server.exe",
+      "--port=18803",
+      "arg 2",
+    ]);
+    expect(
+      parseProcessListPayload(
+        '{"ProcessId":10,"ParentProcessId":1,"ExecutablePath":"/bin/llama-server","CommandLine":"/bin/llama-server --port=18803 --models-preset=/i.ini"}',
+      ),
+    ).toHaveLength(1);
+    expect(parseProcessListPayload("{broken")).toEqual([]);
+
+    const psText = [
+      "  101     1 /bin/llama-server --host 127.0.0.1 --port 18803 --models-dir /m --models-preset /i.ini",
+      "  102   101 /bin/llama-server --worker 1",
+      "  202     1 /bin/other-proc --port 18803",
+    ].join("\n");
+    const { fn: exec, calls } = recordingExec((call) =>
+      call.command === "ps" ? okExec(psText) : okExec(""),
+    );
+    const stopped = await stopServer({
+      exec,
+      serverExe: "/bin/llama-server",
+      iniPath: "/i.ini",
+      modelsDir: "/m",
+      port: 18803,
+      platform: "linux",
+    });
+    expect(stopped).toBe(true);
+    expect(calls[1].command).toBe("kill");
+    expect(calls[1].args).toEqual(["-TERM", "101", "102"]);
+  });
+
+  it("isManagedRouterProcess e findManagedRouterProcesses filtrano rigorosamente ExecutablePath e argomenti Router", () => {
+    const valid = {
+      pid: 55,
+      executablePath: "C:/bin/llama-server.exe",
+      commandLine:
+        '"C:/bin/llama-server.exe" --host 127.0.0.1 --port 18803 --models-dir C:/models --models-preset C:/models/hexagon-models.ini',
+    };
+    const scope = {
+      serverExe: "C:/bin/llama-server.exe",
+      iniPath: "C:/models/hexagon-models.ini",
+      modelsDir: "C:/models",
+      port: 18803,
+      host: "127.0.0.1",
+    };
+    expect(isManagedRouterProcess(valid, scope)).toBe(true);
+    expect(isManagedRouterProcess({ ...valid, pid: 0 }, scope)).toBe(false);
+    expect(isManagedRouterProcess({ ...valid, commandLine: "" }, scope)).toBe(false);
+    expect(isManagedRouterProcess({ ...valid, executablePath: undefined }, scope)).toBe(false);
+    expect(isManagedRouterProcess({ ...valid, commandLine: '"C:/bin/llama-server.exe" -m x.gguf --port 18803 --models-preset C:/models/hexagon-models.ini' }, scope)).toBe(false);
+    expect(isManagedRouterProcess({ ...valid, commandLine: '"C:/bin/llama-server.exe" --port 18803 --models-dir C:/models' }, scope)).toBe(false);
+    expect(isManagedRouterProcess({ ...valid, commandLine: '"C:/bin/llama-server.exe" --port 18803 --models-dir C:/models --models-preset C:/other.ini' }, scope)).toBe(false);
+    expect(isManagedRouterProcess({ ...valid, commandLine: '"C:/bin/llama-server.exe" --port 19999 --models-dir C:/models --models-preset C:/models/hexagon-models.ini' }, scope)).toBe(false);
+    expect(isManagedRouterProcess({ ...valid, commandLine: '"C:/bin/llama-server.exe" --port 18803 --models-dir C:/other --models-preset C:/models/hexagon-models.ini' }, scope)).toBe(false);
+    expect(isManagedRouterProcess({ ...valid, commandLine: '"C:/bin/llama-server.exe" --host 0.0.0.0 --port 18803 --models-dir C:/models --models-preset C:/models/hexagon-models.ini' }, scope)).toBe(false);
+    expect(findManagedRouterProcesses([valid, { pid: 9, executablePath: "x", commandLine: "other --port 18803 --models-preset C:/models/hexagon-models.ini" }], {})).toHaveLength(1);
   });
 
   it("reloadServerIfStale: non riavvia se tutti i modelli configurati sono già caricati", async () => {
@@ -560,7 +662,7 @@ device = HTP0
     expect(spawnCalls).toHaveLength(0);
   });
 
-  it("reloadServerIfStale: riavvia il server quando rileva modelli mancanti", async () => {
+  it("reloadServerIfStale: riavvia il server Router gestito quando rileva modelli mancanti", async () => {
     const iniContent = `[model-a]
 model = C:/models/model-a.gguf
 device = HTP0
@@ -569,6 +671,15 @@ device = HTP0
 model = C:/models/Inkling-2-Mini-UD-Q4_K_M.gguf
 device = HTP0,GPUOpenCL
 `;
+    const routerProc = [
+      {
+        ProcessId: 4321,
+        ParentProcessId: 1,
+        ExecutablePath: "C:/bin/llama-server.exe",
+        CommandLine:
+          '"C:/bin/llama-server.exe" --host 127.0.0.1 --port 18803 --models-dir C:/models --models-preset C:/models/hexagon-models.ini',
+      },
+    ];
     let killed = false;
     const { fn: fetch } = recordingFetch((call) => {
       if (killed) {
@@ -579,7 +690,10 @@ device = HTP0,GPUOpenCL
         : fakeResponse(200, { status: "ok" });
     });
     const { fn: spawn, calls: spawnCalls } = recordingSpawn(9999);
-    const { fn: exec, calls: execCalls } = recordingExec(() => {
+    const { fn: exec, calls: execCalls } = recordingExec((call) => {
+      if (call.command === "powershell" || call.command === "ps") {
+        return okExec(JSON.stringify(routerProc));
+      }
       killed = true;
       return okExec("");
     });
@@ -597,16 +711,66 @@ device = HTP0,GPUOpenCL
 
     expect(result.reloaded).toBe(true);
     expect(result.missingModels).toEqual(["Inkling-2-Mini-UD-Q4_K_M"]);
-    expect(execCalls).toHaveLength(1);
+    expect(execCalls).toHaveLength(2);
     expect(spawnCalls).toHaveLength(1);
     expect(spawnCalls[0].command).toContain("llama-server.exe");
   });
 
-  it("reloadServerIfStale: riavvia il server quando sul router restano modelli rimossi dall'INI", async () => {
+  it("reloadServerIfStale: NON riavvia un server Direct-mode o non gestito sulla porta router", async () => {
+    const iniContent = `[model-a]
+model = C:/models/model-a.gguf
+device = HTP0
+[model-b]
+model = C:/models/model-b.gguf
+device = HTP0
+`;
+    const directProc = [
+      {
+        ProcessId: 777,
+        ParentProcessId: 1,
+        ExecutablePath: "C:/bin/llama-server.exe",
+        CommandLine: '"C:/bin/llama-server.exe" --port 18803 -m C:/models/model-a.gguf --alias model-a',
+      },
+    ];
+    const { fn: fetch } = recordingFetch((call) =>
+      call.url.endsWith("/v1/models")
+        ? fakeResponse(200, { data: [{ id: "model-a" }] })
+        : fakeResponse(200, { status: "ok" }),
+    );
+    const { fn: spawn, calls: spawnCalls } = recordingSpawn();
+    const { fn: exec, calls: execCalls } = recordingExec(() => okExec(JSON.stringify(directProc)));
+
+    const result = await reloadServerIfStale({
+      fetch,
+      spawn,
+      exec,
+      readFile: async () => iniContent,
+      runtimeDir: "C:/bin",
+      serverExe: "C:/bin/llama-server.exe",
+      iniPath: "C:/models/hexagon-models.ini",
+      modelsDir: "C:/models",
+    });
+
+    expect(result.reloaded).toBe(false);
+    expect(result.reason).toContain("non riconosciuto come Router gestito");
+    expect(execCalls).toHaveLength(1); // solo ispezione, nessuna kill
+    expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("reloadServerIfStale: riavvia il server Router gestito quando restano modelli rimossi dall'INI", async () => {
     const iniContent = `[model-a]
 model = C:/models/model-a.gguf
 device = HTP0
 `;
+    const routerProc = [
+      {
+        ProcessId: 4322,
+        ParentProcessId: 1,
+        ExecutablePath: "C:/bin/llama-server.exe",
+        CommandLine:
+          '"C:/bin/llama-server.exe" --host 127.0.0.1 --port 18803 --models-dir C:/models --models-preset C:/models/hexagon-models.ini',
+      },
+    ];
     let killed = false;
     const { fn: fetch } = recordingFetch((call) => {
       if (killed) throw new Error("ECONNREFUSED");
@@ -615,7 +779,10 @@ device = HTP0
         : fakeResponse(200, { status: "ok" });
     });
     const { fn: spawn, calls: spawnCalls } = recordingSpawn(8888);
-    const { fn: exec, calls: execCalls } = recordingExec(() => {
+    const { fn: exec, calls: execCalls } = recordingExec((call) => {
+      if (call.command === "powershell" || call.command === "ps") {
+        return okExec(JSON.stringify(routerProc));
+      }
       killed = true;
       return okExec("");
     });
@@ -633,11 +800,20 @@ device = HTP0
 
     expect(result.reloaded).toBe(true);
     expect(result.staleModels).toEqual(["removed-model"]);
-    expect(execCalls).toHaveLength(1);
+    expect(execCalls).toHaveLength(2);
     expect(spawnCalls).toHaveLength(1);
   });
 
-  it("restartServer: arresta, riavvia, attende /health e legge /v1/models", async () => {
+  it("restartServer: arresta Router gestito, riavvia, attende /health e legge /v1/models", async () => {
+    const routerProc = [
+      {
+        ProcessId: 4323,
+        ParentProcessId: 1,
+        ExecutablePath: "C:/bin/llama-server.exe",
+        CommandLine:
+          '"C:/bin/llama-server.exe" --host 127.0.0.1 --port 18803 --models-dir C:/models --models-preset C:/models/hexagon-models.ini',
+      },
+    ];
     let killed = false;
     let spawned = false;
     const { fn: fetch } = recordingFetch((call) => {
@@ -651,7 +827,10 @@ device = HTP0
       spawned = true;
       return spawn(...args);
     };
-    const { fn: exec } = recordingExec(() => {
+    const { fn: exec } = recordingExec((call) => {
+      if (call.command === "powershell" || call.command === "ps") {
+        return okExec(JSON.stringify(routerProc));
+      }
       killed = true;
       return okExec("");
     });
@@ -678,6 +857,14 @@ device = HTP0
   it("gestisce stopServer fallito, getLoadedModels vuoto e reloadServerIfStale edge-case", async () => {
     expect(await stopServer({ exec: async () => ({ code: 1, stdout: "", stderr: "" }) })).toBe(false);
     expect(await stopServer({ exec: async () => { throw new Error("boom"); } })).toBe(false);
+    expect(
+      await stopServer({
+        exec: async (cmd) =>
+          cmd === "powershell" || cmd === "ps"
+            ? okExec('[{"ProcessId":1,"ExecutablePath":"C:/bin/llama-server.exe","CommandLine":"llama-server --port 18803 --models-preset C:/i.ini"}]')
+            : { code: 1, stdout: "", stderr: "denied" },
+      }),
+    ).toBe(false);
 
     expect(
       await getLoadedModels({

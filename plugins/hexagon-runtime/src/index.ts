@@ -16,24 +16,24 @@
  * - tool: hexagon_status, hexagon_sync, hexagon_bench.
  */
 import type { Hooks, Plugin } from "@kilocode/plugin";
-import { syncDiscoveredModelsToIni } from "./discovery.js";
+import { runBootstrapCycle, type BootstrapCycleResult } from "./bootstrap.js";
 import { probeHealth, waitForHealth, type HealthResult } from "./health.js";
-import {
-  buildHexagonProvider,
-  isLocalModel,
-  LOCAL_PROVIDER_ID,
-} from "./models.js";
+import { buildHexagonProvider } from "./config.js";
+import { isLocalModel, LOCAL_PROVIDER_ID } from "./models.js";
 import { nodeDeps } from "./os.js";
 import {
   defaultPaths,
-  ensureModelsIni,
   ensureServer,
   parseModelsIni,
-  reloadServerIfStale,
   type EnsureIniResult,
   type EnsureServerResult,
   type ModelsIni,
 } from "./process.js";
+import {
+  defaultRegistryPath,
+  loadRegistry,
+  type ModelsRegistry,
+} from "./qualify.js";
 import { checkRuntime, ensureRuntime, type SyncOutcome } from "./sync.js";
 import { createHexagonTools } from "./tools.js";
 import type { MkdirFn, OsDeps } from "./types.js";
@@ -53,6 +53,8 @@ export interface BootstrapResult {
   ini: EnsureIniResult;
   server: EnsureServerResult;
   health: HealthResult;
+  catalog?: BootstrapCycleResult["catalog"];
+  reload?: BootstrapCycleResult["reload"];
 }
 
 export interface RuntimeOptions {
@@ -66,9 +68,9 @@ export interface RuntimeOptions {
 }
 
 /**
- * Bootstrap completo: allinea il runtime al commit GenieX, genera l'INI se
- * manca (euristiche del launcher core), avvia llama-server solo se la porta
- * router e' libera e identificata, attende la readiness HTTP (warm-up HTP).
+ * Bootstrap completo e deterministico:
+ * ensureRuntime -> syncDiscoveredModelsToIni -> ensureServer -> waitForHealth ->
+ * eventuale reloadServerIfStale solo su Router gestito verificato.
  */
 export async function bootstrapRuntime(
   options: RuntimeOptions,
@@ -77,67 +79,41 @@ export async function bootstrapRuntime(
   const paths = defaultPaths(options.workspaceDir);
   const iniPath = options.iniPath ?? paths.iniPath;
   const modelsDir = options.modelsDir ?? paths.modelsDir;
-  const sync = await ensureRuntime({
-    paths: {
-      geniexExe: paths.geniexExe,
-      llamaServerExe: paths.serverExe,
-      runtimeDir: paths.binPath,
-    },
+  const result = await runBootstrapCycle({
     workspaceDir: paths.workspaceDir,
-    binPath: paths.binPath,
-    geniexDir: paths.geniexDir,
-    stopServer: true,
-    deps,
-  });
-  const ini = await ensureModelsIni({
-    iniPath,
-    workspaceDir: paths.workspaceDir,
-    modelsDir,
-    exec: deps.exec,
-    exists: deps.exists,
-    writeFile: deps.writeFile,
-    listDir: deps.listDir,
-    mkdir: options.mkdir,
-  });
-  if (!ini.generated) {
-    await syncDiscoveredModelsToIni({
-      modelsDir,
-      iniPath,
-      workspaceDir: paths.workspaceDir,
-      configDir: options.configDir,
-      deps: {
-        listDir: deps.listDir,
-        exists: deps.exists,
-        readFile: deps.readFile,
-        writeFile: deps.writeFile,
-        exec: deps.exec,
-        mkdir: options.mkdir,
-      },
-    }).catch(() => {});
-  }
-  const server = await ensureServer({
-    fetch: deps.fetch,
-    spawn: deps.spawn,
     runtimeDir: paths.binPath,
+    geniexDir: paths.geniexDir,
+    geniexExe: paths.geniexExe,
     serverExe: paths.serverExe,
-    iniPath,
     modelsDir,
-  });
-  if (!server.started) {
-    await reloadServerIfStale({
+    iniPath,
+    registryPath: options.registryPath,
+    configDir: options.configDir,
+    forceSync: false,
+    ignoreIniErrors: false,
+    ignoreCatalogErrors: true,
+    ignoreServerErrors: false,
+    deps: {
+      exec: deps.exec,
       fetch: deps.fetch,
       spawn: deps.spawn,
-      exec: deps.exec,
+      exists: deps.exists,
       readFile: deps.readFile,
+      writeFile: deps.writeFile,
+      listDir: deps.listDir,
+      mkdir: options.mkdir,
       sleep: deps.sleep,
-      runtimeDir: paths.binPath,
-      serverExe: paths.serverExe,
-      iniPath,
-      modelsDir,
-    }).catch(() => {});
-  }
-  const health = await waitForHealth({ fetch: deps.fetch, sleep: deps.sleep, now: deps.now });
-  return { sync, ini, server, health };
+      now: deps.now,
+    },
+  });
+  return {
+    sync: result.sync,
+    ini: result.ini,
+    server: result.server,
+    health: result.health!,
+    catalog: result.catalog,
+    reload: result.reload,
+  };
 }
 
 export interface HookOptions extends RuntimeOptions {
@@ -283,17 +259,30 @@ export function createHexagonHooks(options: HookOptions): Hooks {
     }
   };
 
+  const registryPath = options.registryPath ?? defaultRegistryPath();
+
   const config: NonNullable<Hooks["config"]> = async (input) => {
     let ini: ModelsIni | undefined;
     if (await deps.exists(iniPath)) {
       const text = await deps.readFile(iniPath).catch(() => "");
       ini = parseModelsIni(text);
     }
-    const provider = buildHexagonProvider(ini);
+    let registry: ModelsRegistry | undefined;
+    if (await deps.exists(registryPath)) {
+      registry = await loadRegistry(registryPath, { readFile: deps.readFile });
+    }
+    const provider = buildHexagonProvider(ini, { registry });
     const existing = input.provider?.[LOCAL_PROVIDER_ID];
-    // Il plugin e' l'autorita' hardware: sui modelli noti i contesti testati
-    // prevalgono; le opzioni utente (baseURL/apiKey) e i modelli ignoti al
-    // plugin restano preservati.
+    const mergedModels = { ...existing?.models, ...provider.models };
+    if (registry) {
+      for (const [id, prof] of Object.entries(registry)) {
+        if (prof?.status === "incompatible") {
+          delete mergedModels[id];
+        }
+      }
+    }
+    // Il plugin e' l'autorita' hardware: sui modelli noti/certificati i contesti
+    // prevalgono, gli INCOMPATIBLE vengono esclusi e le opzioni utente restano preservate.
     input.provider = {
       ...input.provider,
       [LOCAL_PROVIDER_ID]: {
@@ -301,11 +290,18 @@ export function createHexagonHooks(options: HookOptions): Hooks {
         name: existing?.name ?? provider.name,
         npm: provider.npm,
         options: existing?.options ?? provider.options,
-        models: { ...existing?.models, ...provider.models },
+        models: mergedModels,
       },
     };
-    if (!input.model) input.model = `${LOCAL_PROVIDER_ID}/Ornith-1.5-9B-Q4_0`;
-    if (!input.small_model) input.small_model = `${LOCAL_PROVIDER_ID}/MiniCPM5-2B-Q4_K_M`;
+    const availableIds = Object.keys(mergedModels);
+    const defaultMain = mergedModels["Ornith-1.5-9B-Q4_0"]
+      ? "Ornith-1.5-9B-Q4_0"
+      : availableIds[0];
+    const defaultSmall = mergedModels["MiniCPM5-2B-Q4_K_M"]
+      ? "MiniCPM5-2B-Q4_K_M"
+      : defaultMain;
+    if (!input.model && defaultMain) input.model = `${LOCAL_PROVIDER_ID}/${defaultMain}`;
+    if (!input.small_model && defaultSmall) input.small_model = `${LOCAL_PROVIDER_ID}/${defaultSmall}`;
   };
 
   const chatParams: NonNullable<Hooks["chat.params"]> = async (input, output) => {
@@ -346,7 +342,7 @@ export function createHexagonHooks(options: HookOptions): Hooks {
           binPath: paths.binPath,
           geniexDir: paths.geniexDir,
           force,
-          stopServer: stopServer ?? true,
+          stopServer: stopServer ?? false,
           deps,
         }),
       checkRuntime: () =>

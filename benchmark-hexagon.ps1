@@ -9,6 +9,8 @@ param(
         "Qwen3.8-27B-Q4_0.gguf",
         "Qwen_Qwen3.6-35B-A3B-Q4_0.gguf"
     ),
+    [string]$Device = "",
+    [string]$TensorSplit = "",
     [int]$Repetitions = 5,
     [int]$Threads = 12,
     [string]$ReportPath = (Join-Path $PSScriptRoot "BENCHMARK_AUTO.md"),
@@ -227,14 +229,61 @@ function Invoke-BenchWithPower {
     }
 }
 
-$profiles = @(
-    @{ Name = "HTP0 (100% NPU)";        Args = "-dev HTP0" },
-    # llama-bench: '/' separa device/pesi nello stesso test; ',' seleziona prove distinte.
-    @{ Name = "HTP0/GPUOpenCL (75/25)"; Args = "-dev HTP0/GPUOpenCL -ts 75/25" },
-    @{ Name = "HTP0/GPUOpenCL (50/50)"; Args = "-dev HTP0/GPUOpenCL -ts 50/50" },
-    @{ Name = "HTP0/GPUOpenCL (25/75)"; Args = "-dev HTP0/GPUOpenCL -ts 25/75" },
-    @{ Name = "GPUOpenCL (100% GPU)";   Args = "-dev GPUOpenCL" }
-)
+function Resolve-BenchmarkProfiles {
+    param(
+        [string]$RequestedDevice = "",
+        [string]$RequestedTensorSplit = ""
+    )
+
+    $devClean = if ($RequestedDevice) { $RequestedDevice.Trim() } else { "" }
+    $tsClean = if ($RequestedTensorSplit) { $RequestedTensorSplit.Trim() } else { "" }
+
+    if ($tsClean -and -not $devClean) {
+        throw "Il parametro -TensorSplit richiede che -Device sia specificato."
+    }
+
+    if (-not $devClean) {
+        return @(
+            @{ Name = "HTP0 (100% NPU)";        Args = "-dev HTP0" },
+            # llama-bench: '/' separa device/pesi nello stesso test; ',' seleziona prove distinte.
+            @{ Name = "HTP0/GPUOpenCL (75/25)"; Args = "-dev HTP0/GPUOpenCL -ts 75/25" },
+            @{ Name = "HTP0/GPUOpenCL (50/50)"; Args = "-dev HTP0/GPUOpenCL -ts 50/50" },
+            @{ Name = "HTP0/GPUOpenCL (25/75)"; Args = "-dev HTP0/GPUOpenCL -ts 25/75" },
+            @{ Name = "GPUOpenCL (100% GPU)";   Args = "-dev GPUOpenCL" }
+        )
+    }
+
+    if ($devClean -notmatch '^[A-Za-z0-9_]+(?:\s*[,/]\s*[A-Za-z0-9_]+)*$') {
+        throw "Formato -Device non valido: '$RequestedDevice'."
+    }
+    $normDev = $devClean -replace '\s*[,/]\s*', '/'
+    $devParts = @($normDev -split '/')
+
+    if ($tsClean) {
+        if ($tsClean -notmatch '^\d+(?:\.\d+)?(?:\s*[,/]\s*\d+(?:\.\d+)?)*$') {
+            throw "Formato -TensorSplit non valido: '$RequestedTensorSplit'."
+        }
+        $normTs = $tsClean -replace '\s*[,/]\s*', '/'
+        $tsParts = @($normTs -split '/')
+        if ($tsParts.Count -ne $devParts.Count) {
+            throw "Numero di pesi -TensorSplit ($($tsParts.Count)) diverso dal numero di device ($($devParts.Count))."
+        }
+        $pName = "$normDev ($normTs)"
+        $pArgs = "-dev $normDev -ts $normTs"
+        return @(@{ Name = $pName; Args = $pArgs })
+    }
+
+    $pName = if ($normDev -eq "HTP0") {
+        "HTP0 (100% NPU)"
+    } elseif ($normDev -eq "GPUOpenCL") {
+        "GPUOpenCL (100% GPU)"
+    } else {
+        $normDev
+    }
+    return @(@{ Name = $pName; Args = "-dev $normDev" })
+}
+
+$profiles = @(Resolve-BenchmarkProfiles -RequestedDevice $Device -RequestedTensorSplit $TensorSplit)
 
 Write-Host "=====================================================================" -ForegroundColor Cyan
 Write-Host "  Benchmark Prestazioni & Telemetria PMIC (Hexagon HTP0 vs GPUOpenCL)" -ForegroundColor Cyan

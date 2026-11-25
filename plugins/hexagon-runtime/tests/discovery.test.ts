@@ -742,4 +742,90 @@ ctx-size = 32768
       }),
     ).rejects.toThrow(/Nessun modello GGUF valido/);
   });
+
+  it("propaga CERTIFIED e INCOMPATIBLE da models-registry.json a scanModels e syncDiscoveredModelsToIni", async () => {
+    const registry = {
+      "certified-custom": {
+        modelId: "certified-custom",
+        status: "certified" as const,
+        device: "HTP0,GPUOpenCL",
+        tensorSplit: "85,15",
+        contextWindow: 131_072,
+        metrics: { prefillTokPerSec: 600, genTokPerSec: 40, device: "HTP0,GPUOpenCL" },
+        timestamp: "2026-11-25T00:00:00Z",
+      },
+      "already-in-ini-bad": {
+        modelId: "already-in-ini-bad",
+        status: "incompatible" as const,
+        device: "HTP0",
+        contextWindow: 16_384,
+        error: "0xC0000005 access violation",
+        timestamp: "2026-11-25T00:00:00Z",
+      },
+      "new-bad": {
+        modelId: "new-bad",
+        status: "incompatible" as const,
+        device: "HTP0",
+        contextWindow: 16_384,
+        error: "FastRPC 0x200",
+        timestamp: "2026-11-25T00:00:00Z",
+      },
+    };
+    const storage = new Map<string, string>([
+      ["/virtual/registry.json", JSON.stringify(registry)],
+      [
+        "/virtual/hexagon-models.ini",
+        "[*]\nthreads = 12\n\n[already-in-ini-bad]\nmodel = /virtual/models/already-in-ini-bad.gguf\ndevice = HTP0\nctx-size = 32768\n",
+      ],
+    ]);
+    const listDir = vi.fn(async () => [
+      "certified-custom.gguf",
+      "already-in-ini-bad.gguf",
+      "new-bad.gguf",
+    ]);
+    const exists = vi.fn(async (p: string) => !p.endsWith("kilo.json"));
+    const readFile = vi.fn(async (p: string) => storage.get(p) ?? "");
+    const { fn: writeFile, calls: writes } = recordingWriteFile();
+
+    const scanned = await scanModels({
+      modelsDir: "/virtual/models",
+      registryPath: "/virtual/registry.json",
+      skipInspection: true,
+      deps: { listDir, exists, exec: vi.fn(async () => okExec("")), readFile },
+    });
+    expect(scanned.find((m) => m.id === "certified-custom")).toMatchObject({
+      status: "certified",
+      device: "HTP0,GPUOpenCL",
+      tensorSplit: "85,15",
+      contextWindow: 131_072,
+    });
+    expect(scanned.find((m) => m.id === "new-bad")).toMatchObject({
+      status: "incompatible",
+      error: "FastRPC 0x200",
+    });
+
+    const syncRes = await syncDiscoveredModelsToIni({
+      modelsDir: "/virtual/models",
+      iniPath: "/virtual/hexagon-models.ini",
+      registryPath: "/virtual/registry.json",
+      localAppData: "",
+      skipInspection: true,
+      deps: {
+        listDir,
+        exists,
+        readFile,
+        writeFile,
+        exec: vi.fn(async () => okExec("")),
+        mkdir: vi.fn(),
+      },
+    });
+    expect(syncRes.iniUpdated).toBe(true);
+    expect(syncRes.addedModels).toEqual(["certified-custom"]);
+    expect(syncRes.removedModels).toEqual(["already-in-ini-bad"]);
+    const iniWritten = writes.find((w) => w.path === "/virtual/hexagon-models.ini")!.content;
+    expect(iniWritten).toContain("[certified-custom]");
+    expect(iniWritten).toContain("tensor-split = 85,15");
+    expect(iniWritten).not.toContain("[already-in-ini-bad]");
+    expect(iniWritten).not.toContain("[new-bad]");
+  });
 });

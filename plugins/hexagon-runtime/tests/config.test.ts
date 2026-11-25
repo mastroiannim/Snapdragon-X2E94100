@@ -142,12 +142,22 @@ describe("buildHexagonProvider", () => {
     expect(portOnly.options.baseURL).toBe("http://127.0.0.1:20000/v1");
 
     const withLive = buildHexagonProvider(undefined, {
-      liveModels: ["Ornith-1.5-9B-Q4_0", "live-extra-model", ""],
+      liveModels: ["Ornith-1.5-9B-Q4_0", "live-extra-model", "incompat-live", ""],
+      registry: {
+        "incompat-live": {
+          modelId: "incompat-live",
+          status: "incompatible",
+          device: "HTP0",
+          contextWindow: 16_384,
+          timestamp: "2026-11-25T00:00:00Z",
+        },
+      },
     });
     expect(withLive.models["live-extra-model"]).toEqual({
       name: "live-extra-model (HTP0)",
       limit: { context: 65_536, output: 16_384 },
     });
+    expect(withLive.models["incompat-live"]).toBeUndefined();
   });
 });
 
@@ -495,5 +505,48 @@ describe("installProviderConfig", () => {
       installProviderConfig({ configDir: corruptDir, iniPath }),
     ).rejects.toThrow(/non parsabile/);
     expect(readFileSync(corruptTarget, "utf-8")).toBe("{ broken");
+  });
+
+  it("installProviderConfig propaga CERTIFIED e esclude INCOMPATIBLE da models-registry.json", async () => {
+    const regPath = "/virtual-reg/models-registry.json";
+    const iniPath = "/virtual-reg/hexagon-models.ini";
+    const fs = createMemoryFs({
+      [iniPath]:
+        "[Ornith-1.5-9B-Q4_0]\nmodel = m1.gguf\ndevice = HTP0\nctx-size = 65536\n[bad-model]\nmodel = bad.gguf\ndevice = HTP0\nctx-size = 32768\n",
+      [regPath]: JSON.stringify({
+        "bad-model": {
+          modelId: "bad-model",
+          status: "incompatible",
+          device: "HTP0",
+          contextWindow: 16384,
+          error: "Crash 0x200",
+          timestamp: "2026-11-25T00:00:00Z",
+        },
+        "cert-new": {
+          modelId: "cert-new",
+          status: "certified",
+          device: "HTP0,GPUOpenCL",
+          contextWindow: 131072,
+          timestamp: "2026-11-25T00:00:00Z",
+        },
+      }),
+    });
+
+    const res = await installProviderConfig({
+      configDir: "/virtual-reg/kilo",
+      iniPath,
+      registryPath: regPath,
+      readFile: fs.readFile,
+      writeFile: fs.writeFile,
+      exists: fs.exists,
+      mkdir: fs.mkdir,
+    });
+
+    const parsed = JSON.parse(fs.files.get(res.targetPath)!);
+    expect(parsed.provider.hexagon.models["bad-model"]).toBeUndefined();
+    expect(parsed.provider.hexagon.models["cert-new"]).toEqual({
+      name: "cert-new (HTP0,GPUOpenCL)",
+      limit: { context: 131072, output: 16384 },
+    });
   });
 });

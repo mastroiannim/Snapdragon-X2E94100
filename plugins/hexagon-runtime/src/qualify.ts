@@ -9,7 +9,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { type DiscoveredModel } from "./discovery.js";
 import { BUNDLED_BENCH_SCRIPT } from "./process.js";
-import { runBenchmark, type BenchReport } from "./tools.js";
+import { runBenchmark, type BenchReport } from "./benchmark.js";
 import type { ExecFn, ExistsFn, MkdirFn, ReadFileFn, WriteFileFn } from "./types.js";
 
 export interface BenchmarkMetrics {
@@ -53,7 +53,11 @@ export async function loadRegistry(
   const read = deps.readFile ?? (async (p) => readFileSync(p, "utf-8"));
   try {
     const raw = await read(registryPath);
-    return JSON.parse(raw) as ModelsRegistry;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    return parsed as ModelsRegistry;
   } catch {
     return {};
   }
@@ -93,11 +97,60 @@ export interface QualifyOptions {
   benchScript?: string;
 }
 
+function normalizeDeviceList(value: string): string {
+  return value
+    .trim()
+    .split(/[,/]/)
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean)
+    .join("/");
+}
+
+function parseNumericSplit(value: string): number[] | null {
+  const clean = value.trim();
+  if (!/^\d+(?:\.\d+)?(?:\s*[,/]\s*\d+(?:\.\d+)?)+$/.test(clean)) {
+    return null;
+  }
+  return clean.split(/[,/]/).map((part) => Number.parseFloat(part.trim()));
+}
+
+/**
+ * Verifica che la colonna profilo del report markdown corrisponda esattamente
+ * al device e all'eventuale tensor-split configurati sul modello.
+ */
+export function matchesConfiguredProfile(
+  profileLabel: string,
+  device: string,
+  tensorSplit?: string,
+): boolean {
+  const trimmed = profileLabel.trim();
+  const parenMatch = /^([^(]+?)(?:\s*\(([^)]+)\))?$/.exec(trimmed);
+  if (!parenMatch) return false;
+
+  const rowDevice = normalizeDeviceList(parenMatch[1]);
+  const expectedDevice = normalizeDeviceList(device);
+  if (!rowDevice || !expectedDevice || rowDevice !== expectedDevice) {
+    return false;
+  }
+
+  const rowSplit = parenMatch[2] ? parseNumericSplit(parenMatch[2]) : null;
+  const expectedSplit = tensorSplit ? parseNumericSplit(tensorSplit) : null;
+
+  if (expectedSplit !== null) {
+    if (rowSplit === null || rowSplit.length !== expectedSplit.length) {
+      return false;
+    }
+    return expectedSplit.every((val, idx) => Math.abs(val - rowSplit[idx]) < 1e-4);
+  }
+
+  return rowSplit === null;
+}
+
 /**
  * Esegue il Qualification Gate hardware per un modello:
- * 1. Lancia il benchmark con parametri ottimali.
- * 2. Se ha successo, promuove a CERTIFIED e registra le metriche.
- * 3. Se fallisce, marca come INCOMPATIBLE con l'errore descrittivo.
+ * 1. Lancia il benchmark esclusivamente con il profilo configurato (-Device / -TensorSplit).
+ * 2. Estrae unicamente le righe corrispondenti a quel profilo; se assenti, marca INCOMPATIBLE.
+ * 3. Persiste il risultato nel registro locale (models-registry.json).
  */
 export async function qualifyModel(options: QualifyOptions): Promise<QualificationProfile> {
   const { model, workspaceDir, exec, readFile } = options;
@@ -109,21 +162,41 @@ export async function qualifyModel(options: QualifyOptions): Promise<Qualificati
       readFile,
       workspaceDir,
       model: model.id,
+      device: model.device,
+      tensorSplit: model.tensorSplit,
       benchScript: options.benchScript ?? BUNDLED_BENCH_SCRIPT,
       repetitions: 1,
     });
 
-    const rows = report.results;
-    const ppRow = rows.find((r) => r.test.includes("pp")) ?? rows[0];
-    const tgRow = rows.find((r) => r.test.includes("tg")) ?? rows[rows.length - 1];
+    const allRows = report.results;
+    const modelMatches = allRows.filter(
+      (r) =>
+        r.model === model.fileName ||
+        r.model === model.id ||
+        r.model === `${model.id}.gguf`,
+    );
+    const candidateRows = modelMatches.length > 0 ? modelMatches : allRows;
+    const matchingRows = candidateRows.filter((r) =>
+      matchesConfiguredProfile(r.profile, model.device, model.tensorSplit),
+    );
+
+    const ppRow = matchingRows.find((r) => /^pp/i.test(r.test));
+    const tgRow = matchingRows.find((r) => /^tg/i.test(r.test));
+
+    if (matchingRows.length === 0 || (!ppRow && !tgRow)) {
+      const splitLabel = model.tensorSplit ? ` (${model.tensorSplit})` : "";
+      throw new Error(
+        `Nessuna metrica benchmark trovata per il profilo configurato ${model.device}${splitLabel}`,
+      );
+    }
 
     const metrics: BenchmarkMetrics = {
       prefillTokPerSec: ppRow ? ppRow.tokPerSec : 0,
       genTokPerSec: tgRow ? tgRow.tokPerSec : 0,
       device: model.device,
-      npuWatts: ppRow?.npuW ?? undefined,
-      gpuWatts: ppRow?.gpuW ?? undefined,
-      socWatts: ppRow?.socW ?? undefined,
+      npuWatts: ppRow?.npuW ?? tgRow?.npuW ?? undefined,
+      gpuWatts: ppRow?.gpuW ?? tgRow?.gpuW ?? undefined,
+      socWatts: ppRow?.socW ?? tgRow?.socW ?? undefined,
     };
 
     const profile: QualificationProfile = {
@@ -153,7 +226,8 @@ export async function qualifyModel(options: QualifyOptions): Promise<Qualificati
       modelId: model.id,
       status: "incompatible",
       device: model.device,
-      contextWindow: 16_384,
+      ...(model.tensorSplit ? { tensorSplit: model.tensorSplit } : {}),
+      contextWindow: model.contextWindow,
       error: errMsg,
       timestamp,
     };

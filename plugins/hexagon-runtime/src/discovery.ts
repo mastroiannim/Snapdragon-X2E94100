@@ -9,6 +9,12 @@ import { installProviderConfig } from "./config.js";
 import { TESTED_CONTEXT_WINDOWS } from "./models.js";
 import { nodeIsDirectory, nodeListDir } from "./os.js";
 import { BUNDLED_INSPECT_SCRIPT, parseModelsIni } from "./process.js";
+import {
+  defaultRegistryPath,
+  loadRegistry,
+  type BenchmarkMetrics,
+  type ModelsRegistry,
+} from "./qualify.js";
 import type {
   ExecFn,
   ExistsFn,
@@ -66,6 +72,8 @@ export interface DiscoveredModel {
   strategy: string;
   metadata?: GgufMetadata;
   mmprojPath?: string;
+  metrics?: BenchmarkMetrics;
+  error?: string;
 }
 
 export interface ScanDeps {
@@ -73,6 +81,7 @@ export interface ScanDeps {
   exists: ExistsFn;
   exec: ExecFn;
   isDirectory?: IsDirFn;
+  readFile?: ReadFileFn;
 }
 
 export interface InspectOptions {
@@ -256,6 +265,9 @@ export interface ScanOptions {
   modelsDir: string;
   deps: ScanDeps;
   certifiedIds?: Set<string>;
+  incompatibleIds?: Set<string>;
+  registry?: ModelsRegistry;
+  registryPath?: string;
   inspectScript?: string;
   skipInspection?: boolean;
 }
@@ -398,7 +410,20 @@ export async function scanModels(options: ScanOptions): Promise<DiscoveredModel[
     }
   }
 
-  const certifiedSet = options.certifiedIds ?? new Set(Object.keys(TESTED_CONTEXT_WINDOWS));
+  let registry: ModelsRegistry = options.registry ?? {};
+  if (!options.registry && (options.registryPath || deps.readFile)) {
+    registry = await loadRegistry(options.registryPath ?? defaultRegistryPath(), {
+      readFile: deps.readFile,
+    });
+  }
+
+  const incompatibleSet = options.incompatibleIds ?? new Set<string>();
+  const registryCertifiedIds = Object.entries(registry)
+    .filter(([, prof]) => prof?.status === "certified")
+    .map(([id]) => id);
+  const certifiedSet =
+    options.certifiedIds ??
+    new Set([...Object.keys(TESTED_CONTEXT_WINDOWS), ...registryCertifiedIds]);
   const entries = [...modelMap.entries()];
   const models: DiscoveredModel[] = new Array(entries.length);
 
@@ -406,7 +431,13 @@ export async function scanModels(options: ScanOptions): Promise<DiscoveredModel[
     string,
     { fileName: string; filePath: string; dirPaths: string[] },
   ]): Promise<DiscoveredModel> => {
-    const isCertified = certifiedSet.has(id);
+    const registryEntry = registry[id];
+    const isRegistryIncompatible =
+      registryEntry?.status === "incompatible" || incompatibleSet.has(id);
+    const isRegistryCertified =
+      !isRegistryIncompatible && registryEntry?.status === "certified";
+    const isCertified =
+      !isRegistryIncompatible && (isRegistryCertified || certifiedSet.has(id));
     const mmprojPath = findMmprojForModel(id, info.dirPaths, modelsDir, mmprojByName, mmprojByDir);
 
     let meta: GgufMetadata | undefined;
@@ -451,18 +482,29 @@ export async function scanModels(options: ScanOptions): Promise<DiscoveredModel[
     }
 
     const isSupported = isArchitectureSupported(meta?.architecture);
-    const status: ModelStatus = !isSupported
-      ? "incompatible"
-      : isCertified
-        ? "certified"
-        : "untested";
+    const status: ModelStatus =
+      !isSupported || isRegistryIncompatible
+        ? "incompatible"
+        : isCertified
+          ? "certified"
+          : "untested";
     const strategy = !isSupported
       ? `Incompatibile: architettura '${meta?.architecture ?? "sconosciuta"}' non supportata dal runtime llama.cpp installato`
-      : config.strategy;
+      : isRegistryIncompatible
+        ? `Incompatibile: ${registryEntry?.error ?? "marcato INCOMPATIBLE in models-registry.json"}`
+        : config.strategy;
 
-    const rawCtx = isCertified
-      ? (TESTED_CONTEXT_WINDOWS[id] ?? config.contextSize)
-      : config.contextSize;
+    const device = isRegistryCertified && registryEntry.device ? registryEntry.device : config.device;
+    const tensorSplit =
+      isRegistryCertified && registryEntry.device
+        ? registryEntry.tensorSplit
+        : config.tensorSplit;
+
+    const rawCtx = isRegistryCertified && registryEntry.contextWindow > 0
+      ? registryEntry.contextWindow
+      : isCertified
+        ? (TESTED_CONTEXT_WINDOWS[id] ?? config.contextSize)
+        : config.contextSize;
     const contextWindow =
       meta && meta.context_length > 0 ? Math.min(rawCtx, meta.context_length) : rawCtx;
 
@@ -472,12 +514,14 @@ export async function scanModels(options: ScanOptions): Promise<DiscoveredModel[
       filePath: info.filePath,
       sizeGb: meta ? meta.size_gb : 0,
       status,
-      device: config.device,
-      tensorSplit: config.tensorSplit,
+      device,
+      tensorSplit,
       contextWindow,
       strategy,
       metadata: meta,
       mmprojPath,
+      ...(isRegistryCertified && registryEntry.metrics ? { metrics: registryEntry.metrics } : {}),
+      ...(isRegistryIncompatible && registryEntry?.error ? { error: registryEntry.error } : {}),
     };
   };
 
@@ -548,6 +592,8 @@ export interface GenerateIniOptions {
   inspectScript?: string;
   skipInspection?: boolean;
   timestamp?: string;
+  registryPath?: string;
+  registry?: ModelsRegistry;
 }
 
 export interface GenerateIniResult {
@@ -568,6 +614,8 @@ export async function generateModelsIni(
     deps: options.deps,
     inspectScript: options.inspectScript,
     skipInspection: options.skipInspection,
+    registryPath: options.registryPath,
+    registry: options.registry,
   });
   const validModels = discovered.filter((m) => m.status !== "incompatible");
   if (validModels.length === 0) {
@@ -599,6 +647,8 @@ export interface SyncModelsOptions {
   workspaceDir?: string;
   localAppData?: string;
   configDir?: string;
+  registryPath?: string;
+  registry?: ModelsRegistry;
   deps: SyncModelsDeps;
   inspectScript?: string;
   skipInspection?: boolean;
@@ -615,7 +665,7 @@ export interface SyncModelsResult {
  * Sincronizza i modelli scoperti sul disco (.cache/geniex/models) con il file INI
  * e la configurazione Kilo (kilo.json/kilo.jsonc) calcolando l'allocazione hardware euristica
  * ottimale senza avviare benchmark pesanti. Aggiunge nuovi modelli e rimuove voci i cui file
- * non esistono piu' su disco.
+ * non esistono piu' su disco o marcate INCOMPATIBLE in models-registry.json.
  */
 export async function syncDiscoveredModelsToIni(
   options: SyncModelsOptions,
@@ -625,6 +675,12 @@ export async function syncDiscoveredModelsToIni(
     return { addedModels: [], removedModels: [], totalModels: 0, iniUpdated: false };
   }
 
+  const registry: ModelsRegistry =
+    options.registry ??
+    (await loadRegistry(options.registryPath ?? defaultRegistryPath(), {
+      readFile: deps.readFile,
+    }));
+
   const discovered = await scanModels({
     modelsDir,
     deps: {
@@ -632,10 +688,13 @@ export async function syncDiscoveredModelsToIni(
       exists: deps.exists,
       exec: deps.exec,
       isDirectory: deps.isDirectory,
+      readFile: deps.readFile,
     },
+    registry,
     inspectScript: options.inspectScript,
     skipInspection: options.skipInspection,
   });
+  const discoveredById = new Map(discovered.map((m) => [m.id, m]));
 
   let iniText = "";
   if (await deps.exists(iniPath)) {
@@ -647,7 +706,10 @@ export async function syncDiscoveredModelsToIni(
   let baseContent = iniText;
 
   for (const [id, cfg] of Object.entries(parsed.models)) {
-    if (!cfg.model || !(await deps.exists(cfg.model))) {
+    const isIncompatible =
+      discoveredById.get(id)?.status === "incompatible" ||
+      registry[id]?.status === "incompatible";
+    if (!cfg.model || !(await deps.exists(cfg.model)) || isIncompatible) {
       removedModels.push(id);
       const escaped = id.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
       const sectionPattern = new RegExp(
@@ -722,6 +784,8 @@ export async function syncDiscoveredModelsToIni(
       workspaceDir: options.workspaceDir,
       configDir: options.configDir,
       iniPath,
+      registryPath: options.registryPath,
+      registry,
       readFile: deps.readFile,
       writeFile: deps.writeFile,
       exists: deps.exists,
