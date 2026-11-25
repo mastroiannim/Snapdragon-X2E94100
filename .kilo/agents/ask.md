@@ -6,7 +6,7 @@ model: hexagon/Ornith-1.5-9B-Q4_0
 tools:
   hexagon_status: true
   hexagon_models: true
-permissions:
+permission:
   read: allow
   edit: deny
   write: deny

@@ -222,6 +222,50 @@ ctx-size = 4096
             self.assertFalse(ok)
             self.assertTrue(any("Permesso bash" in iss for iss in issues))
 
+            # 4. Schema non valido: chiave plurale 'permissions' e wildcard edit allow
+            bad_cfg = kilo_config.generate_kilo_config(self.workspace_dir)
+            bad_cfg["permissions"] = {"edit": "ask"}
+            bad_cfg["permission"]["edit"] = {"*": "allow"}
+            bad_cfg["plugin"] = "not-a-list"
+            with open(bad_cfg_file, "w", encoding="utf-8") as f:
+                json.dump(bad_cfg, f)
+            ok, issues = kilo_config.validate_kilo_config(bad_cfg_file)
+            self.assertFalse(ok)
+            self.assertTrue(any("permissions" in iss for iss in issues))
+            self.assertTrue(any("Permesso edit" in iss for iss in issues))
+            self.assertTrue(any("plugin" in iss for iss in issues))
+
+            # 5. Schema non valido: azione permission non ammessa e $schema invalido
+            bad_cfg = kilo_config.generate_kilo_config(self.workspace_dir)
+            bad_cfg["$schema"] = "http://insecure.example/schema.json"
+            bad_cfg["permission"]["task"] = "permit"
+            with open(bad_cfg_file, "w", encoding="utf-8") as f:
+                json.dump(bad_cfg, f)
+            ok, issues = kilo_config.validate_kilo_config(bad_cfg_file)
+            self.assertFalse(ok)
+            self.assertTrue(any("$schema" in iss for iss in issues))
+            self.assertTrue(any("permit" in iss for iss in issues))
+
+    def test_validate_kilo_config_workspace_validates_agents_schema(self):
+        """Verifica che validate_kilo_config sul repo controlli anche .kilo/agents/*.md."""
+        repo_cfg = self.workspace_dir / "kilo.json"
+        ok, issues = kilo_config.validate_kilo_config(repo_cfg)
+        self.assertTrue(ok, f"kilo.json e .kilo/agents non validi: {issues}")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            cfg = kilo_config.generate_kilo_config(self.workspace_dir)
+            cfg_file = kilo_config.write_kilo_config(tmp_path, cfg)
+            agents_dir = tmp_path / ".kilo" / "agents"
+            agents_dir.mkdir(parents=True)
+            (agents_dir / "broken.md").write_text(
+                "---\nname: broken\ndescription: Broken agent\nmode: primary\npermissions:\n  read: allow\n---\nPrompt\n",
+                encoding="utf-8",
+            )
+            ok, issues = kilo_config.validate_kilo_config(cfg_file)
+            self.assertFalse(ok)
+            self.assertTrue(any("permissions" in iss for iss in issues))
+
 
 class TestKiloAgents(unittest.TestCase):
     """Test di validazione dei ruoli e permessi per gli agenti in .kilo/agents/."""
@@ -233,10 +277,19 @@ class TestKiloAgents(unittest.TestCase):
     def test_agents_directory_and_files_exist(self):
         """Verifica la presenza di tutti i ruoli agentici definiti."""
         self.assertTrue(self.agents_dir.is_dir(), ".kilo/agents/ directory mancante.")
-        expected_agents = ["code.md", "plan.md", "debug.md", "explore.md", "reviewer.md"]
+        expected_agents = ["ask.md", "code.md", "plan.md", "debug.md", "explore.md", "reviewer.md"]
         for agent_file in expected_agents:
             agent_path = self.agents_dir / agent_file
             self.assertTrue(agent_path.is_file(), f"File agente mancante: {agent_file}")
+
+    def test_agents_schema_uses_singular_permission(self):
+        """Verifica che tutti gli agenti usino 'permission:' (mai 'permissions:') e superino lo schema."""
+        ok, issues = kilo_config.validate_kilo_agents(self.agents_dir)
+        self.assertTrue(ok, f"Schema agenti non valido: {issues}")
+        for md_path in sorted(self.agents_dir.glob("*.md")):
+            content = md_path.read_text(encoding="utf-8")
+            self.assertIn("\npermission:\n", content, f"{md_path.name} deve usare 'permission:'")
+            self.assertNotIn("\npermissions:\n", content, f"{md_path.name} non deve usare 'permissions:'")
 
     def test_subagents_security_boundary(self):
         """Verifica che i subagenti di esplorazione e revisione abbiano edit e bash negati."""
@@ -249,8 +302,8 @@ class TestKiloAgents(unittest.TestCase):
             self.assertIn("bash: deny", content, f"{sa} deve avere bash: deny")
 
     def test_primary_agents_mode(self):
-        """Verifica che code, plan e debug abbiano modalità primary."""
-        primary = ["code.md", "plan.md", "debug.md"]
+        """Verifica che ask, code, plan e debug abbiano modalità primary."""
+        primary = ["ask.md", "code.md", "plan.md", "debug.md"]
         for ag in primary:
             content = (self.agents_dir / ag).read_text(encoding="utf-8")
             self.assertIn("mode: primary", content, f"{ag} deve avere mode: primary")

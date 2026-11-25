@@ -1,0 +1,79 @@
+name: Plugin TypeScript & asset checks
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'plugins/hexagon-runtime/**'
+      - 'benchmark-hexagon.ps1'
+      - 'runtime-update.psm1'
+      - 'sync-geniex.ps1'
+      - '.github/workflows/plugin-checks.yml'
+  pull_request:
+    paths:
+      - 'plugins/hexagon-runtime/**'
+      - 'benchmark-hexagon.ps1'
+      - 'runtime-update.psm1'
+      - 'sync-geniex.ps1'
+      - '.github/workflows/plugin-checks.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plugin-ci:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'plugins/hexagon-runtime/package-lock.json'
+      - name: Install plugin dependencies
+        working-directory: plugins/hexagon-runtime
+        run: npm ci
+      - name: TypeScript type-check (tsc --noEmit)
+        working-directory: plugins/hexagon-runtime
+        run: npx tsc --noEmit
+      - name: Build plugin (npm run build)
+        working-directory: plugins/hexagon-runtime
+        run: npm run build
+      - name: Run Vitest suite with coverage
+        working-directory: plugins/hexagon-runtime
+        run: npx vitest run --coverage
+      - name: Check duplicate script parity (root vs plugin assets)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pairs = @(
+            'benchmark-hexagon.ps1',
+            'runtime-update.psm1',
+            'sync-geniex.ps1'
+          )
+          foreach ($name in $pairs) {
+            $rootFile = Join-Path '.' $name
+            $assetFile = Join-Path 'plugins\hexagon-runtime\assets\scripts' $name
+            if (-not (Test-Path -LiteralPath $rootFile -PathType Leaf)) {
+              throw "Missing root script: $rootFile"
+            }
+            if (-not (Test-Path -LiteralPath $assetFile -PathType Leaf)) {
+              throw "Missing plugin asset script: $assetFile"
+            }
+            $rootHash = (Get-FileHash -LiteralPath $rootFile -Algorithm SHA256).Hash
+            $assetHash = (Get-FileHash -LiteralPath $assetFile -Algorithm SHA256).Hash
+            if ($rootHash -ne $assetHash) {
+              throw "Duplicate script parity mismatch for '$name': root ($rootHash) != plugin asset ($assetHash)"
+            }
+            Write-Host "OK parity: $name ($rootHash)"
+          }
+          $inspectAsset = 'plugins\hexagon-runtime\assets\scripts\inspect-gguf.ps1'
+          if (-not (Test-Path -LiteralPath $inspectAsset -PathType Leaf)) {
+            throw "Missing shared GGUF parser: $inspectAsset"
+          }
+          $launcherRaw = Get-Content -LiteralPath '.\launch-hexagon.ps1' -Raw
+          if ($launcherRaw -match 'public\s+class\s+GgufModelMeta') {
+            throw 'launch-hexagon.ps1 must load inspect-gguf.ps1 instead of duplicating GgufModelMeta'
+          }
+          Write-Host 'OK shared GGUF parser parity verified.'

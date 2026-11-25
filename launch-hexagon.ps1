@@ -72,128 +72,36 @@ if (-not $ListOnly -and -not $DryRun) {
 }
 
 # -------------------------------------------------------------
-# Parser C# ad altissime prestazioni per metadati GGUF (< 100 ms)
+# Caricamento parser GGUF condiviso (inspect-gguf.ps1)
 # -------------------------------------------------------------
-$csharpCode = @'
-using System;
-using System.IO;
-using System.Text;
-
-public class GgufModelMeta {
-    public string Architecture = "";
-    public string ModelName = "";
-    public ulong ContextLength = 0;
-    public ulong EmbeddingLength = 0;
-    public ulong BlockCount = 0;
-    public ulong HeadCount = 0;
-    public ulong HeadCountKv = 0;
-    public ulong ExpertCount = 0;
-    public ulong ExpertUsedCount = 0;
-    public ulong SlidingWindow = 0;
-    public uint FileType = 0;
-    public ulong FileSizeBytes = 0;
-    public string QuantName = "UNKNOWN";
-
-    public static GgufModelMeta Parse(string path) {
-        GgufModelMeta m = new GgufModelMeta();
-        FileInfo fi = new FileInfo(path);
-        m.FileSizeBytes = (ulong)fi.Length;
-
-        using (FileStream fs = File.OpenRead(path))
-        using (BinaryReader br = new BinaryReader(fs)) {
-            string magic = Encoding.ASCII.GetString(br.ReadBytes(4));
-            if (magic != "GGUF") return null;
-            uint version = br.ReadUInt32();
-            ulong tensorCount = br.ReadUInt64();
-            ulong kvCount = br.ReadUInt64();
-
-            for (ulong i = 0; i < kvCount; i++) {
-                ulong kLen = br.ReadUInt64();
-                if (kLen > 500 || kLen > (ulong)(fs.Length - fs.Position))
-                    throw new InvalidDataException("GGUF metadata key length invalid");
-                string key = Encoding.UTF8.GetString(br.ReadBytes((int)kLen));
-                uint valType = br.ReadUInt32();
-
-                if (valType == 8) { // string
-                    ulong sLen = br.ReadUInt64();
-                    if (sLen > 16UL * 1024 * 1024 || sLen > (ulong)(fs.Length - fs.Position))
-                        throw new InvalidDataException("GGUF metadata string length invalid");
-                    string s = Encoding.UTF8.GetString(br.ReadBytes((int)sLen));
-                    if (key == "general.architecture") m.Architecture = s;
-                    if (key == "general.name") m.ModelName = s;
-                } else if (valType == 4) { // uint32
-                    uint v = br.ReadUInt32();
-                    if (key == "general.file_type") m.FileType = v;
-                    if (key.EndsWith(".context_length")) m.ContextLength = v;
-                    if (key.EndsWith(".embedding_length")) m.EmbeddingLength = v;
-                    if (key.EndsWith(".block_count")) m.BlockCount = v;
-                    if (key.EndsWith(".attention.head_count")) m.HeadCount = v;
-                    if (key.EndsWith(".attention.head_count_kv")) m.HeadCountKv = v;
-                    if (key.EndsWith(".expert_count")) m.ExpertCount = v;
-                    if (key.EndsWith(".expert_used_count")) m.ExpertUsedCount = v;
-                    if (key.EndsWith(".attention.sliding_window")) m.SlidingWindow = v;
-                } else if (valType == 10) { // uint64
-                    ulong v = br.ReadUInt64();
-                    if (key.EndsWith(".context_length")) m.ContextLength = v;
-                    if (key.EndsWith(".embedding_length")) m.EmbeddingLength = v;
-                    if (key.EndsWith(".block_count")) m.BlockCount = v;
-                    if (key.EndsWith(".attention.head_count")) m.HeadCount = v;
-                    if (key.EndsWith(".attention.head_count_kv")) m.HeadCountKv = v;
-                    if (key.EndsWith(".expert_count")) m.ExpertCount = v;
-                    if (key.EndsWith(".expert_used_count")) m.ExpertUsedCount = v;
-                    if (key.EndsWith(".attention.sliding_window")) m.SlidingWindow = v;
-                } else if (valType == 9) { // array
-                    uint elemType = br.ReadUInt32();
-                    ulong arrLen = br.ReadUInt64();
-                    if (elemType == 0 || elemType == 1 || elemType == 7) fs.Seek((long)arrLen, SeekOrigin.Current);
-                    else if (elemType == 2 || elemType == 3) fs.Seek((long)(arrLen * 2), SeekOrigin.Current);
-                    else if (elemType == 4 || elemType == 5 || elemType == 6) fs.Seek((long)(arrLen * 4), SeekOrigin.Current);
-                    else if (elemType == 10 || elemType == 11 || elemType == 12) fs.Seek((long)(arrLen * 8), SeekOrigin.Current);
-                    else if (elemType == 8) {
-                        for (ulong a = 0; a < arrLen; a++) {
-                            ulong sl = br.ReadUInt64();
-                            fs.Seek((long)sl, SeekOrigin.Current);
-                        }
-                    }
-                } else if (valType == 0 || valType == 1 || valType == 7) { br.ReadByte(); }
-                else if (valType == 2 || valType == 3) { br.ReadInt16(); }
-                else if (valType == 5 || valType == 6) { br.ReadInt32(); }
-                else if (valType == 11 || valType == 12) { br.ReadInt64(); }
-                else { throw new InvalidDataException("Unsupported GGUF metadata value type " + valType); }
-            }
-        }
-        if (m.HeadCountKv == 0 && m.HeadCount > 0) m.HeadCountKv = m.HeadCount;
-
-        switch (m.FileType) {
-            case 0: m.QuantName = "F32"; break;
-            case 1: m.QuantName = "F16"; break;
-            case 2: m.QuantName = "Q4_0"; break;
-            case 3: m.QuantName = "Q4_1"; break;
-            case 7: m.QuantName = "Q8_0"; break;
-            case 8: m.QuantName = "Q5_0"; break;
-            case 9: m.QuantName = "Q5_1"; break;
-            // general.file_type uses llama_ftype, NOT ggml_type.
-            case 10: case 11: case 12: case 13: case 14: case 15: case 16: case 17: case 18: case 21:
-                m.QuantName = "K-Quants"; break;
-            case 19: case 20: case 22: case 23: case 24: case 25: case 26: case 27: case 28: case 29: case 30: case 31:
-                m.QuantName = "IQ-Quants"; break;
-            case 32: m.QuantName = "BF16"; break;
-            default: m.QuantName = "Type_" + m.FileType; break;
-        }
-        return m;
-    }
-}
-'@
-
-# In una sessione riusata il tipo puo' gia' essere caricato: si riusa senza mascherare
-# errori di compilazione della prima definizione.
-try {
-    Add-Type -TypeDefinition $csharpCode -ErrorAction Stop
-} catch {
-    if (-not ('GgufModelMeta' -as [type])) { throw }
+$inspectCandidates = @(
+    (Join-Path $PSScriptRoot "plugins\hexagon-runtime\assets\scripts\inspect-gguf.ps1"),
+    (Join-Path $PSScriptRoot "inspect-gguf.ps1")
+)
+$inspectScript = $inspectCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+if (-not $inspectScript) { throw "Parser GGUF non disponibile: inspect-gguf.ps1 non trovato." }
+if (-not ('GgufModelMeta' -as [type])) {
+    & $inspectScript -TypeOnly
+} else {
     Write-Verbose "GgufModelMeta gia' caricato in questa sessione PowerShell; si riusa la versione esistente."
 }
 if (-not ('GgufModelMeta' -as [type])) { throw "Parser GGUF non disponibile." }
+
+function Read-GgufMetaSafe([string]$FilePath, [switch]$FailOnError) {
+    try {
+        return [GgufModelMeta]::Parse($FilePath)
+    } catch {
+        $fileName = [System.IO.Path]::GetFileName($FilePath)
+        if ($FailOnError) {
+            Write-Error "Impossibile analizzare i metadati GGUF di '$fileName': $($_.Exception.Message)"
+            exit 1
+        }
+        if (-not $Json) {
+            Write-Warning "File GGUF ignorato ($fileName): $($_.Exception.Message)"
+        }
+        return $null
+    }
+}
 
 # -------------------------------------------------------------
 # Motore Decisionale Euristico basato sulla Telemetria Hardware
@@ -346,7 +254,7 @@ if (@($allGguf).Count -eq 0) {
 if ($ListOnly) {
     if (-not $Json) { Write-Host "`n=== MODELLI DISPONIBILI IN $ModelsDir ===" -ForegroundColor Cyan }
     $table = foreach ($file in $allGguf) {
-        $meta = [GgufModelMeta]::Parse($file.FullName)
+        $meta = Read-GgufMetaSafe $file.FullName
         if ($meta) {
             $cfg = Get-HexagonOptimalConfig $meta
             [PSCustomObject]@{
@@ -418,7 +326,7 @@ if ($Mode -eq "Router") {
         $alias = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
         if ($seenAliases.ContainsKey($alias)) { continue }
         $seenAliases[$alias] = $true
-        $meta = [GgufModelMeta]::Parse($file.FullName)
+        $meta = Read-GgufMetaSafe $file.FullName
         if (-not $meta) { continue }
         if ($meta.Architecture -eq "clip" -or $meta.Architecture -eq "") {
             # Artefatto non autonomo (es. proiettore multimodale clip)
@@ -552,7 +460,7 @@ if ($Model -ne "") {
     }
 }
 
-$meta = [GgufModelMeta]::Parse($targetModelFile.FullName)
+$meta = Read-GgufMetaSafe $targetModelFile.FullName -FailOnError
 if (-not $meta) {
     Write-Error "Impossibile analizzare i metadati GGUF del file selezionato."
     exit 1

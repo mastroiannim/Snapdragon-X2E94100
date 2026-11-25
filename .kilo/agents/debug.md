@@ -3,7 +3,7 @@ name: debug
 description: Diagnostic and debugging agent
 mode: primary
 model: hexagon/Ornith-1.5-9B-Q4_0
-permissions:
+permission:
   read: allow
   edit: ask
   write: ask

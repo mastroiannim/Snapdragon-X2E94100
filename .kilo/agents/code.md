@@ -3,7 +3,7 @@ name: code
 description: Primary autonomous coding agent for Hexagon Local Coding Agent
 mode: primary
 model: hexagon/Ornith-1.5-9B-Q4_0
-permissions:
+permission:
   read: allow
   edit: ask
   write: ask

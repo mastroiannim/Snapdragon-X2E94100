@@ -5,15 +5,19 @@
     Legge l'header GGUF ed estrae architettura, context_length, expert_count,
     quantizzazione e sliding window senza caricare i tensori in memoria.
 #>
+[CmdletBinding(DefaultParameterSetName='Inspect')]
 param(
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory=$true, ParameterSetName='Inspect', Position=0)]
     [string]$Path,
-    [switch]$Json
+    [Parameter(ParameterSetName='Inspect')]
+    [switch]$Json,
+    [Parameter(Mandatory=$true, ParameterSetName='TypeOnly')]
+    [switch]$TypeOnly
 )
 
 $ErrorActionPreference = "Stop"
 
-if (-not (Test-Path -LiteralPath $Path)) {
+if (-not $TypeOnly -and -not (Test-Path -LiteralPath $Path)) {
     $err = @{ Error = "File non trovato: $Path" }
     if ($Json) { $err | ConvertTo-Json -Compress } else { Write-Error $err.Error }
     exit 1
@@ -21,6 +25,7 @@ if (-not (Test-Path -LiteralPath $Path)) {
 
 $csharpCode = @'
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 
@@ -39,74 +44,205 @@ public class GgufModelMeta {
     public ulong FileSizeBytes = 0;
     public string QuantName = "UNKNOWN";
 
+    private const int MaxArrayNestingDepth = 64;
+    private const ulong MaxStringLength = 16UL * 1024 * 1024;
+    private static readonly string[] ArchitectureFields = new string[] {
+        "context_length",
+        "embedding_length",
+        "block_count",
+        "attention.head_count",
+        "attention.head_count_kv",
+        "expert_count",
+        "expert_used_count",
+        "attention.sliding_window"
+    };
+
+    private static ulong RemainingBytes(FileStream fs) {
+        long rem = fs.Length - fs.Position;
+        return rem > 0 ? (ulong)rem : 0UL;
+    }
+
+    private static void SkipBytes(FileStream fs, ulong count) {
+        if (count > RemainingBytes(fs)) {
+            throw new InvalidDataException("GGUF metadata extends past end of file");
+        }
+        fs.Seek((long)count, SeekOrigin.Current);
+    }
+
+    private static byte[] ReadExactBytes(FileStream fs, BinaryReader br, ulong len, ulong maxLen, string errorMessage) {
+        if (len > maxLen || len > RemainingBytes(fs)) {
+            throw new InvalidDataException(errorMessage);
+        }
+        byte[] data = br.ReadBytes((int)len);
+        if ((ulong)data.Length != len) {
+            throw new InvalidDataException("GGUF file truncated while reading string/bytes");
+        }
+        return data;
+    }
+
+    private static int FixedScalarSize(uint valType) {
+        switch (valType) {
+            case 0: case 1: case 7: return 1;
+            case 2: case 3: return 2;
+            case 4: case 5: case 6: return 4;
+            case 10: case 11: case 12: return 8;
+            default: return 0;
+        }
+    }
+
+    private static void SkipString(FileStream fs, BinaryReader br) {
+        ulong sl = br.ReadUInt64();
+        if (sl > MaxStringLength || sl > RemainingBytes(fs)) {
+            throw new InvalidDataException("GGUF metadata string length invalid");
+        }
+        SkipBytes(fs, sl);
+    }
+
+    private static void SkipArray(FileStream fs, BinaryReader br, int depth) {
+        if (depth > MaxArrayNestingDepth) {
+            throw new InvalidDataException("GGUF array nesting depth exceeded");
+        }
+        uint elemType = br.ReadUInt32();
+        ulong arrLen = br.ReadUInt64();
+        ulong remaining = RemainingBytes(fs);
+        int fixedSize = FixedScalarSize(elemType);
+        if (fixedSize > 0) {
+            ulong size = (ulong)fixedSize;
+            if (arrLen > remaining / size) {
+                throw new InvalidDataException("GGUF array length exceeds remaining file size");
+            }
+            SkipBytes(fs, arrLen * size);
+        } else if (elemType == 8) {
+            if (arrLen > remaining / 8UL) {
+                throw new InvalidDataException("GGUF string array length exceeds remaining file size");
+            }
+            for (ulong a = 0; a < arrLen; a++) {
+                SkipString(fs, br);
+            }
+        } else if (elemType == 9) {
+            if (arrLen > remaining / 12UL) {
+                throw new InvalidDataException("GGUF nested array length exceeds remaining file size");
+            }
+            for (ulong a = 0; a < arrLen; a++) {
+                SkipArray(fs, br, depth + 1);
+            }
+        } else {
+            throw new InvalidDataException("Unsupported GGUF metadata array element type " + elemType);
+        }
+    }
+
+    private static bool IsTrackedNumericKey(string key) {
+        if (key == "general.file_type") return true;
+        for (int i = 0; i < ArchitectureFields.Length; i++) {
+            if (key.EndsWith("." + ArchitectureFields[i], StringComparison.Ordinal)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static ulong ResolveField(Dictionary<string, ulong> numericKvs, string arch, string field) {
+        ulong val;
+        if (!string.IsNullOrEmpty(arch)) {
+            if (numericKvs.TryGetValue(arch + "." + field, out val)) {
+                return val;
+            }
+            if (string.Equals(arch, "clip", StringComparison.OrdinalIgnoreCase) &&
+                numericKvs.TryGetValue("clip.vision." + field, out val)) {
+                return val;
+            }
+            return 0;
+        }
+        string suffix = "." + field;
+        foreach (KeyValuePair<string, ulong> entry in numericKvs) {
+            if (entry.Key.EndsWith(suffix, StringComparison.Ordinal) &&
+                !entry.Key.StartsWith("clip.", StringComparison.OrdinalIgnoreCase)) {
+                return entry.Value;
+            }
+        }
+        return 0;
+    }
+
     public static GgufModelMeta Parse(string path) {
         GgufModelMeta m = new GgufModelMeta();
         FileInfo fi = new FileInfo(path);
         m.FileSizeBytes = (ulong)fi.Length;
 
-        using (FileStream fs = File.OpenRead(path))
-        using (BinaryReader br = new BinaryReader(fs)) {
-            string magic = Encoding.ASCII.GetString(br.ReadBytes(4));
-            if (magic != "GGUF") return null;
-            uint version = br.ReadUInt32();
-            ulong tensorCount = br.ReadUInt64();
-            ulong kvCount = br.ReadUInt64();
+        Dictionary<string, ulong> numericKvs = new Dictionary<string, ulong>(StringComparer.Ordinal);
 
-            for (ulong i = 0; i < kvCount; i++) {
-                ulong kLen = br.ReadUInt64();
-                if (kLen > 500 || kLen > (ulong)(fs.Length - fs.Position))
-                    throw new InvalidDataException("GGUF metadata key length invalid");
-                string key = Encoding.UTF8.GetString(br.ReadBytes((int)kLen));
-                uint valType = br.ReadUInt32();
+        try {
+            using (FileStream fs = File.OpenRead(path))
+            using (BinaryReader br = new BinaryReader(fs)) {
+                if (fs.Length < 4) return null;
+                string magic = Encoding.ASCII.GetString(ReadExactBytes(fs, br, 4, 4, "GGUF magic header invalid"));
+                if (magic != "GGUF") return null;
+                if (fs.Length < 24) {
+                    throw new InvalidDataException("GGUF header truncated");
+                }
+                uint version = br.ReadUInt32();
+                if (version == 0) {
+                    throw new InvalidDataException("Unsupported GGUF version 0");
+                }
+                ulong tensorCount = br.ReadUInt64();
+                ulong kvCount = br.ReadUInt64();
+                if (kvCount > RemainingBytes(fs) / 12UL) {
+                    throw new InvalidDataException("GGUF metadata entry count exceeds file size");
+                }
 
-                if (valType == 8) { // string
-                    ulong sLen = br.ReadUInt64();
-                    if (sLen > 16UL * 1024 * 1024 || sLen > (ulong)(fs.Length - fs.Position))
-                        throw new InvalidDataException("GGUF metadata string length invalid");
-                    string s = Encoding.UTF8.GetString(br.ReadBytes((int)sLen));
-                    if (key == "general.architecture") m.Architecture = s;
-                    if (key == "general.name") m.ModelName = s;
-                } else if (valType == 4) { // uint32
-                    uint v = br.ReadUInt32();
-                    if (key == "general.file_type") m.FileType = v;
-                    if (key.EndsWith(".context_length")) m.ContextLength = v;
-                    if (key.EndsWith(".embedding_length")) m.EmbeddingLength = v;
-                    if (key.EndsWith(".block_count")) m.BlockCount = v;
-                    if (key.EndsWith(".attention.head_count")) m.HeadCount = v;
-                    if (key.EndsWith(".attention.head_count_kv")) m.HeadCountKv = v;
-                    if (key.EndsWith(".expert_count")) m.ExpertCount = v;
-                    if (key.EndsWith(".expert_used_count")) m.ExpertUsedCount = v;
-                    if (key.EndsWith(".attention.sliding_window")) m.SlidingWindow = v;
-                } else if (valType == 10) { // uint64
-                    ulong v = br.ReadUInt64();
-                    if (key.EndsWith(".context_length")) m.ContextLength = v;
-                    if (key.EndsWith(".embedding_length")) m.EmbeddingLength = v;
-                    if (key.EndsWith(".block_count")) m.BlockCount = v;
-                    if (key.EndsWith(".attention.head_count")) m.HeadCount = v;
-                    if (key.EndsWith(".attention.head_count_kv")) m.HeadCountKv = v;
-                    if (key.EndsWith(".expert_count")) m.ExpertCount = v;
-                    if (key.EndsWith(".expert_used_count")) m.ExpertUsedCount = v;
-                    if (key.EndsWith(".attention.sliding_window")) m.SlidingWindow = v;
-                } else if (valType == 9) { // array
-                    uint elemType = br.ReadUInt32();
-                    ulong arrLen = br.ReadUInt64();
-                    if (elemType == 0 || elemType == 1 || elemType == 7) fs.Seek((long)arrLen, SeekOrigin.Current);
-                    else if (elemType == 2 || elemType == 3) fs.Seek((long)(arrLen * 2), SeekOrigin.Current);
-                    else if (elemType == 4 || elemType == 5 || elemType == 6) fs.Seek((long)(arrLen * 4), SeekOrigin.Current);
-                    else if (elemType == 10 || elemType == 11 || elemType == 12) fs.Seek((long)(arrLen * 8), SeekOrigin.Current);
-                    else if (elemType == 8) {
-                        for (ulong a = 0; a < arrLen; a++) {
-                            ulong sl = br.ReadUInt64();
-                            fs.Seek((long)sl, SeekOrigin.Current);
-                        }
+                for (ulong i = 0; i < kvCount; i++) {
+                    ulong kLen = br.ReadUInt64();
+                    string key = Encoding.UTF8.GetString(ReadExactBytes(fs, br, kLen, 500, "GGUF metadata key length invalid"));
+                    uint valType = br.ReadUInt32();
+
+                    if (valType == 8) { // string
+                        ulong sLen = br.ReadUInt64();
+                        string s = Encoding.UTF8.GetString(ReadExactBytes(fs, br, sLen, MaxStringLength, "GGUF metadata string length invalid"));
+                        if (key == "general.architecture") m.Architecture = s;
+                        if (key == "general.name") m.ModelName = s;
+                    } else if (valType == 4) { // uint32
+                        ulong v = br.ReadUInt32();
+                        if (IsTrackedNumericKey(key)) numericKvs[key] = v;
+                    } else if (valType == 5) { // int32
+                        int v = br.ReadInt32();
+                        if (v >= 0 && IsTrackedNumericKey(key)) numericKvs[key] = (ulong)v;
+                    } else if (valType == 10) { // uint64
+                        ulong v = br.ReadUInt64();
+                        if (IsTrackedNumericKey(key)) numericKvs[key] = v;
+                    } else if (valType == 11) { // int64
+                        long v = br.ReadInt64();
+                        if (v >= 0 && IsTrackedNumericKey(key)) numericKvs[key] = (ulong)v;
+                    } else if (valType == 9) { // array
+                        SkipArray(fs, br, 0);
+                    } else if (valType == 0 || valType == 1 || valType == 7) {
+                        SkipBytes(fs, 1);
+                    } else if (valType == 2 || valType == 3) {
+                        SkipBytes(fs, 2);
+                    } else if (valType == 6) {
+                        SkipBytes(fs, 4);
+                    } else if (valType == 12) {
+                        SkipBytes(fs, 8);
+                    } else {
+                        throw new InvalidDataException("Unsupported GGUF metadata value type " + valType);
                     }
-                } else if (valType == 0 || valType == 1 || valType == 7) { br.ReadByte(); }
-                else if (valType == 2 || valType == 3) { br.ReadInt16(); }
-                else if (valType == 5 || valType == 6) { br.ReadInt32(); }
-                else if (valType == 11 || valType == 12) { br.ReadInt64(); }
-                else { throw new InvalidDataException("Unsupported GGUF metadata value type " + valType); }
+                }
             }
+        } catch (EndOfStreamException ex) {
+            throw new InvalidDataException("GGUF file truncated or incomplete", ex);
         }
+
+        ulong fileTypeVal;
+        if (numericKvs.TryGetValue("general.file_type", out fileTypeVal) && fileTypeVal <= uint.MaxValue) {
+            m.FileType = (uint)fileTypeVal;
+        }
+        m.ContextLength = ResolveField(numericKvs, m.Architecture, "context_length");
+        m.EmbeddingLength = ResolveField(numericKvs, m.Architecture, "embedding_length");
+        m.BlockCount = ResolveField(numericKvs, m.Architecture, "block_count");
+        m.HeadCount = ResolveField(numericKvs, m.Architecture, "attention.head_count");
+        m.HeadCountKv = ResolveField(numericKvs, m.Architecture, "attention.head_count_kv");
+        m.ExpertCount = ResolveField(numericKvs, m.Architecture, "expert_count");
+        m.ExpertUsedCount = ResolveField(numericKvs, m.Architecture, "expert_used_count");
+        m.SlidingWindow = ResolveField(numericKvs, m.Architecture, "attention.sliding_window");
+
         if (m.HeadCountKv == 0 && m.HeadCount > 0) m.HeadCountKv = m.HeadCount;
 
         switch (m.FileType) {
@@ -117,6 +253,7 @@ public class GgufModelMeta {
             case 7: m.QuantName = "Q8_0"; break;
             case 8: m.QuantName = "Q5_0"; break;
             case 9: m.QuantName = "Q5_1"; break;
+            // general.file_type uses llama_ftype, NOT ggml_type.
             case 10: case 11: case 12: case 13: case 14: case 15: case 16: case 17: case 18: case 21:
                 m.QuantName = "K-Quants"; break;
             case 19: case 20: case 22: case 23: case 24: case 25: case 26: case 27: case 28: case 29: case 30: case 31:
@@ -133,6 +270,10 @@ try {
     Add-Type -TypeDefinition $csharpCode -ErrorAction Stop
 } catch {
     if (-not ('GgufModelMeta' -as [type])) { throw }
+}
+
+if ($TypeOnly) {
+    return
 }
 
 try {

@@ -32,6 +32,10 @@ try {
     foreach ($name in @('launch-hexagon.ps1','sync-geniex.ps1','runtime-update.psm1')) {
         Copy-Item -LiteralPath (Join-Path $repo $name) -Destination $checkout
     }
+    $inspectRel = Join-Path 'plugins\hexagon-runtime\assets\scripts' 'inspect-gguf.ps1'
+    $inspectDest = Join-Path $checkout $inspectRel
+    [void][IO.Directory]::CreateDirectory((Split-Path $inspectDest -Parent))
+    Copy-Item -LiteralPath (Join-Path $repo $inspectRel) -Destination $inspectDest
     $fixture = Join-Path $root 'fixture.exe'
     Add-Type -TypeDefinition @'
 using System;

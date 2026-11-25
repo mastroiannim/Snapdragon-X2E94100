@@ -3,7 +3,7 @@ name: reviewer
 description: Read-only code review and diff inspection subagent
 mode: subagent
 model: hexagon/Ornith-1.5-9B-Q4_0
-permissions:
+permission:
   read: allow
   edit: deny
   write: deny
