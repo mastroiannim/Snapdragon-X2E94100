@@ -149,7 +149,7 @@ export function listKnownModels(
 }
 
 /**
- * Limite di output: stessa regola di kilo_config.py, cosi' la configurazione
+ * Limite di output proporzionato alla context window, cosi' la configurazione
  * dinamica del plugin e' coerente con il generatore statico.
  */
 export function outputLimitFor(contextWindow: number): number {

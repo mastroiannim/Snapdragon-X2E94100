@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$BinPath = (Join-Path $env:USERPROFILE "llama-cpp\llama-bin-win-cpu-arm64"),
     [string]$ModelsDir = (Join-Path $env:USERPROFILE ".cache\geniex\models"),
     [string[]]$Models = @(

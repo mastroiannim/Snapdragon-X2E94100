@@ -2,7 +2,7 @@
 /**
  * cli.ts — Utility CLI nativa TypeScript per @hexagon/kilo-plugin.
  *
- * Sostituisce integralmente stack_manager.py e kilo_config.py (zero dipendenze Python).
+ * Gestisce configurazione Kilo, sync modelli/runtime, stato e validazione offline.
  * Uso:
  *   node dist/cli.js setup [--workspace [dir]] [--global] [--port 18803] [--host 127.0.0.1] [--models-dir dir] [--ini path] [--main-model id] [--small-model id] [--json]
  *   node dist/cli.js sync [--workspace [dir]] [--port 18803] [--host 127.0.0.1]

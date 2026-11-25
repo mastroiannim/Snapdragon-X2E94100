@@ -1,4 +1,4 @@
-# Windows PowerShell 5.1 / .NET Framework: nessun Python, Git, SDK o archiviatore esterno.
+# Windows PowerShell 5.1 / .NET Framework: nessun Git, SDK o archiviatore esterno.
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 

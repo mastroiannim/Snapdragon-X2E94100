@@ -127,7 +127,7 @@ Caratteristiche:
 - Rigenera `kilo.json` tramite `plugins/hexagon-runtime/dist/cli.js setup --workspace --port <P> --host <H>`.
 - Inoltra l'esecuzione a `kilo.cmd`.
 
-### 3. `plugins/hexagon-runtime/dist/cli.js` (CLI TypeScript nativa, zero Python)
+### 3. `plugins/hexagon-runtime/dist/cli.js` (CLI TypeScript nativa)
 Utility nativa per interrogare, validare e aggiornare la configurazione:
 ```powershell
 node plugins\hexagon-runtime\dist\cli.js status --check-runtime --port 18803 --host 127.0.0.1  # Stato router, modelli e runtime GenieX
@@ -135,19 +135,14 @@ node plugins\hexagon-runtime\dist\cli.js validate --workspace .                 
 node plugins\hexagon-runtime\dist\cli.js setup --workspace --port 18803 --host 127.0.0.1        # Ricrea kilo.json nel workspace
 node plugins\hexagon-runtime\dist\cli.js setup --global --port 18803 --host 127.0.0.1           # Installa/aggiorna il provider hexagon nel config globale
 ```
-*(Gli script Python originali `stack_manager.py` e `kilo_config.py` sono stati archiviati in `legacy/` e deprecati.)*
 
-### 4. Selezione della Cartella di Progetto (TUI Control Center)
-Quando la TUI di controllo avvia Kilo Code (menu Router + Kilo), chiede la
-**cartella del progetto da contestualizzare** e la passa a Kilo come percorso
-del progetto (`kilo <cartella>`), avviando il processo con `cwd` su quella
-cartella: l'agente opera quindi sul repository scelto anziché sul workspace Hexagon.
-
-Kilo Code risolve `kilo.json` risalendo dalla cartella del progetto; per i
-progetti **fuori** dal workspace Hexagon, il provider `hexagon` viene quindi
-reso disponibile via config globale `~/.config/kilo/kilo.jsonc`
-(aggiornato automaticamente al lancio, con backup timestamped del file
-precedente; mai sovrascrive un file non parsabile).
+### 4. Uso su Progetti Esterni (Configurazione Globale)
+Kilo Code risolve `kilo.json` risalendo dalla cartella del progetto corrente.
+Per i progetti **fuori** dal workspace Hexagon, il provider `hexagon` viene
+reso disponibile tramite configurazione globale `~/.config/kilo/kilo.jsonc`
+eseguendo una tantum `node plugins\hexagon-runtime\dist\cli.js setup --global`
+(aggiornamento sicuro con backup timestamped del file precedente; non sovrascrive
+file non parsabili).
 
 ---
 
@@ -174,11 +169,19 @@ Tutti i 9 scenari previsti dalla specifica sono stati verificati in un repositor
 
 ## 6. Suite di Test Automatizzati
 
-La suite di test del progetto include i test di regressione esistenti e i nuovi test di integrazione Kilo:
+La suite di verifica del progetto copre il plugin TypeScript e i controlli PowerShell:
 ```powershell
-python -m unittest discover -s tests -p "test_*.py" -v
+cd plugins\hexagon-runtime && npm run build && npm test
 ```
-**Risultato:** **67/67 test superati con successo** (inclusi `test_kilo_integration.py`, `test_stack_manager.py`, `test_tui.py`, `test_tui_http.py`).
+```powershell
+node plugins\hexagon-runtime\dist\cli.js validate --workspace .
+powershell -ExecutionPolicy Bypass -File tests\kilo-cli-no-python.ps1
+powershell -ExecutionPolicy Bypass -File tests\runtime-readonly.ps1
+powershell -ExecutionPolicy Bypass -File tests\runtime-update.ps1
+powershell -ExecutionPolicy Bypass -File tests\entrypoints.ps1
+powershell -ExecutionPolicy Bypass -File tests\benchmark-profiles.ps1
+powershell -ExecutionPolicy Bypass -File tests\gguf-parser.ps1
+```
 
 ---
 
@@ -190,13 +193,13 @@ python -m unittest discover -s tests -p "test_*.py" -v
 - **Modifiche Locali Preservate:**
   - `launch-hexagon.ps1`: mantenuta la regola locale per i modelli K-quants >15GB su `HTP0`.
   - Log e file non tracciati del working tree (`*.txt`): rigorosamente intatti.
-- **Nuovi File di Integrazione Introdotti:**
+- **Componenti di Integrazione Principali:**
   - `kilo.json`
-  - `kilo_config.py`
-  - `launch-kilo.ps1`
+  - `plugins/hexagon-runtime/`
+  - `launch-kilo.ps1` / `launch-kilo.bat`
   - `setup-kilo.ps1`
   - `.kilo/agents/*.md`
-  - `tests/test_kilo_integration.py`
+  - `tests/kilo-cli-no-python.ps1`
   - `docs/HEXAGON_LOCAL_CODING_AGENT.md`
 
 ---

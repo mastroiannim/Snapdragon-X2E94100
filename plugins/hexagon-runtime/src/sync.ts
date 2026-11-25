@@ -82,7 +82,7 @@ function extractLabeledField(output: string, label: string): string | null {
   return match ? match[1].trim() : null;
 }
 
-/** I commit sono confrontati per prefisso (7-40 hex), come nel core Python. */
+/** I commit sono confrontati per prefisso (7-40 hex). */
 export function sameCommit(left: string | null, right: string | null): boolean {
   if (!left || !right) return false;
   const hex = /^[0-9a-f]{7,40}$/i;

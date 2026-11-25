@@ -61,7 +61,7 @@ Il separatore `/` è previsto da `llama-bench` per `-dev` e `-ts`: è indicato d
 **Versioni del sincronizzatore:** il `main` originario (`dbbb499`) selezionava release con fallback approssimativi, estraeva ZIP via HTTP Range e sostituiva i file dell'installazione. Quei passaggi non certificavano integrita', ABI o riproducibilita'.
 
 Il [PR #1](https://github.com/mastroiannim/Snapdragon-X2E94100/pull/1) aveva rimosso
-l'installazione. Nel branch `feat/tui-openclaw` l'aggiornamento automatico e' ripristinato:
+l'installazione. L'aggiornamento automatico e' stato successivamente ripristinato:
 `runtime-update.psm1` prepara una directory separata, verifica lo ZIP completo con
 SHA-256, sovrappone i file GenieX, controlla commit e device, e conserva la directory
 precedente durante la sostituzione. Un errore di ripristino non elimina il backup e
@@ -74,9 +74,9 @@ la variabile utente persistente `ADSP_LIBRARY_PATH`: il percorso e' impostato ne
 processi figli. Le copie sono il default; `-UseHardLinks` e' un'opzione esplicita.
 
 Prerequisito software manuale del setup: GenieX Qualcomm installato su Windows ARM64.
-Internet e' necessario per i frontend mancanti e per il primo provisioning TUI;
+Internet e' necessario per scaricare i frontend mancanti;
 modelli GGUF e driver OEM funzionanti restano input e condizioni dell'host. Nessun
-SDK, compilatore esterno o Python gia' installato e' richiesto dai launcher.
+SDK o compilatore esterno e' richiesto dai launcher.
 
 ## Percorso dati e confini di responsabilità
 
@@ -117,7 +117,7 @@ La verifica con `signtool` conferma la firma del catalogo nelle condizioni dell'
 2. **Acquisire manifest verificabile** con file, SHA-256, versione/commit e provenienza. Lo stesso commit è un controllo parziale, non un attestato di compatibilità.
 3. **Verificare catalogo e corrispondenza HTP** con i requisiti Windows; non usare un catalogo per “sanare” un artefatto di provenienza diversa.
 4. **Allineamento automatico documentato.** Il launcher prepara il runtime prima
-   dell'avvio con lo stesso motore usato dalla TUI. Per il solo controllo usare
+   dell'avvio con lo stesso motore transazionale (`runtime-update.psm1`) usato dal plugin. Per il solo controllo usare
    `sync-geniex.ps1` senza Apply o il launcher con `-CheckRuntime`.
 5. **Richiedere prova di inferenza**, non fermarsi a `--version` e `--list-devices`. Documentare offload, throughput, stato errore e impronta software.
 

@@ -1,7 +1,7 @@
 /**
  * validate.ts — Validatore nativo TypeScript per kilo.json e .kilo/agents/*.md.
  *
- * Sostituisce kilo_config.py --check garantendo conformita' dello schema Kilo Code
+ * Garantisce la conformita' dello schema Kilo Code
  * e vincoli di sicurezza offline (endpoint loopback obbligatorio, provider locale
  * @ai-sdk/openai-compatible, permessi sicuri su edit/write/bash).
  */

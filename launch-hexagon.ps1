@@ -35,7 +35,7 @@
 .PARAMETER ModelsMax
     In modalita' Router: massimo numero di modelli caricati in RAM contemporaneamente (default: 2).
     Un modello Q4_0 14B + KV cache a 64k occupa ~15 GB: con 2 modelli simultanei si saturano ~30 GB
-    dei 48 GB totali, lasciando ~18 GB per Windows 11 e Cline.
+    dei 48 GB totali, lasciando ~18 GB per Windows 11 e il client locale.
 #>
 
 param(
@@ -557,7 +557,7 @@ if (-not $Json) {
     Write-Host " * Motivazione:       $($cfg.Strategy)" -ForegroundColor Gray
     Write-Host " * Dimensione Ctx:    $($cfg.ContextSize) token ($([Math]::Round($cfg.ContextSize / 1024))k)" -ForegroundColor Green
     Write-Host " * Vincolo Ctx:       $($cfg.ContextReason)" -ForegroundColor Gray
-    Write-Host " * CPU Oryon Core:    $($cfg.Threads) thread LLM (6 core riservati a Windows 11 / Cline)" -ForegroundColor Green
+    Write-Host " * CPU Oryon Core:    $($cfg.Threads) thread LLM (core residui riservati a Windows 11 / Kilo Code)" -ForegroundColor Green
     Write-Host " * Batching / FA:     -b $($cfg.BatchSize) -ub $($cfg.UBatchSize) -fa on --context-shift" -ForegroundColor Green
     Write-Host "========================================================`n" -ForegroundColor Cyan
 }
@@ -634,7 +634,7 @@ $serverLogDir = Join-Path $logBase "Hexagon\logs"
 $env:LLAMA_ARG_LOG_FILE = Join-Path $serverLogDir "llama-server.log"
 
 Write-Host "Avvio llama-server.exe su porta $Port..." -ForegroundColor Green
-Write-Host "Endpoint OpenAI compatibile per Cline: http://127.0.0.1:$Port/v1`n" -ForegroundColor Cyan
+Write-Host "Endpoint OpenAI compatibile locale: http://127.0.0.1:$Port/v1`n" -ForegroundColor Cyan
 
 Set-Location -Path $BinPath
 & $ServerExe @cliArgs

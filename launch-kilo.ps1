@@ -5,7 +5,7 @@
 .DESCRIPTION
     Verifica l'endpoint locale del router Hexagon (default: 127.0.0.1:18803), avvia il router
     se non e' gia' in esecuzione, allinea la configurazione kilo.json tramite @hexagon/kilo-plugin
-    (cli.js, zero dipendenze Python) e avvia la CLI Kilo Code con provider 100% locale.
+    (cli.js) e avvia la CLI Kilo Code con provider 100% locale.
 
 .PARAMETER Port
     Porta HTTP del router llama-server (default: 18803).

@@ -75,7 +75,7 @@ describe("listKnownModels", () => {
 });
 
 describe("outputLimitFor", () => {
-  it("stessa regola di kilo_config.py", () => {
+  it("proporziona il limite di output alla context window", () => {
     expect(outputLimitFor(4096)).toBe(2048);
     expect(outputLimitFor(8192)).toBe(4096);
     expect(outputLimitFor(32768)).toBe(8192);

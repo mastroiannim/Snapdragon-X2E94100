@@ -4,7 +4,7 @@
 .DESCRIPTION
     Senza Apply/AutoConfirm esegue soltanto il controllo. Con Apply prepara e
     verifica una nuova directory, poi sostituisce la destinazione conservando
-    il backup. Al primo avvio non richiede llama.cpp, Python, Git o SDK.
+    il backup. Al primo avvio non richiede llama.cpp, Git o SDK.
 #>
 param(
     [string]$BinPath = (Join-Path $env:USERPROFILE 'llama-cpp\llama-bin-win-cpu-arm64'),

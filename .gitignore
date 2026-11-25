@@ -8,20 +8,14 @@ hexagon-models.ini*
 # File temporanei, dump e log di test/server
 *.log
 *.tmp
-__pycache__/
-*.pyc
 *_err.txt
 *_out.txt
 *_run.txt
 log_*.txt
 test_*.txt
 
-# Output di benchmark e analisi locali
+# Output di benchmark locali
 benchmark-logs/
-long-context-results/
-
-# Ambienti virtuali locali per test multi-versione (uv)
-.venv*/
 
 # Modelli locali e pesi
 models/

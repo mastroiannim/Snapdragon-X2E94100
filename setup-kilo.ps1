@@ -5,8 +5,7 @@
 .DESCRIPTION
     Verifica l'ambiente Windows 11 ARM64, la presenza di Node.js e Kilo Code CLI,
     l'allineamento del runtime Hexagon (GenieX / llama.cpp), la disponibilita' dei modelli GGUF
-    e la conformita' delle impostazioni di sicurezza offline tramite @hexagon/kilo-plugin (cli.js),
-    senza alcuna dipendenza da Python.
+    e la conformita' delle impostazioni di sicurezza offline tramite @hexagon/kilo-plugin (cli.js).
 
 .PARAMETER VerifyOffline
     Esegue controlli rigorosi sull'assenza di endpoint esterni, chiavi cloud o instradamenti remoti.
@@ -86,7 +85,7 @@ $KiloCmd = Get-Command "kilo.cmd", "kilo" -ErrorAction SilentlyContinue | Select
 $KiloVer = if ($KiloCmd) { (& $KiloCmd.Source --version 2>$null).Trim() } else { "" }
 Report-Check "Kilo Code CLI" ($null -ne $KiloCmd) "Versione: $KiloVer"
 
-# 4. Runtime Hexagon / GenieX via cli.js status --check-runtime (zero Python)
+# 4. Runtime Hexagon / GenieX via cli.js status --check-runtime
 $HasPluginCli = ($null -ne $NodeCmd) -and (Test-Path -LiteralPath $PluginCli -PathType Leaf)
 if ($HasPluginCli) {
     $statusRes = Invoke-CliCaptured $NodeCmd.Source @("status", "--check-runtime", "--workspace", $ScriptDir, "--port", "$Port", "--host", $BindHost)
@@ -163,7 +162,7 @@ if (-not (Test-Path $KiloJsonPath) -and -not $CheckOnly) {
 $KiloJsonExists = Test-Path $KiloJsonPath
 Report-Check "File configurazione kilo.json" $KiloJsonExists "Percorso: $KiloJsonPath"
 
-# 7. Validazione Regole Offline e Sicurezza via cli.js validate (zero Python)
+# 7. Validazione Regole Offline e Sicurezza via cli.js validate
 $OfflineValid = $false
 $OfflineIssues = @()
 if ($KiloJsonExists -and $HasPluginCli) {

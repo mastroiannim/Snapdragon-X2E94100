@@ -19,7 +19,7 @@ import {
 import { runBootstrapCycle } from "./bootstrap.js";
 import { installProviderConfig } from "./config.js";
 import { scanModels } from "./discovery.js";
-import { nodeExists, nodeListDir, nodeNow, nodeSpawn } from "./os.js";
+import { nodeExists, nodeListDir, nodeSpawn } from "./os.js";
 import {
   defaultLogsDir,
   defaultPaths,

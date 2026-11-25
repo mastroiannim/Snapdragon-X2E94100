@@ -1,7 +1,6 @@
 /**
  * config.ts — Generatore e sincronizzatore nativo TypeScript per la configurazione Kilo Code.
  *
- * Sostituisce integralmente kilo_config.py eliminando qualsiasi dipendenza da Python.
  * Gestisce la configurazione del provider "hexagon" su loopback (127.0.0.1:18803)
  * e i contesti estesi (65k-131k) per Kilo Code CLI / IDE.
  */

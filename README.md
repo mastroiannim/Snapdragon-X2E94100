@@ -17,10 +17,10 @@ llama.cpp. I modelli GGUF sono contenuti di input: il launcher usa quelli presen
 nella cache di GenieX (`geniex pull`), oppure la directory specificata con `-ModelsDir`.
 
 L'entry point consigliato e' **Kilo Code** con il plugin nativo `@hexagon/kilo-plugin`
-(architettura disaccoppiata e distribuibile, zero-setup, niente TUI Python, niente Control Center):
+(architettura disaccoppiata e distribuibile, zero-setup):
 
 ```powershell
-# 1. Setup una tantum del provider locale (100% TypeScript, zero dipendenze Python):
+# 1. Setup una tantum del provider locale (100% TypeScript):
 node .\plugins\hexagon-runtime\dist\cli.js setup --workspace
 
 # 2. Avvio diretto di Kilo Code (da qualsiasi cartella o progetto):
@@ -89,7 +89,6 @@ Il vecchio aggiornamento automatico del commit `dbbb499` è stato sostituito da 
 
 - [Precondizioni di compatibilità e procedura di verifica](docs/COMPATIBILITA.md)
 - [Guida Hexagon Local Coding Agent (Kilo Code)](docs/HEXAGON_LOCAL_CODING_AGENT.md)
-- [Benchmark storici, con limitazioni metodologiche](BENCHMARK.md)
 - [Launcher](launch-hexagon.ps1) · [Benchmark](benchmark-hexagon.ps1) · [Sincronizzatore sperimentale](sync-geniex.ps1)
 
 ## Architettura: due percorsi distinti
@@ -161,8 +160,8 @@ Per controlli non distruttivi, prerequisiti dettagliati, diagnosi e tracciabilit
 La modalità Router sfrutta il routing nativo di `llama-server` (`--models-dir`, `--models-preset`, `--models-max`):
 1. **Analisi istantanea dei metadati GGUF:** Lo script scansiona la cartella modelli (`%USERPROFILE%\.cache\geniex\models`) ed estrae architettura, quantizzazione, teste KV, Sliding Window e parametri MoE tramite parser C# in-memory.
 2. **Generazione automatica `hexagon-models.ini`:** Genera un file di preset INI ottimizzato (senza BOM UTF-8) che imposta per ciascun modello il device corretto (`HTP0`, `GPUOpenCL` o split ibrido 80/20, 75/25, 50/50) e la finestra di contesto conforme al limite buffer DMA FastRPC (< 1 GiB).
-3. **Caricamento On-Demand & Budget RAM:** I modelli vengono caricati solo quando invocati dai client API (es. Cline). Il parametro `-ModelsMax` (default: `2`) mantiene in memoria contemporaneamente al massimo $N$ modelli, scaricando i meno recenti (LRU) per rimanere sempre all'interno del budget di 48 GB di RAM fisica LPDDR5X.
-4. **Endpoint OpenAI compatibile:** Esponendo `/v1/models` e `/v1/chat/completions`, qualsiasi client o estensione (Cline, Continue, Roo Code) può passare da un modello all'altro semplicemente specificandone l'alias.
+3. **Caricamento On-Demand & Budget RAM:** I modelli vengono caricati solo quando invocati dai client API (es. Kilo Code). Il parametro `-ModelsMax` (default: `2`) mantiene in memoria contemporaneamente al massimo $N$ modelli, scaricando i meno recenti (LRU) per rimanere sempre all'interno del budget di 48 GB di RAM fisica LPDDR5X.
+4. **Endpoint OpenAI compatibile:** Esponendo `/v1/models` e `/v1/chat/completions`, Kilo Code e qualsiasi altro client compatibile OpenAI possono passare da un modello all'altro semplicemente specificandone l'alias.
 
 L'installazione e l'aggiornamento automatico del runtime si basano sul modulo condiviso `runtime-update.psm1`, con preparazione separata in directory di staging e prove di ripristino/rollback transazionale.
 
@@ -186,7 +185,7 @@ La gestione del runtime vive nel plugin TypeScript `plugins/hexagon-runtime` (`@
 { "plugin": ["./plugins/hexagon-runtime"] }
 ```
 
-Il plugin è **completamente autoconsistente**: racchiude nei propri asset (`assets/scripts/`) tutti gli helper necessari (`inspect-gguf.ps1`, `sync-geniex.ps1`, `benchmark-hexagon.ps1`, `runtime-update.psm1`) e il preset `hexagon-models.ini`. Non ha alcuna dipendenza da script Python, TUI o tool esterni.
+Il plugin è **completamente autoconsistente**: racchiude nei propri asset (`assets/scripts/`) tutti gli helper necessari (`inspect-gguf.ps1`, `sync-geniex.ps1`, `benchmark-hexagon.ps1`, `runtime-update.psm1`) e non ha alcuna dipendenza da tool esterni.
 
 ### Moduli architetturali
 
@@ -242,10 +241,6 @@ powershell -ExecutionPolicy Bypass -File tests\benchmark-profiles.ps1
 Il manifest SHA-256 serve a identificare e riprodurre l'insieme di binari che ha funzionato; la sua assenza non annulla l'evidenza di esecuzione riportata. Un manifest acquisito oggi identifica l'installazione attuale e non ricostruisce automaticamente quella storica.
 
 Il launcher usa classificazione GGUF, dimensione file, MoE/SWA e soglie dimensionali per proporre `HTP0`, `GPUOpenCL` o uno split. I rapporti come `80,20`, `75,25`, `50,50` **non sono probabilità né quote garantite di carico computazionale**, e la dimensione del GGUF non misura da sola pressione di mapping, occupazione della KV cache o supporto degli operatori.
-
-Il [benchmark storico](BENCHMARK.md) conserva i valori acquisiti, ma non è una prova riproducibile dell'origine dei rallentamenti. Campioni di potenza e throughput non erano necessariamente riferiti alla stessa fase. Il separatore `/` è previsto da `llama-bench` per `-dev` e `-ts`: è indicato dall'help locale e confermato dal [parser della revisione storica e467e5b](https://github.com/ggml-org/llama.cpp/blob/e467e5b/tools/llama-bench/llama-bench.cpp). Non costituisce un errore dello script; la sintassi va distinta da quella degli altri frontend. Comandi effettivi e log rimangono necessari per documentare l'offload, indipendentemente dai separatori. Le colonne `J/token` storiche non devono essere citate come misura energetica validata.
-
-Per stabilire la configurazione migliore servono, a parità di modello/quantizzazione/versione/contesto: log dei device e dell'offload, velocità prefill e decode separate, repliche, errori, temperatura, potenza di base e intervalli energetici sincronizzati.
 
 ## Fonti primarie
 
