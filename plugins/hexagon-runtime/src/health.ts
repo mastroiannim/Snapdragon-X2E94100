@@ -80,3 +80,55 @@ export async function probeHealth(
     clearTimeout(timer);
   }
 }
+
+export interface StatusReport {
+  router: { host: string; port: number; active: boolean; ready: boolean };
+  latencyMs: number | null;
+  loadedModels: string[];
+  runtime?: unknown;
+  error?: string;
+}
+
+export interface StatusOptions {
+  fetch: FetchFn;
+  port?: number;
+  host?: string;
+  now?: NowFn;
+}
+
+/** Stato router: latenza /health e modelli caricati via /v1/models. */
+export async function collectStatus(options: StatusOptions): Promise<StatusReport> {
+  const host = options.host ?? ROUTER_HOST;
+  const port = options.port ?? ROUTER_PORT;
+  const now = options.now ?? nodeNow;
+  const base = `http://${host}:${port}`;
+  const start = now();
+  try {
+    const health = await options.fetch(`${base}/health`);
+    const latencyMs = now() - start;
+    let loadedModels: string[] = [];
+    try {
+      const models = await options.fetch(`${base}/v1/models`);
+      if (models.ok) {
+        const body = (await models.json()) as { data?: Array<{ id?: string }> };
+        loadedModels = (body.data ?? [])
+          .map((entry) => entry.id ?? "")
+          .filter((id) => id.length > 0);
+      }
+    } catch {
+      /* elenco modelli non disponibile: lo stato router resta valido */
+    }
+    return {
+      router: { host, port, active: true, ready: health.status === 200 },
+      latencyMs,
+      loadedModels,
+    };
+  } catch (error) {
+    return {
+      router: { host, port, active: false, ready: false },
+      latencyMs: null,
+      loadedModels: [],
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}

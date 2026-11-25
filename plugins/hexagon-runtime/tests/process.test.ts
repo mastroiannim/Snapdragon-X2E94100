@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildDirectArgs,
   buildRouterArgs,
@@ -48,6 +51,7 @@ model = C:/models/gpt-oss-20b-Q4_0.gguf
 device = HTP0,GPUOpenCL
 tensor-split = 80,20
 ctx-size = 131072
+mmproj = C:/models/mmproj-gpt-oss.gguf
 custom-flag = valore
 `;
 
@@ -64,6 +68,7 @@ describe("parseModelsIni", () => {
     });
     expect(ini.models["gpt-oss-20b-Q4_0"].tensorSplit).toBe("80,20");
     expect(ini.models["gpt-oss-20b-Q4_0"].ctxSize).toBe(131072);
+    expect(ini.models["gpt-oss-20b-Q4_0"].mmproj).toBe("C:/models/mmproj-gpt-oss.gguf");
   });
 
   it("preserva i flag non interpretati e ignora righe invalide", () => {
@@ -119,9 +124,10 @@ describe("buildDirectArgs", () => {
     expect(args).toContain("--context-shift");
   });
 
-  it("modello ibrido: tensor-split 80,20 e context 131072", () => {
+  it("modello ibrido: tensor-split 80,20, mmproj e context 131072", () => {
     const args = buildDirectArgs(ini.models["gpt-oss-20b-Q4_0"], ini.globals);
     expect(args[args.indexOf("-ts") + 1]).toBe("80,20");
+    expect(args[args.indexOf("--mmproj") + 1]).toBe("C:/models/mmproj-gpt-oss.gguf");
     expect(args[args.indexOf("-dev") + 1]).toBe("HTP0,GPUOpenCL");
     expect(args[args.indexOf("-c") + 1]).toBe("131072");
   });
@@ -381,9 +387,12 @@ describe("parseJsonPayload", () => {
   });
 });
 
-describe("ensureModelsIni: zero-setup INI", () => {
-  const base = { iniPath: "C:/repo/hexagon-models.ini", workspaceDir: "C:/repo" };
-  const iniContent = "[*]\nthreads = 12\n\n[m]\nmodel = m.gguf\ndevice = HTP0\nctx-size = 65536\n";
+describe("ensureModelsIni: zero-setup INI in TypeScript", () => {
+  const base = {
+    iniPath: "C:/repo/hexagon-models.ini",
+    workspaceDir: "C:/repo",
+    modelsDir: "C:/models",
+  };
 
   it("INI presente: nessuna generazione", async () => {
     const { fn: exec, calls } = recordingExec(() => okExec());
@@ -399,100 +408,106 @@ describe("ensureModelsIni: zero-setup INI", () => {
     expect(writes).toHaveLength(0);
   });
 
-  it("INI assente: preview DryRun del launcher e scrittura di ini_content", async () => {
+  it("INI assente: genera hexagon-models.ini interamente in TS senza cercare launch-hexagon.ps1", async () => {
     const { fn: exec, calls } = recordingExec(() =>
-      okExec(JSON.stringify({ mode: "Router", ini_content: iniContent, models: [{}, {}] }, null, 2)),
+      okExec(
+        JSON.stringify({
+          architecture: "qwen35",
+          model_name: "Ornith 1.5 9B",
+          context_length: 32768,
+          embedding_length: 4096,
+          block_count: 32,
+          head_count: 16,
+          head_count_kv: 4,
+          expert_count: 0,
+          expert_used_count: 0,
+          sliding_window: 0,
+          file_type: 2,
+          file_size_bytes: 5_482_832_768,
+          size_gb: 5.11,
+          quant_name: "Q4_0",
+          is_moe: false,
+        }),
+      ),
     );
     const { fn: writeFile, calls: writes } = recordingWriteFile();
+    const mkdir = vi.fn(async () => {});
     const result = await ensureModelsIni({
       ...base,
       exec,
-      exists: async () => false,
+      exists: async (p) => p === base.modelsDir,
+      listDir: async () => ["Ornith-1.5-9B-Q4_0.gguf", "mmproj-Ornith-1.5-9B-f16.gguf"],
+      writeFile,
+      mkdir,
+    });
+    expect(result).toEqual({ generated: true, modelCount: 1 });
+    expect(mkdir).toHaveBeenCalledWith(dirname(base.iniPath));
+    expect(writes).toHaveLength(1);
+    expect(writes[0].path).toBe(base.iniPath);
+    expect(writes[0].content).toContain("[Ornith-1.5-9B-Q4_0]");
+    expect(writes[0].content).toContain("ctx-size = 32768");
+    expect(writes[0].content).toContain("mmproj = ");
+    expect(calls.every((c) => !c.args.some((a) => a.includes("launch-hexagon.ps1")))).toBe(true);
+    expect(calls.some((c) => c.args.some((a) => a.includes("inspect-gguf.ps1")))).toBe(true);
+  });
+
+  it("cache modelli vuota o assente: errore descrittivo", async () => {
+    const { fn: exec } = recordingExec(() => okExec());
+    const { fn: writeFile } = recordingWriteFile();
+    await expect(
+      ensureModelsIni({
+        ...base,
+        exec,
+        exists: async () => false,
+        listDir: async () => [],
+        writeFile,
+      }),
+    ).rejects.toThrow(/Nessun modello GGUF valido/);
+  });
+
+  it("supporta skipInspection: true senza eseguire inspect-gguf.ps1", async () => {
+    const { fn: exec, calls } = recordingExec(() => okExec());
+    const { fn: writeFile, calls: writes } = recordingWriteFile();
+    const result = await ensureModelsIni({
+      iniPath: "C:/repo/hexagon-models.ini",
+      workspaceDir: "C:/repo",
+      modelsDir: "C:/models",
+      skipInspection: true,
+      exec,
+      exists: async (p) => p !== "C:/repo/hexagon-models.ini",
+      listDir: async () => ["m1.gguf", "m2.gguf"],
       writeFile,
     });
     expect(result).toEqual({ generated: true, modelCount: 2 });
-    expect(writes).toEqual([{ path: base.iniPath, content: iniContent }]);
-    const args = calls[0].args;
-    expect(args[args.indexOf("-File") + 1]).toBe("C:\\repo\\launch-hexagon.ps1");
-    expect(args).toContain("-DryRun");
-    expect(args).toContain("-Json");
-    expect(args[args.indexOf("-Mode") + 1]).toBe("Router");
+    expect(calls).toHaveLength(0);
+    expect(writes[0].content).toContain("[m1]");
+    expect(writes[0].content).toContain("[m2]");
   });
 
-  it("launcher fallito: errore descrittivo", async () => {
-    const { fn: exec } = recordingExec(() => ({ code: 1, stdout: "", stderr: "cache modelli vuota" }));
-    const { fn: writeFile } = recordingWriteFile();
-    await expect(
-      ensureModelsIni({ ...base, exec, exists: async () => false, writeFile }),
-    ).rejects.toThrow(/Generazione hexagon-models\.ini fallita.*cache modelli vuota/);
-  });
+  it("scrive davvero su filesystem reale creando la directory parent se assente", async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "hexagon-ini-"));
+    try {
+      const modelsDir = join(tempRoot, "models");
+      const iniPath = join(tempRoot, "nested", "dir", "hexagon-models.ini");
+      const { mkdirSync } = await import("node:fs");
+      const { nodeExists, nodeWriteFile } = await import("../src/os.js");
+      mkdirSync(modelsDir, { recursive: true });
+      writeFileSync(join(modelsDir, "real-model.gguf"), "GGUF", "utf-8");
 
-  it("ini_content assente o vuoto: errore esplicito", async () => {
-    const { fn: exec } = recordingExec(() => okExec('{"mode":"Router","models":[]}'));
-    const { fn: writeFile } = recordingWriteFile();
-    await expect(
-      ensureModelsIni({ ...base, exec, exists: async () => false, writeFile }),
-    ).rejects.toThrow(/ini_content assente/);
-  });
-
-  it("models non array: modelCount 0 ma generazione valida", async () => {
-    const { fn: exec } = recordingExec(() => okExec(JSON.stringify({ ini_content: iniContent })));
-    const { fn: writeFile } = recordingWriteFile();
-    const result = await ensureModelsIni({
-      ...base,
-      exec,
-      exists: async () => false,
-      writeFile,
-    });
-    expect(result).toEqual({ generated: true, modelCount: 0 });
-  });
-
-  it("risoluzione script launch-hexagon: wsScript, repoScript e fallback stdout/output vuoto", async () => {
-    const { fn: execWs, calls: wsCalls } = recordingExec(() =>
-      okExec(JSON.stringify({ ini_content: iniContent })),
-    );
-    await ensureModelsIni({
-      iniPath: "/virtual/ws/hexagon-models.ini",
-      workspaceDir: "/virtual/ws",
-      syncExists: (p) => p.includes("ws"),
-      exec: execWs,
-      exists: async () => false,
-      writeFile: recordingWriteFile().fn,
-    });
-    expect(wsCalls[0].args[wsCalls[0].args.indexOf("-File") + 1]).toContain("ws");
-
-    const { fn: execRepo, calls: repoCalls } = recordingExec(() =>
-      okExec(JSON.stringify({ ini_content: iniContent })),
-    );
-    await ensureModelsIni({
-      iniPath: "/virtual/other/hexagon-models.ini",
-      workspaceDir: "/virtual/other",
-      syncExists: (p) => !p.includes("other"),
-      exec: execRepo,
-      exists: async () => false,
-      writeFile: recordingWriteFile().fn,
-    });
-    expect(repoCalls[0].args[repoCalls[0].args.indexOf("-File") + 1]).toContain("launch-hexagon.ps1");
-
-    await expect(
-      ensureModelsIni({
-        ...base,
-        syncExists: () => false,
-        exec: recordingExec(() => ({ code: 2, stdout: "out-err", stderr: "" })).fn,
-        exists: async () => false,
-        writeFile: recordingWriteFile().fn,
-      }),
-    ).rejects.toThrow(/out-err/);
-
-    await expect(
-      ensureModelsIni({
-        ...base,
-        syncExists: () => false,
-        exec: recordingExec(() => ({ code: 2, stdout: "", stderr: "" })).fn,
-        exists: async () => false,
-        writeFile: recordingWriteFile().fn,
-      }),
-    ).rejects.toThrow(/output vuoto/);
+      const res = await ensureModelsIni({
+        iniPath,
+        workspaceDir: tempRoot,
+        modelsDir,
+        skipInspection: true,
+        exec: recordingExec(() => okExec()).fn,
+        exists: nodeExists,
+        writeFile: nodeWriteFile,
+      });
+      expect(res).toEqual({ generated: true, modelCount: 1 });
+      expect(readFileSync(iniPath, "utf-8")).toContain("[real-model]");
+    } finally {
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 });
 

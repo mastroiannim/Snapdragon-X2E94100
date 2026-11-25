@@ -8,16 +8,18 @@ vi.mock("node:fs/promises", () => ({
   access: vi.fn(),
   readdir: vi.fn(),
   readFile: vi.fn(),
+  stat: vi.fn(),
   writeFile: vi.fn(),
 }));
 
 import { execFile, spawn } from "node:child_process";
-import { access, readdir, readFile, writeFile } from "node:fs/promises";
+import { access, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import {
   nodeDeps,
   nodeExec,
   nodeExists,
   nodeFetch,
+  nodeIsDirectory,
   nodeListDir,
   nodeNow,
   nodeReadFile,
@@ -32,6 +34,7 @@ const spawnMock = vi.mocked(spawn);
 const accessMock = vi.mocked(access);
 const readdirMock = vi.mocked(readdir);
 const readFileMock = vi.mocked(readFile);
+const statMock = vi.mocked(stat);
 const writeFileMock = vi.mocked(writeFile);
 
 afterEach(() => {
@@ -149,6 +152,15 @@ describe("nodeReadFile / nodeExists / nodeListDir", () => {
   it("listDir inoltra readdir", async () => {
     readdirMock.mockResolvedValue(["a.dll", "b.so"] as never);
     expect(await nodeListDir("C:/bin")).toEqual(["a.dll", "b.so"]);
+  });
+
+  it("isDirectory verifica stat e ritorna false su errore", async () => {
+    statMock.mockResolvedValue({ isDirectory: () => true } as never);
+    expect(await nodeIsDirectory("C:/models/sub")).toBe(true);
+    statMock.mockResolvedValue({ isDirectory: () => false } as never);
+    expect(await nodeIsDirectory("C:/models/a.gguf")).toBe(false);
+    statMock.mockRejectedValue(new Error("ENOENT") as never);
+    expect(await nodeIsDirectory("C:/missing")).toBe(false);
   });
 });
 

@@ -4,8 +4,8 @@
 
 .DESCRIPTION
     Verifica l'endpoint locale del router Hexagon (default: 127.0.0.1:18803), avvia il router
-    se non e' gia' in esecuzione, allinea la configurazione kilo.json ai modelli effettivamente
-    disponibili e avvia la CLI Kilo Code con provider 100% locale.
+    se non e' gia' in esecuzione, allinea la configurazione kilo.json tramite @hexagon/kilo-plugin
+    (cli.js, zero dipendenze Python) e avvia la CLI Kilo Code con provider 100% locale.
 
 .PARAMETER Port
     Porta HTTP del router llama-server (default: 18803).
@@ -26,7 +26,7 @@
     Esegue un messaggio singolo non interattivo (kilo run) ed esce.
 
 .PARAMETER CheckOnly
-    Verifica router, modelli e configurazione senza avviare Kilo.
+    Verifica router, modelli, runtime e configurazione senza avviare Kilo.
 
 .PARAMETER GenerateConfigOnly
     Rigenera kilo.json ed esce.
@@ -53,13 +53,29 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$PluginCli = Join-Path $ScriptDir "plugins\hexagon-runtime\dist\cli.js"
+
+function Invoke-CliCaptured([string]$NodePath, [string[]]$CliArgs) {
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $output = & $NodePath $PluginCli @CliArgs 2>&1 | ForEach-Object { "$_" }
+        return @{
+            Code = $LASTEXITCODE
+            Lines = @($output)
+            Text = ($output -join "`n")
+        }
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+}
 
 Write-Host "========================================================" -ForegroundColor Cyan
 Write-Host " HEXAGON LOCAL CODING AGENT (Kilo Code + Hexagon GGUF)" -ForegroundColor Cyan
 Write-Host " Target: Windows 11 ARM64 (Qualcomm Snapdragon)" -ForegroundColor Cyan
 Write-Host "========================================================" -ForegroundColor Cyan
 
-# 1. Verifica eseguibile Kilo
+# 1. Verifica eseguibile Kilo e Node.js / cli.js
 $KiloCmd = Get-Command "kilo.cmd", "kilo" -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $KiloCmd) {
     Write-Error "Kilo Code CLI ('kilo' o 'kilo.cmd') non trovato nel PATH. Esegui .\setup-kilo.ps1 per i controlli dei prerequisiti."
@@ -67,8 +83,32 @@ if (-not $KiloCmd) {
 }
 Write-Host " * Frontend:          Kilo Code CLI ($($KiloCmd.Source))" -ForegroundColor Green
 
-# 2. Verifica Router Hexagon
+$NodeCmd = Get-Command "node" -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $NodeCmd) {
+    Write-Error "Node.js ('node') non trovato nel PATH. Esegui .\setup-kilo.ps1 per i controlli dei prerequisiti."
+    exit 1
+}
+if (-not (Test-Path -LiteralPath $PluginCli -PathType Leaf)) {
+    Write-Error "Plugin CLI non trovato in $PluginCli. Esegui 'npm run build' in plugins\hexagon-runtime."
+    exit 1
+}
+
 $BaseUrl = "http://${BindHost}:${Port}/v1"
+
+# Generazione config isolata senza richiedere l'avvio automatico del router
+if ($GenerateConfigOnly) {
+    Write-Host " * Endpoint Router:   $BaseUrl" -ForegroundColor Green
+    Write-Host " * Sincronizzazione:  Aggiornamento kilo.json via plugin TS..." -ForegroundColor Gray
+    $setupRes = Invoke-CliCaptured $NodeCmd.Source @("setup", "--workspace", $ScriptDir, "--port", "$Port", "--host", $BindHost)
+    if ($setupRes.Code -ne 0) {
+        Write-Error "cli.js setup fallito (exit $($setupRes.Code)): $($setupRes.Text)"
+        exit 1
+    }
+    Write-Host "Configurazione kilo.json generata con successo." -ForegroundColor Green
+    exit 0
+}
+
+# 2. Verifica Router Hexagon
 Write-Host " * Endpoint Router:   $BaseUrl" -ForegroundColor Green
 
 $IsOnline = $false
@@ -86,6 +126,23 @@ try {
 if (-not $IsOnline) {
     if ($CheckOnly) {
         Write-Host " * Stato Router:      Offline" -ForegroundColor Yellow
+        $valRes = Invoke-CliCaptured $NodeCmd.Source @("validate", "--workspace", $ScriptDir)
+        if ($valRes.Code -eq 0) {
+            Write-Host " * Stato kilo.json:   Valido (offline/loopback)" -ForegroundColor Green
+        } else {
+            Write-Host " * Stato kilo.json:   Non valido" -ForegroundColor Red
+            $valRes.Lines | ForEach-Object { Write-Host "   $_" -ForegroundColor Red }
+        }
+        $statusRes = Invoke-CliCaptured $NodeCmd.Source @("status", "--check-runtime", "--workspace", $ScriptDir, "--port", "$Port", "--host", $BindHost)
+        if ($statusRes.Code -eq 0 -and $statusRes.Text.Trim()) {
+            try {
+                $statusObj = $statusRes.Text | ConvertFrom-Json
+                if ($statusObj.runtime) {
+                    $rt = $statusObj.runtime
+                    Write-Host " * Runtime GenieX:    $(if ($rt.commitAligned) { "Allineato" } else { "Disallineato" }) (GenieX=$($rt.geniexHash), llama=$($rt.llamaCommit))" -ForegroundColor $(if ($rt.commitAligned) { "Green" } else { "Yellow" })
+                }
+            } catch { }
+        }
         Write-Host "Verifica completata: Router Hexagon non in esecuzione su $BaseUrl."
         exit 1
     }
@@ -127,28 +184,45 @@ if (-not $IsOnline) {
     }
 }
 
-# 3. Sincronizzazione kilo.json (100% TypeScript, zero dipendenze Python)
-$PluginCli = Join-Path $ScriptDir "plugins\hexagon-runtime\dist\cli.js"
-$KiloConfigScript = Join-Path $ScriptDir "kilo_config.py"
-if (Test-Path $PluginCli) {
+# 3. Sincronizzazione o verifica sola lettura kilo.json + runtime (100% TypeScript via cli.js)
+if (-not $CheckOnly) {
     Write-Host " * Sincronizzazione:  Aggiornamento kilo.json via plugin TS..." -ForegroundColor Gray
-    node $PluginCli setup --workspace | Out-Null
-} elseif (Test-Path $KiloConfigScript) {
-    Write-Host " * Sincronizzazione:  Aggiornamento kilo.json..." -ForegroundColor Gray
-    python $KiloConfigScript --generate --port $Port
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "kilo_config.py ha restituito codice $LASTEXITCODE. Verifica kilo.json."
+    $setupRes = Invoke-CliCaptured $NodeCmd.Source @("setup", "--workspace", $ScriptDir, "--port", "$Port", "--host", $BindHost)
+    if ($setupRes.Code -ne 0) {
+        Write-Warning "cli.js setup ha restituito codice $($setupRes.Code). Verifica kilo.json: $($setupRes.Text)"
     }
 }
 
-if ($GenerateConfigOnly) {
-    Write-Host "Configurazione kilo.json generata con successo." -ForegroundColor Green
-    exit 0
-}
-
 if ($CheckOnly) {
+    $valRes = Invoke-CliCaptured $NodeCmd.Source @("validate", "--workspace", $ScriptDir)
+    if ($valRes.Code -ne 0) {
+        Write-Host "`nErrori di validazione rilevati in kilo.json:" -ForegroundColor Red
+        $valRes.Lines | ForEach-Object { Write-Host " $_" -ForegroundColor Red }
+        exit 1
+    }
+
+    $statusRes = Invoke-CliCaptured $NodeCmd.Source @("status", "--check-runtime", "--workspace", $ScriptDir, "--port", "$Port", "--host", $BindHost)
+    if ($statusRes.Code -ne 0) {
+        Write-Error "cli.js status --check-runtime ha restituito codice $($statusRes.Code): $($statusRes.Text)"
+        exit 1
+    }
+
+    $statusObj = $statusRes.Text | ConvertFrom-Json
     Write-Host "`nControllo stato completato con successo:" -ForegroundColor Green
-    python $KiloConfigScript --status --port $Port
+    Write-Host " * Stato kilo.json:   Valido (offline/loopback)" -ForegroundColor Green
+    $routerState = if ($statusObj.router.ready) { "Pronto" } elseif ($statusObj.router.active) { "Warm-up" } else { "Offline" }
+    Write-Host " * Router live:       $routerState ($($statusObj.loadedModels.Count) modelli, latenza $($statusObj.latencyMs) ms)" -ForegroundColor Green
+    if ($statusObj.runtime) {
+        $rt = $statusObj.runtime
+        $rtOk = [bool]$rt.commitAligned -and [bool]$rt.allFilesAligned
+        Write-Host " * Runtime GenieX:    $(if ($rtOk) { "Allineato" } else { "Disallineato" }) (GenieX=$($rt.geniexHash), llama=$($rt.llamaCommit), firma=$($rt.catalogSignature))" -ForegroundColor $(if ($rtOk) { "Green" } else { "Yellow" })
+    }
+    $KiloJsonPath = Join-Path $ScriptDir "kilo.json"
+    if (Test-Path -LiteralPath $KiloJsonPath -PathType Leaf) {
+        $cfgObj = Get-Content -LiteralPath $KiloJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        Write-Host " * Modello principale: $($cfgObj.model)" -ForegroundColor White
+        Write-Host " * Small model:       $($cfgObj.small_model)" -ForegroundColor White
+    }
     exit 0
 }
 
@@ -195,10 +269,9 @@ if ($Message -ne "") {
     # kilo.cmd esegue `title %COMSPEC%` prima di lanciare node, azzerando il titolo finestra.
     # Se disponibile, invochiamo direttamente l'entrypoint Node di @kilocode/cli.
     $kiloEntry = Join-Path (Split-Path -Parent $KiloCmd.Source) "node_modules\@kilocode\cli\bin\kilo"
-    $nodeCmd = Get-Command "node" -ErrorAction SilentlyContinue | Select-Object -First 1
     try {
-        if ($nodeCmd -and (Test-Path -LiteralPath $kiloEntry -PathType Leaf)) {
-            & $nodeCmd.Source $kiloEntry @startArgs
+        if ($NodeCmd -and (Test-Path -LiteralPath $kiloEntry -PathType Leaf)) {
+            & $NodeCmd.Source $kiloEntry @startArgs
         } else {
             & $KiloCmd.Source @startArgs
         }

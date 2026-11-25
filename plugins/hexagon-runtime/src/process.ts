@@ -6,15 +6,20 @@
  * (allocazione FastRPC/HTP). I parametri per HTP0 (NPU) e GPUOpenCL sono
  * letti da hexagon-models.ini.
  */
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { generateModelsIni } from "./discovery.js";
 import { waitForHealth, type HealthResult } from "./health.js";
+import { nodeListDir, nodeWriteFile } from "./os.js";
 import type {
   ExecFn,
   ExistsFn,
   FetchFn,
+  IsDirFn,
+  ListDirFn,
+  MkdirFn,
   NowFn,
   ReadFileFn,
   SleepFn,
@@ -64,6 +69,7 @@ export interface ModelConfig {
   device: string;
   tensorSplit?: string;
   ctxSize?: number;
+  mmproj?: string;
   /** Altri flag della sezione INI preservati senza interpretarli. */
   flags: Record<string, string>;
 }
@@ -114,6 +120,9 @@ export function parseModelsIni(text?: string): ModelsIni {
         if (Number.isFinite(parsed)) entry.ctxSize = parsed;
         break;
       }
+      case "mmproj":
+        entry.mmproj = value;
+        break;
       default:
         entry.flags[key] = value;
     }
@@ -192,6 +201,7 @@ export function buildDirectArgs(
     globals["flash-attn"] ?? "on",
   ];
   if (model.tensorSplit) args.push("-ts", model.tensorSplit);
+  if (model.mmproj) args.push("--mmproj", model.mmproj);
   args.push("-m", model.model, "--alias", model.name);
   return args;
 }
@@ -538,11 +548,15 @@ export function parseJsonPayload(stdout: string): Record<string, unknown> {
 export interface EnsureIniOptions {
   iniPath: string;
   workspaceDir: string;
-  launchScript?: string;
-  syncExists?: (path: string) => boolean;
+  modelsDir?: string;
   exec: ExecFn;
   exists: ExistsFn;
   writeFile: WriteFileFn;
+  listDir?: ListDirFn;
+  isDirectory?: IsDirFn;
+  mkdir?: MkdirFn;
+  inspectScript?: string;
+  skipInspection?: boolean;
 }
 
 export interface EnsureIniResult {
@@ -551,10 +565,9 @@ export interface EnsureIniResult {
 }
 
 /**
- * Zero-setup INI: se hexagon-models.ini manca, lo genera dal launcher core
- * (`launch-hexagon.ps1 -Mode Router -DryRun -Json`, unica fonte delle
- * euristiche hardware) persistendo il campo `ini_content` della preview.
- * Il DryRun JSON non scrive file ne' avvia processi.
+ * Zero-setup INI: se hexagon-models.ini manca, lo genera interamente in TypeScript
+ * tramite scanModels + calculateOptimalConfig (allineato 1:1 a Get-HexagonOptimalConfig),
+ * senza dipendere da launch-hexagon.ps1.
  */
 export async function ensureModelsIni(
   options: EnsureIniOptions,
@@ -562,47 +575,34 @@ export async function ensureModelsIni(
   if (await options.exists(options.iniPath)) {
     return { generated: false, modelCount: 0 };
   }
-  const checkFs = options.syncExists ?? existsSync;
-  const repoScript = resolve(BUNDLED_ASSETS_DIR, "..", "..", "..", "launch-hexagon.ps1");
-  const wsScript = join(options.workspaceDir, "launch-hexagon.ps1");
-  const script =
-    options.launchScript ??
-    (checkFs(wsScript)
-      ? wsScript
-      : (checkFs(repoScript) && options.workspaceDir !== "C:/repo"
-        ? repoScript
-        : wsScript));
-  const result = await options.exec(
-    "powershell",
-    [
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      script,
-      "-Mode",
-      "Router",
-      "-DryRun",
-      "-Json",
-    ],
-    { cwd: dirname(script), timeoutMs: 120_000 },
-  );
-  if (result.code !== 0) {
-    throw new Error(
-      `Generazione hexagon-models.ini fallita (launch-hexagon.ps1 exit ${result.code}): ` +
-      (result.stderr.trim() || result.stdout.trim() || "output vuoto"),
-    );
+  const modelsDir = options.modelsDir ?? defaultPaths(options.workspaceDir).modelsDir;
+  const listDir = options.listDir ?? nodeListDir;
+  const mkdir: MkdirFn =
+    options.mkdir ??
+    (options.writeFile !== nodeWriteFile
+      ? async () => {}
+      : (dirPath) => {
+          mkdirSync(dirPath, { recursive: true });
+        });
+
+  const generated = await generateModelsIni({
+    modelsDir,
+    deps: {
+      listDir,
+      exists: options.exists,
+      exec: options.exec,
+      isDirectory: options.isDirectory,
+    },
+    inspectScript: options.inspectScript,
+    skipInspection: options.skipInspection,
+  });
+
+  const targetDir = dirname(options.iniPath);
+  if (!(await options.exists(targetDir))) {
+    await mkdir(targetDir);
   }
-  const payload = parseJsonPayload(result.stdout);
-  const content = payload.ini_content;
-  if (typeof content !== "string" || content.trim().length === 0) {
-    throw new Error(
-      "launch-hexagon.ps1 non ha proposto contenuto INI (ini_content assente): " +
-      "verificare la cache modelli GGUF.",
-    );
-  }
-  await options.writeFile(options.iniPath, content);
-  const models = Array.isArray(payload.models) ? payload.models.length : 0;
-  return { generated: true, modelCount: models };
+  await options.writeFile(options.iniPath, generated.iniContent);
+  return { generated: true, modelCount: generated.modelCount };
 }
 
 export interface HexagonPaths {

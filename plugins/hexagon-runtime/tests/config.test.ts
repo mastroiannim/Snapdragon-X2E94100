@@ -140,6 +140,14 @@ describe("buildHexagonProvider", () => {
 
     const portOnly = buildHexagonProvider(undefined, { port: 20000 });
     expect(portOnly.options.baseURL).toBe("http://127.0.0.1:20000/v1");
+
+    const withLive = buildHexagonProvider(undefined, {
+      liveModels: ["Ornith-1.5-9B-Q4_0", "live-extra-model", ""],
+    });
+    expect(withLive.models["live-extra-model"]).toEqual({
+      name: "live-extra-model (HTP0)",
+      limit: { context: 65_536, output: 16_384 },
+    });
   });
 });
 
@@ -417,6 +425,32 @@ describe("installProviderConfig", () => {
 
     expect(res.updated).toBe(true);
     expect(JSON.parse(fs.files.get(target)!).model).toBe("hexagon/custom");
+  });
+
+  it("e' idempotente se il contenuto di kilo.json e' gia' identico (nessun backup o scrittura)", async () => {
+    const fs = createMemoryFs();
+    const first = await installProviderConfig({
+      workspaceDir: "/virtual-idem",
+      iniPath: "/virtual-idem/missing.ini",
+      readFile: fs.readFile,
+      writeFile: fs.writeFile,
+      exists: fs.exists,
+      mkdir: fs.mkdir,
+    });
+    expect(first.updated).toBe(true);
+    fs.writeFile.mockClear();
+
+    const second = await installProviderConfig({
+      workspaceDir: "/virtual-idem",
+      iniPath: "/virtual-idem/missing.ini",
+      readFile: fs.readFile,
+      writeFile: fs.writeFile,
+      exists: fs.exists,
+      mkdir: fs.mkdir,
+    });
+    expect(second.updated).toBe(false);
+    expect(second.backupPath).toBeUndefined();
+    expect(fs.writeFile).not.toHaveBeenCalled();
   });
 
   it("funziona su filesystem reale isolato con mkdtempSync (creazione dir, backup e rifiuto)", async () => {

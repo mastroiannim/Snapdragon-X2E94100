@@ -7,10 +7,12 @@
 import { basename, dirname, join } from "node:path";
 import { installProviderConfig } from "./config.js";
 import { TESTED_CONTEXT_WINDOWS } from "./models.js";
+import { nodeIsDirectory, nodeListDir } from "./os.js";
 import { BUNDLED_INSPECT_SCRIPT, parseModelsIni } from "./process.js";
 import type {
   ExecFn,
   ExistsFn,
+  IsDirFn,
   ListDirFn,
   MkdirFn,
   ReadFileFn,
@@ -41,7 +43,15 @@ export interface OptimalConfig {
   device: string;
   tensorSplit?: string;
   contextSize: number;
+  contextReason: string;
   strategy: string;
+  isMoE: boolean;
+  activeParamsEst: string;
+  sizeGb: number;
+  threads: number;
+  threadsBatch: number;
+  batchSize: number;
+  ubatchSize: number;
 }
 
 export interface DiscoveredModel {
@@ -62,6 +72,7 @@ export interface ScanDeps {
   listDir: ListDirFn;
   exists: ExistsFn;
   exec: ExecFn;
+  isDirectory?: IsDirFn;
 }
 
 export interface InspectOptions {
@@ -88,73 +99,131 @@ export function isArchitectureSupported(architecture?: string): boolean {
 
 /**
  * Calcola l'allocazione hardware ottimale basata sui metadati GGUF
- * e sui vincoli hardware dello Snapdragon X2 Elite (limite DMA FastRPC < 1 GiB).
+ * e sui vincoli hardware dello Snapdragon X2 Elite (allineato 1:1 a Get-HexagonOptimalConfig).
  */
 export function calculateOptimalConfig(meta: GgufMetadata): OptimalConfig {
   if (!meta || typeof meta.architecture !== "string") {
     return {
       device: "HTP0",
       contextSize: 65_536,
+      contextReason: "Fallback: metadati non validi o mancanti",
       strategy: "Fallback: metadati non validi o mancanti",
+      isMoE: false,
+      activeParamsEst: "100% dense",
+      sizeGb: 0,
+      threads: 12,
+      threadsBatch: 12,
+      batchSize: 4096,
+      ubatchSize: 512,
     };
   }
-  const size = meta.size_gb;
+  const sizeGb =
+    typeof meta.size_gb === "number" && Number.isFinite(meta.size_gb)
+      ? meta.size_gb
+      : Math.round(((meta.file_size_bytes || 0) / 1_073_741_824) * 100) / 100;
+  const expertCount = typeof meta.expert_count === "number" ? meta.expert_count : 0;
+  const expertUsed = typeof meta.expert_used_count === "number" ? meta.expert_used_count : 0;
+  const isMoE = expertCount > 0 && expertUsed > 0;
+  const slidingWindow = typeof meta.sliding_window === "number" ? meta.sliding_window : 0;
+  const hasSwa = slidingWindow > 0;
   const isKQuant = meta.quant_name === "K-Quants";
-  const hasSwa = meta.sliding_window > 0;
-  const isMoE = meta.is_moe;
+  const archLower = meta.architecture.toLowerCase();
+  const metaCtxLen =
+    typeof meta.context_length === "number" &&
+    Number.isFinite(meta.context_length) &&
+    meta.context_length > 0
+      ? meta.context_length
+      : 0;
 
   let device = "HTP0";
   let tensorSplit: string | undefined;
   let strategy = "";
   let contextSize = 65_536;
+  let contextReason = "";
 
-  // 1. Regole di Allocazione Hardware
-  if (meta.architecture.toLowerCase().includes("lfm2")) {
-    // LFM2.5 crasha (0xC0000005) se usa la GPU: forzare 100% NPU HTP0
-    device = "HTP0";
-    strategy = "MoE Leggero lfm2moe: 100% HTP0 (evita crash GPU 0xC0000005)";
-  } else if (isMoE) {
-    if (size <= 13.5) {
-      device = "HTP0,GPUOpenCL";
-      tensorSplit = "80,20";
-      strategy = "MoE Leggero: Ibrido HTP0 (80%) + GPU (20%) per doppio canale RAM";
+  // Regola 1: Selezione Dispositivo e Split Vettoriale
+  if (isMoE) {
+    if (sizeGb <= 13.5) {
+      if (archLower === "lfm2moe") {
+        // L'ibrido HTP0+GPUOpenCL va in access violation (0xC0000005) su lfm2moe
+        device = "HTP0";
+        strategy =
+          "MoE Leggero lfm2moe (LFM2.5): 100% HTP0; l'ibrido GPU va in crash (0xC0000005) su questa architettura";
+      } else {
+        device = "HTP0,GPUOpenCL";
+        tensorSplit = "80,20";
+        strategy =
+          "MoE Leggero (LFM/A2B): Ibrido HTP0 (80%) + GPU (20%) per doppio canale di banda RAM (~46 t/s)";
+      }
     } else if (isKQuant) {
       device = "HTP0,GPUOpenCL";
       tensorSplit = "85,15";
-      strategy = "MoE Gigante K-Quants: Ibrido HTP0 (85%) + GPU (15%) per preservare SIMD NPU";
+      strategy =
+        "MoE Gigante K-Quants (Flint): Ibrido HTP0 (85%) + GPU (15%) per preservare SIMD NPU";
     } else {
       device = "HTP0,GPUOpenCL";
       tensorSplit = "50,50";
-      strategy = "MoE Gigante Q4_0: Ibrido 50/50 per azzerare il fallback CPU";
+      strategy =
+        "MoE Gigante Q4_0: Ibrido 50/50 per azzerare il fallback CPU e quintuplicare il prefill (152 t/s)";
     }
   } else {
-    // Modelli Densi
-    if (size <= 6.0) {
+    // Modelli Densi (Full Self-Attention)
+    if (sizeGb <= 6.0) {
       device = "HTP0";
-      strategy = "Dense Compatto (<=6GB): 100% NPU HTP0 (prefill 750-3800 t/s)";
-    } else if (size <= 13.5) {
+      strategy = "Dense Compatto (<=6GB): 100% NPU HTP0 (prefill 750-3800 t/s, consumo 14-18W)";
+    } else if (sizeGb <= 13.5) {
       device = "HTP0,GPUOpenCL";
       tensorSplit = "75,25";
-      strategy = "Dense Medio: Ibrido HTP0 (75%) + GPU (25%) per sbloccare DMA a contesti lunghi";
+      strategy =
+        "Dense Medio (Qwen 14B): Ibrido HTP0 (75%) + GPU (25%) per sbloccare la saturazione DMA a contesti lunghi";
+    } else if (isKQuant) {
+      // K-Quants mantengono output.weight in BF16/FP16 (>2 GiB OpenCL buffer limit)
+      device = "HTP0";
+      strategy =
+        "Dense Enorme K-Quants (>15GB): 100% NPU HTP0 (evita overflow buffer OpenCL 2GB per output.weight BF16)";
     } else {
-      // Modelli > 13.5 GB (superamento soglia FastRPC NPU)
-      device = "GPUOpenCL";
-      strategy = "Dense Enorme (>13.5GB): 100% GPU Adreno (previene overflow buffer FastRPC e saturazione CPU)";
+      device = "HTP0,GPUOpenCL";
+      tensorSplit = "50,50";
+      strategy =
+        "Dense Enorme (>15GB): Ibrido 50/50 per prevenire overflow FastRPC e throttling termico";
     }
   }
 
-  // 2. Calcolo Finestra di Contesto
+  // Regola 2: Limite Buffer FastRPC (1 GiB) e Dimensione Contesto (-c)
   if (hasSwa) {
-    contextSize = 131_072;
+    contextSize = metaCtxLen > 0 ? Math.min(131_072, metaCtxLen) : 131_072;
+    contextReason = `Sliding Window attivo (window: ${slidingWindow}): 131k token sicuro e leggerissimo in RAM`;
   } else if (isMoE) {
     contextSize = 65_536;
-  } else if (size >= 7.0) {
-    contextSize = 65_536; // Limitato a 64k per rispettare descrittore FastRPC < 1 GiB
+    contextReason = "MoE: 64k token ottimale (KV Cache nativa f16 senza collo di bottiglia)";
+  } else if (sizeGb >= 7.0) {
+    contextSize = 65_536;
+    contextReason =
+      "Dense >=7GB: limitato a 64k per rispettare il limite FastRPC NPU < 1 GiB (Error 0x200)";
   } else {
-    contextSize = Math.min(65_536, meta.context_length > 0 ? meta.context_length : 65_536);
+    contextSize = metaCtxLen > 0 ? Math.min(65_536, metaCtxLen) : 65_536;
+    contextReason = "Contesto standard per coding agent (64k)";
   }
 
-  return { device, tensorSplit, contextSize, strategy };
+  // Non superare mai il context_length dichiarato nel GGUF (anche con MoE o dense >= 7GB).
+  if (metaCtxLen > 0) {
+    contextSize = Math.min(contextSize, metaCtxLen);
+  }
+
+  return {
+    device,
+    tensorSplit,
+    contextSize,
+    contextReason,
+    strategy,
+    isMoE,
+    activeParamsEst: isMoE ? `${expertUsed} / ${expertCount} exp` : "100% dense",
+    sizeGb,
+    threads: 12,
+    threadsBatch: 12,
+    batchSize: 4096,
+    ubatchSize: 512,
+  };
 }
 
 /** Esegue inspect-gguf.ps1 ed estrae i metadati strutturati. */
@@ -165,7 +234,7 @@ export async function inspectGguf(
   const script = options.scriptPath ?? BUNDLED_INSPECT_SCRIPT;
   const result = await options.exec(
     "powershell",
-    ["-ExecutionPolicy", "Bypass", "-File", script, "-Path", filePath, "-Json"],
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Path", filePath, "-Json"],
     { cwd: dirname(script), timeoutMs: 30_000 },
   );
   if (result.code !== 0) {
@@ -191,6 +260,103 @@ export interface ScanOptions {
   skipInspection?: boolean;
 }
 
+interface CollectedGguf {
+  fileName: string;
+  filePath: string;
+  dirPath: string;
+}
+
+async function collectGgufFiles(modelsDir: string, deps: ScanDeps): Promise<CollectedGguf[]> {
+  const isDir = deps.isDirectory ?? (deps.listDir === nodeListDir ? nodeIsDirectory : undefined);
+  const collected: CollectedGguf[] = [];
+  const queue: string[] = [modelsDir];
+
+  while (queue.length > 0) {
+    const currentDir = queue.shift()!;
+    let entries: string[];
+    if (currentDir === modelsDir) {
+      entries = await deps.listDir(currentDir);
+    } else {
+      try {
+        entries = await deps.listDir(currentDir);
+      } catch {
+        continue;
+      }
+    }
+    const sorted = [...entries].sort((a, b) => a.localeCompare(b));
+    const subdirs: string[] = [];
+
+    for (const entry of sorted) {
+      if (entry.toLowerCase().endsWith(".gguf")) {
+        collected.push({
+          fileName: entry,
+          filePath: join(currentDir, entry),
+          dirPath: currentDir,
+        });
+      } else if (isDir && !entry.startsWith(".")) {
+        const subPath = join(currentDir, entry);
+        if (await isDir(subPath)) {
+          subdirs.push(subPath);
+        }
+      }
+    }
+    queue.push(...subdirs);
+  }
+
+  return collected;
+}
+
+function findMmprojForModel(
+  id: string,
+  dirPaths: string[],
+  modelsDir: string,
+  mmprojByName: Map<string, string>,
+  mmprojByDir: Map<string, string[]>,
+): string | undefined {
+  const idLower = id.toLowerCase();
+  const baseName = idLower.replace(/[-_]?(?:q\d[a-z0-9_]*|f16|bf16|f32)$/i, "");
+  const strippedQuant = idLower.replace(
+    /[-_](?:ud[-_])?(?:iq\d+[a-z0-9_]*|q\d+[a-z0-9_]*|bf16|f16|f32)(?=[-_]|$)/gi,
+    "",
+  );
+
+  const stems = strippedQuant && strippedQuant !== baseName ? [baseName, strippedQuant] : [baseName];
+  const candidates = [
+    `mmproj-${idLower}-f16.gguf`,
+    `mmproj-${idLower}-bf16.gguf`,
+    `mmproj-${idLower}.gguf`,
+    `${idLower}-mmproj.gguf`,
+    ...stems.flatMap((stem) => [
+      `mmproj-${stem}-f16.gguf`,
+      `mmproj-${stem}-bf16.gguf`,
+      `mmproj-${stem}.gguf`,
+      `${stem}-mmproj.gguf`,
+    ]),
+  ];
+  for (const cand of candidates) {
+    const match = mmprojByName.get(cand);
+    if (match) return match;
+  }
+
+  for (const stem of stems) {
+    if (!stem) continue;
+    for (const [mmKey, mmVal] of mmprojByName.entries()) {
+      if (mmKey.startsWith(`mmproj-${stem}`) || mmKey.includes(stem)) {
+        return mmVal;
+      }
+    }
+  }
+
+  for (const dirPath of dirPaths) {
+    if (dirPath === modelsDir) continue;
+    const inDir = mmprojByDir.get(dirPath);
+    if (inDir && inDir.length > 0) {
+      return inDir[0];
+    }
+  }
+  return undefined;
+}
+
 /**
  * Scansiona la directory modelli, separa i file mmproj, rileva i modelli
  * e calcola lo stato di certificazione e l'allocazione hardware.
@@ -201,84 +367,86 @@ export async function scanModels(options: ScanOptions): Promise<DiscoveredModel[
     return [];
   }
 
-  const allFiles = await deps.listDir(modelsDir);
-  const ggufFiles = allFiles.filter((f) => f.toLowerCase().endsWith(".gguf"));
+  const ggufEntries = await collectGgufFiles(modelsDir, deps);
 
-  // Separa proiettori multimodali
-  const mmprojMap = new Map<string, string>();
-  const modelFiles: string[] = [];
+  // Separa proiettori multimodali dai modelli LLM, deduplicando per ID (root prioritario).
+  const mmprojByName = new Map<string, string>();
+  const mmprojByDir = new Map<string, string[]>();
+  const modelMap = new Map<string, { fileName: string; filePath: string; dirPaths: string[] }>();
 
-  for (const file of ggufFiles) {
-    if (isMmprojFile(file)) {
-      const full = join(modelsDir, file);
-      mmprojMap.set(file.toLowerCase(), full);
+  for (const entry of ggufEntries) {
+    if (isMmprojFile(entry.fileName)) {
+      const lower = entry.fileName.toLowerCase();
+      if (!mmprojByName.has(lower)) {
+        mmprojByName.set(lower, entry.filePath);
+      }
+      const list = mmprojByDir.get(entry.dirPath) ?? [];
+      list.push(entry.filePath);
+      mmprojByDir.set(entry.dirPath, list);
     } else {
-      modelFiles.push(file);
+      const id = entry.fileName.replace(/\.gguf$/i, "");
+      const existing = modelMap.get(id);
+      if (existing) {
+        existing.dirPaths.push(entry.dirPath);
+      } else {
+        modelMap.set(id, {
+          fileName: entry.fileName,
+          filePath: entry.filePath,
+          dirPaths: [entry.dirPath],
+        });
+      }
     }
   }
 
   const certifiedSet = options.certifiedIds ?? new Set(Object.keys(TESTED_CONTEXT_WINDOWS));
-  const models: DiscoveredModel[] = [];
+  const entries = [...modelMap.entries()];
+  const models: DiscoveredModel[] = new Array(entries.length);
 
-  for (const fileName of modelFiles) {
-    const filePath = join(modelsDir, fileName);
-    const id = fileName.replace(/\.gguf$/i, "");
+  const inspectOne = async ([id, info]: [
+    string,
+    { fileName: string; filePath: string; dirPaths: string[] },
+  ]): Promise<DiscoveredModel> => {
     const isCertified = certifiedSet.has(id);
-
-    // Cerca mmproj candidato associabile (per ID completo o nome base senza quant)
-    let mmprojPath: string | undefined;
-    const idLower = id.toLowerCase();
-    const baseName = idLower.replace(/[-_]?(?:q\d[a-z0-9_]*|f16|bf16|f32)$/i, "");
-
-    const candidates = [
-      `mmproj-${idLower}-f16.gguf`,
-      `mmproj-${idLower}-bf16.gguf`,
-      `mmproj-${idLower}.gguf`,
-      `${idLower}-mmproj.gguf`,
-      `mmproj-${baseName}-f16.gguf`,
-      `mmproj-${baseName}-bf16.gguf`,
-      `mmproj-${baseName}.gguf`,
-      `${baseName}-mmproj.gguf`,
-    ];
-    for (const cand of candidates) {
-      const match = mmprojMap.get(cand);
-      if (match) {
-        mmprojPath = match;
-        break;
-      }
-    }
-    if (!mmprojPath && baseName) {
-      for (const [mmKey, mmVal] of mmprojMap.entries()) {
-        if (mmKey.startsWith(`mmproj-${baseName}`) || mmKey.includes(baseName)) {
-          mmprojPath = mmVal;
-          break;
-        }
-      }
-    }
+    const mmprojPath = findMmprojForModel(id, info.dirPaths, modelsDir, mmprojByName, mmprojByDir);
 
     let meta: GgufMetadata | undefined;
     let config: OptimalConfig;
 
     if (!options.skipInspection) {
       try {
-        meta = await inspectGguf(filePath, {
+        meta = await inspectGguf(info.filePath, {
           exec: deps.exec,
           scriptPath: options.inspectScript,
         });
         config = calculateOptimalConfig(meta);
       } catch {
-        // Fallback prudente se l'ispezione fallisce
         config = {
           device: "HTP0",
           contextSize: isCertified ? (TESTED_CONTEXT_WINDOWS[id] ?? 65_536) : 32_768,
+          contextReason: "Fallback: ispezione non riuscita",
           strategy: "Fallback: ispezione non riuscita, parametri conservativi",
+          isMoE: false,
+          activeParamsEst: "100% dense",
+          sizeGb: 0,
+          threads: 12,
+          threadsBatch: 12,
+          batchSize: 4096,
+          ubatchSize: 512,
         };
       }
     } else {
       config = {
         device: "HTP0",
         contextSize: isCertified ? (TESTED_CONTEXT_WINDOWS[id] ?? 65_536) : 32_768,
+        contextReason: "Discovery veloce (ispezione saltata)",
         strategy: "Discovery veloce (ispezione saltata)",
+        isMoE: false,
+        activeParamsEst: "100% dense",
+        sizeGb: 0,
+        threads: 12,
+        threadsBatch: 12,
+        batchSize: 4096,
+        ubatchSize: 512,
       };
     }
 
@@ -292,22 +460,127 @@ export async function scanModels(options: ScanOptions): Promise<DiscoveredModel[
       ? `Incompatibile: architettura '${meta?.architecture ?? "sconosciuta"}' non supportata dal runtime llama.cpp installato`
       : config.strategy;
 
-    models.push({
+    const rawCtx = isCertified
+      ? (TESTED_CONTEXT_WINDOWS[id] ?? config.contextSize)
+      : config.contextSize;
+    const contextWindow =
+      meta && meta.context_length > 0 ? Math.min(rawCtx, meta.context_length) : rawCtx;
+
+    return {
       id,
-      fileName,
-      filePath,
+      fileName: info.fileName,
+      filePath: info.filePath,
       sizeGb: meta ? meta.size_gb : 0,
       status,
       device: config.device,
       tensorSplit: config.tensorSplit,
-      contextWindow: isCertified ? (TESTED_CONTEXT_WINDOWS[id] ?? config.contextSize) : config.contextSize,
+      contextWindow,
       strategy,
       metadata: meta,
       mmprojPath,
-    });
-  }
+    };
+  };
+
+  // Concorrenza limitata per velocizzare l'ispezione multi-modello preservando l'ordine
+  const concurrency = 4;
+  let nextIdx = 0;
+  const workers = Array.from({ length: Math.min(concurrency, entries.length) }, async () => {
+    while (nextIdx < entries.length) {
+      const idx = nextIdx++;
+      models[idx] = await inspectOne(entries[idx]);
+    }
+  });
+  await Promise.all(workers);
 
   return models;
+}
+
+export function formatIniHeader(timestamp = new Date().toISOString()): string {
+  return [
+    "version = 1",
+    "",
+    "# ============================================",
+    "# Generato automaticamente da @hexagon/kilo-plugin (TypeScript)",
+    `# Data: ${timestamp}`,
+    "# Piattaforma: Snapdragon X2 Elite Extreme",
+    "# ============================================",
+    "",
+    "# Default globali applicati a tutti i modelli",
+    "[*]",
+    "flash-attn = on",
+    "n-gpu-layers = 999",
+    "parallel = 1",
+    "load-mode = mlock",
+    "fit = off",
+    "threads = 12",
+    "threads-batch = 12",
+    "batch-size = 4096",
+    "ubatch-size = 512",
+    "context-shift = true",
+  ].join("\n");
+}
+
+export function formatModelIniSection(model: DiscoveredModel): string[] {
+  const displayName = model.metadata?.model_name || model.id;
+  const arch = model.metadata?.architecture ?? "gguf";
+  const quant = model.metadata?.quant_name ?? "Q4";
+  return [
+    `# --- ${displayName} (${model.sizeGb.toFixed(2)} GB, ${arch}, ${quant}) ---`,
+    `# Strategia: ${model.strategy}`,
+    `[${model.id}]`,
+    `model = ${model.filePath}`,
+    `device = ${model.device}`,
+    ...(model.tensorSplit ? [`tensor-split = ${model.tensorSplit}`] : []),
+    `ctx-size = ${model.contextWindow}`,
+    ...(model.mmprojPath ? [`mmproj = ${model.mmprojPath}`] : []),
+    "",
+  ];
+}
+
+export function renderModelsIni(models: DiscoveredModel[], timestamp?: string): string {
+  const sections = models.flatMap((model) => formatModelIniSection(model));
+  return `${formatIniHeader(timestamp)}\n\n${sections.join("\n")}`;
+}
+
+export interface GenerateIniOptions {
+  modelsDir: string;
+  deps: ScanDeps;
+  inspectScript?: string;
+  skipInspection?: boolean;
+  timestamp?: string;
+}
+
+export interface GenerateIniResult {
+  iniContent: string;
+  models: DiscoveredModel[];
+  modelCount: number;
+}
+
+/**
+ * Genera l'intero contenuto di hexagon-models.ini in TypeScript puro,
+ * applicando le euristiche hardware 1:1 (device, split, clamp contesto, mmproj).
+ */
+export async function generateModelsIni(
+  options: GenerateIniOptions,
+): Promise<GenerateIniResult> {
+  const discovered = await scanModels({
+    modelsDir: options.modelsDir,
+    deps: options.deps,
+    inspectScript: options.inspectScript,
+    skipInspection: options.skipInspection,
+  });
+  const validModels = discovered.filter((m) => m.status !== "incompatible");
+  if (validModels.length === 0) {
+    throw new Error(
+      `Nessun modello GGUF valido trovato in ${options.modelsDir}: ` +
+        "scaricare un modello con GenieX (geniex pull) prima di generare hexagon-models.ini.",
+    );
+  }
+  return {
+    iniContent: renderModelsIni(validModels, options.timestamp),
+    models: validModels,
+    modelCount: validModels.length,
+  };
 }
 
 export interface SyncModelsDeps {
@@ -317,6 +590,7 @@ export interface SyncModelsDeps {
   writeFile: WriteFileFn;
   exec: ExecFn;
   mkdir?: MkdirFn;
+  isDirectory?: IsDirFn;
 }
 
 export interface SyncModelsOptions {
@@ -357,6 +631,7 @@ export async function syncDiscoveredModelsToIni(
       listDir: deps.listDir,
       exists: deps.exists,
       exec: deps.exec,
+      isDirectory: deps.isDirectory,
     },
     inspectScript: options.inspectScript,
     skipInspection: options.skipInspection,
@@ -407,25 +682,7 @@ export async function syncDiscoveredModelsToIni(
 
   baseContent = baseContent.trimEnd();
   if (!baseContent) {
-    baseContent = [
-      "version = 1",
-      "",
-      "# ============================================",
-      "# Configurazione automatica modelli Hexagon",
-      "# ============================================",
-      "",
-      "[*]",
-      "flash-attn = on",
-      "n-gpu-layers = 999",
-      "parallel = 1",
-      "load-mode = mlock",
-      "fit = off",
-      "threads = 12",
-      "threads-batch = 12",
-      "batch-size = 4096",
-      "ubatch-size = 512",
-      "context-shift = true",
-    ].join("\n");
+    baseContent = formatIniHeader();
   }
 
   const newSections: string[] = [];
@@ -433,18 +690,7 @@ export async function syncDiscoveredModelsToIni(
 
   for (const m of missing) {
     added.push(m.id);
-    const arch = m.metadata?.architecture ?? "gguf";
-    const quant = m.metadata?.quant_name ?? "Q4";
-    newSections.push(
-      `# --- ${m.id} (${m.sizeGb.toFixed(2)} GB, ${arch}, ${quant}) ---`,
-      `# Strategia: ${m.strategy}`,
-      `[${m.id}]`,
-      `model = ${m.filePath}`,
-      `device = ${m.device}`,
-      ...(m.tensorSplit ? [`tensor-split = ${m.tensorSplit}`] : []),
-      `ctx-size = ${m.contextWindow}`,
-      "",
-    );
+    newSections.push(...formatModelIniSection(m));
   }
 
   const updatedIniText =

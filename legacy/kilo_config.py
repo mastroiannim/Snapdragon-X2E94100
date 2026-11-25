@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Configuratore e sincronizzatore per Kilo Code su runtime Hexagon GGUF.
+"""[DEPRECATED] Configuratore e sincronizzatore per Kilo Code su runtime Hexagon GGUF.
 
-Genera e valida kilo.json mappando i preset hardware di hexagon-models.ini
-e gli ID restituiti dall'endpoint locale OpenAI-compatibile.
+DEPRECATO: sostituito integralmente dal plugin TypeScript @hexagon/kilo-plugin
+(plugins/hexagon-runtime/src/config.ts, validate.ts, cli.ts setup / validate).
+Conservato in legacy/ solo per riferimento storico.
 """
 
 import argparse
@@ -11,11 +12,18 @@ import json
 import re
 import shutil
 import sys
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
+
+warnings.warn(
+    "legacy/kilo_config.py e' deprecato: usare plugins/hexagon-runtime/dist/cli.js (setup, validate, status).",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 VALID_PERMISSION_ACTIONS = {"ask", "allow", "deny"}
 VALID_AGENT_MODES = {"primary", "subagent", "all"}
@@ -29,7 +37,7 @@ FORBIDDEN_PLURAL_KEYS = {
 
 DEFAULT_PORT = 18803
 DEFAULT_BASE_URL = f"http://127.0.0.1:{DEFAULT_PORT}/v1"
-DEFAULT_WORKSPACE = Path(__file__).resolve().parent
+DEFAULT_WORKSPACE = Path(__file__).resolve().parent.parent
 
 # Modelli verificati e raccomandati
 RECOMMENDED_MAIN_MODEL = "Ornith-1.5-9B-Q4_0"

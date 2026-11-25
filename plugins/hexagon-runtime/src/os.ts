@@ -4,11 +4,12 @@
  * della suite inietta fake attraverso OsDeps.
  */
 import { execFile, spawn } from "node:child_process";
-import { access, readdir, readFile, writeFile } from "node:fs/promises";
+import { access, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import type {
   ExecFn,
   ExistsFn,
   FetchFn,
+  IsDirFn,
   ListDirFn,
   NowFn,
   OsDeps,
@@ -73,6 +74,14 @@ export const nodeExists: ExistsFn = async (path) => {
 };
 
 export const nodeListDir: ListDirFn = (path) => readdir(path);
+
+export const nodeIsDirectory: IsDirFn = async (path) => {
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    return false;
+  }
+};
 
 export const nodeFetch: FetchFn = (url, init) => fetch(url, init);
 

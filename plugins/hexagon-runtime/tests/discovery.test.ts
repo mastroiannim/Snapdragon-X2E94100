@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   calculateOptimalConfig,
+  generateModelsIni,
   inspectGguf,
   isMmprojFile,
   scanModels,
@@ -75,9 +76,9 @@ describe("calculateOptimalConfig — Euristiche hardware", () => {
     expect(cfg.contextSize).toBe(65536); // limitato per DMA FastRPC < 1GB
   });
 
-  it("Dense Enorme (>13.5GB): 100% GPU Adreno", () => {
+  it("Dense Enorme non-KQuant (>13.5GB): Ibrido 50/50 allineato a Get-HexagonOptimalConfig", () => {
     const meta: GgufMetadata = {
-      architecture: "qwen2",
+      architecture: "qwen35",
       model_name: "Qwen 27B",
       context_length: 65536,
       embedding_length: 5120,
@@ -88,13 +89,40 @@ describe("calculateOptimalConfig — Euristiche hardware", () => {
       expert_used_count: 0,
       sliding_window: 0,
       file_type: 2,
-      file_size_bytes: 16_000_000_000,
-      size_gb: 15.2,
+      file_size_bytes: 16_350_000_000,
+      size_gb: 15.23,
       quant_name: "Q4_0",
       is_moe: false,
     };
     const cfg = calculateOptimalConfig(meta);
-    expect(cfg.device).toBe("GPUOpenCL");
+    expect(cfg.device).toBe("HTP0,GPUOpenCL");
+    expect(cfg.tensorSplit).toBe("50,50");
+    expect(cfg.contextSize).toBe(65536);
+  });
+
+  it("Dense Enorme K-Quants (>13.5GB): 100% NPU HTP0 per evitare overflow OpenCL 2GB", () => {
+    const meta: GgufMetadata = {
+      architecture: "qwen35",
+      model_name: "Qwen 27B K-Quant",
+      context_length: 65536,
+      embedding_length: 5120,
+      block_count: 64,
+      head_count: 40,
+      head_count_kv: 8,
+      expert_count: 0,
+      expert_used_count: 0,
+      sliding_window: 0,
+      file_type: 15,
+      file_size_bytes: 16_500_000_000,
+      size_gb: 15.37,
+      quant_name: "K-Quants",
+      is_moe: false,
+    };
+    const cfg = calculateOptimalConfig(meta);
+    expect(cfg.device).toBe("HTP0");
+    expect(cfg.tensorSplit).toBeUndefined();
+    expect(cfg.contextSize).toBe(65536);
+    expect(cfg.strategy).toContain("OpenCL 2GB");
   });
 
   it("LFM2.5 MoE: forzato 100% HTP0 per evitare crash GPU", () => {
@@ -120,7 +148,7 @@ describe("calculateOptimalConfig — Euristiche hardware", () => {
     expect(cfg.strategy).toContain("0xC0000005");
   });
 
-  it("MoE Leggero (<=13.5GB): split 80/20", () => {
+  it("MoE Leggero (<=13.5GB): split 80/20 e clamp context_length", () => {
     const meta: GgufMetadata = {
       architecture: "qwen2moe",
       model_name: "Qwen MoE 14B",
@@ -141,9 +169,10 @@ describe("calculateOptimalConfig — Euristiche hardware", () => {
     const cfg = calculateOptimalConfig(meta);
     expect(cfg.device).toBe("HTP0,GPUOpenCL");
     expect(cfg.tensorSplit).toBe("80,20");
+    expect(cfg.contextSize).toBe(32768);
   });
 
-  it("MoE Gigante non-KQuant (>13.5GB): split 50/50", () => {
+  it("MoE Gigante non-KQuant (>13.5GB): split 50/50 e clamp context_length", () => {
     const meta: GgufMetadata = {
       architecture: "deepseek",
       model_name: "DeepSeek MoE",
@@ -164,9 +193,10 @@ describe("calculateOptimalConfig — Euristiche hardware", () => {
     const cfg = calculateOptimalConfig(meta);
     expect(cfg.device).toBe("HTP0,GPUOpenCL");
     expect(cfg.tensorSplit).toBe("50,50");
+    expect(cfg.contextSize).toBe(32768);
   });
 
-  it("MoE con Sliding Window (Flint): contesto esteso 131k", () => {
+  it("MoE con Sliding Window (Flint): contesto esteso 131k e clamp se context_length minore", () => {
     const meta: GgufMetadata = {
       architecture: "flint",
       model_name: "Flint Preview",
@@ -188,6 +218,36 @@ describe("calculateOptimalConfig — Euristiche hardware", () => {
     expect(cfg.device).toBe("HTP0,GPUOpenCL");
     expect(cfg.tensorSplit).toBe("85,15");
     expect(cfg.contextSize).toBe(131072);
+
+    const clampedSwa = calculateOptimalConfig({ ...meta, context_length: 65536 });
+    expect(clampedSwa.contextSize).toBe(65536);
+
+    const zeroCtxSwa = calculateOptimalConfig({ ...meta, context_length: 0 });
+    expect(zeroCtxSwa.contextSize).toBe(131072);
+  });
+
+  it("expert_count > 0 senza expert_used_count tratta il modello come dense (parita' PS1)", () => {
+    const meta: GgufMetadata = {
+      architecture: "llama",
+      model_name: "Pseudo MoE",
+      context_length: 0,
+      embedding_length: 4096,
+      block_count: 32,
+      head_count: 32,
+      head_count_kv: 8,
+      expert_count: 8,
+      expert_used_count: 0,
+      sliding_window: 0,
+      file_type: 2,
+      file_size_bytes: 4_000_000_000,
+      size_gb: Number.NaN,
+      quant_name: "Q4_0",
+      is_moe: true,
+    };
+    const cfg = calculateOptimalConfig(meta);
+    expect(cfg.isMoE).toBe(false);
+    expect(cfg.device).toBe("HTP0");
+    expect(cfg.contextSize).toBe(65536);
   });
 });
 
@@ -392,6 +452,38 @@ describe("scanModels", () => {
     expect(models[0].status).toBe("incompatible");
     expect(models[0].strategy).toContain("Incompatibile");
   });
+
+  it("associa mmproj con quant interno (gemma-4-E2B_q4_0-it) e scansiona sottodirectory con deduplica", async () => {
+    const tree: Record<string, string[]> = {
+      "/models": ["gemma-4-E2B_q4_0-it.gguf", "gemma-4-E2B-it-mmproj.gguf", "unsloth", ".cache"],
+      "/models/unsloth": ["Inkling-2-Mini-UD-Q4_K_M.gguf", "mmproj-F16.gguf", "gemma-4-E2B_q4_0-it.gguf"],
+    };
+    const listDir = vi.fn(async (dir: string) => {
+      const key = dir.replace(/\\/g, "/");
+      if (!(key in tree)) throw new Error("unreadable");
+      return tree[key];
+    });
+    const isDirectory = vi.fn(async (p: string) => {
+      const key = p.replace(/\\/g, "/");
+      return key in tree;
+    });
+    const models = await scanModels({
+      modelsDir: "/models",
+      deps: {
+        listDir,
+        exists: async () => true,
+        exec: vi.fn(async () => okExec("{}")),
+        isDirectory,
+      },
+      skipInspection: true,
+    });
+    expect(models).toHaveLength(2);
+    const gemma = models.find((m) => m.id === "gemma-4-E2B_q4_0-it")!;
+    expect(gemma.filePath.replace(/\\/g, "/")).toBe("/models/gemma-4-E2B_q4_0-it.gguf");
+    expect(gemma.mmprojPath?.replace(/\\/g, "/")).toBe("/models/gemma-4-E2B-it-mmproj.gguf");
+    const inkling = models.find((m) => m.id === "Inkling-2-Mini-UD-Q4_K_M")!;
+    expect(inkling.mmprojPath?.replace(/\\/g, "/")).toBe("/models/unsloth/mmproj-F16.gguf");
+  });
 });
 
 describe("discovery.ts — syncDiscoveredModelsToIni", () => {
@@ -579,5 +671,75 @@ ctx-size = 32768
     expect(iniWritten).toContain("tensor-split = 80,20");
     expect(writeCalls.some((c) => c.path.includes("appdata") && c.path.endsWith("hexagon-models.ini"))).toBe(true);
     expect(writeCalls.some((c) => c.path.includes("ws") && c.path.endsWith("hexagon-models.ini"))).toBe(true);
+  });
+
+  it("generateModelsIni: genera INI completo con mmproj, clamp e filtra clip", async () => {
+    const listDir = vi.fn(async () => [
+      "Ornith-1.5-9B-Q4_0.gguf",
+      "mmproj-Ornith-1.5-9B-f16.gguf",
+      "clip-only.gguf",
+    ]);
+    const exec = vi.fn(async (_cmd: string, args: string[]) => {
+      const target = args[args.indexOf("-Path") + 1] ?? "";
+      if (target.includes("clip-only")) {
+        return okExec(
+          JSON.stringify({
+            architecture: "clip",
+            model_name: "CLIP",
+            context_length: 512,
+            embedding_length: 768,
+            block_count: 12,
+            head_count: 12,
+            head_count_kv: 12,
+            expert_count: 0,
+            expert_used_count: 0,
+            sliding_window: 0,
+            file_type: 1,
+            file_size_bytes: 500_000_000,
+            size_gb: 0.5,
+            quant_name: "F16",
+            is_moe: false,
+          }),
+        );
+      }
+      return okExec(
+        JSON.stringify({
+          architecture: "qwen35",
+          model_name: "Ornith 1.5 9B",
+          context_length: 32768,
+          embedding_length: 4096,
+          block_count: 32,
+          head_count: 16,
+          head_count_kv: 4,
+          expert_count: 0,
+          expert_used_count: 0,
+          sliding_window: 0,
+          file_type: 2,
+          file_size_bytes: 5_482_832_768,
+          size_gb: 5.11,
+          quant_name: "Q4_0",
+          is_moe: false,
+        }),
+      );
+    });
+    const res = await generateModelsIni({
+      modelsDir: "/virtual/models",
+      deps: { listDir, exists: async () => true, exec },
+      timestamp: "2026-11-25T16:40:00Z",
+    });
+    expect(res.modelCount).toBe(1);
+    expect(res.iniContent).toContain("version = 1");
+    expect(res.iniContent).toContain("[Ornith-1.5-9B-Q4_0]");
+    expect(res.iniContent).toContain("ctx-size = 32768");
+    expect(res.iniContent).toContain("mmproj = ");
+    expect(res.iniContent).toContain("mmproj-Ornith-1.5-9B-f16.gguf");
+    expect(res.iniContent).not.toContain("[clip-only]");
+
+    await expect(
+      generateModelsIni({
+        modelsDir: "/virtual/empty",
+        deps: { listDir: async () => [], exists: async () => true, exec },
+      }),
+    ).rejects.toThrow(/Nessun modello GGUF valido/);
   });
 });

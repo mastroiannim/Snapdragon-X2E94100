@@ -111,9 +111,6 @@ jobs:
       - name: Verify bootstrap, update, integrity and rollback
         shell: powershell
         run: .\tests\runtime-update.ps1
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
       - name: Verify Windows launcher entry points from an empty installation
         shell: powershell
         run: .\tests\entrypoints.ps1

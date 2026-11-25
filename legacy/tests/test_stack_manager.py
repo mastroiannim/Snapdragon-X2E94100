@@ -1,12 +1,17 @@
 """Regressioni dell'inventario e del blocco aggiornamenti."""
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+
+LEGACY_DIR = Path(__file__).resolve().parent.parent
+if str(LEGACY_DIR) not in sys.path:
+    sys.path.insert(0, str(LEGACY_DIR))
 
 import stack_manager as stack
 
@@ -201,4 +206,4 @@ class StackTests(unittest.TestCase):
         self.assertEqual(manager.geniex_dir, self.genie)
 
     def test_default_workspace_is_checkout(self):
-        self.assertEqual(stack.StackManager().workspace_dir, Path(stack.__file__).resolve().parent)
+        self.assertEqual(stack.StackManager().workspace_dir, Path(stack.__file__).resolve().parent.parent)

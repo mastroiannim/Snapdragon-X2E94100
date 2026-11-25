@@ -649,6 +649,20 @@ describe("createHexagonTools", () => {
     spawned = false;
     const parsedDefaults = JSON.parse(await toolsDefaults.hexagon_restart.execute({}, undefined as never));
     expect(parsedDefaults.restarted).toBe(true);
+
+    const toolsMinimalDefaults = createHexagonTools({
+      fetch,
+      exec: async () => okExec(),
+      readFile: async () => "",
+      workspaceDir: "/virtual/nonexistent-ws-for-tools",
+      modelsDir: "/virtual/nonexistent-models-dir",
+      sync: async () => syncOutcome,
+    });
+    expect(JSON.parse(await toolsMinimalDefaults.hexagon_models.execute({}, undefined as never))).toEqual([]);
+    const qualMissing = JSON.parse(
+      await toolsMinimalDefaults.hexagon_qualify.execute({ model: "absent" }, undefined as never),
+    );
+    expect(qualMissing.error).toContain("non trovato");
   });
 
   it("descrizioni dei tool presenti", () => {

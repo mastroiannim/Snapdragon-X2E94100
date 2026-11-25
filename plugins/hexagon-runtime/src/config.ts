@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   buildHexagonProvider as baseBuildHexagonProvider,
+  DEFAULT_CONTEXT_WINDOW,
   outputLimitFor,
   type HexagonProviderConfig,
 } from "./models.js";
@@ -51,13 +52,26 @@ export function resolvePluginSpecifier(
 export { outputLimitFor as calculateOutputLimit, outputLimitFor };
 
 /**
- * Costruisce l'oggetto provider per Kilo Code con host e porta opzionali.
+ * Costruisce l'oggetto provider per Kilo Code con host, porta e modelli live opzionali.
  */
 export function buildHexagonProvider(
   ini?: ModelsIni,
-  options: { host?: string; port?: number } = {},
+  options: { host?: string; port?: number; liveModels?: string[] } = {},
 ): HexagonProviderConfig {
   const base = baseBuildHexagonProvider(ini);
+  if (options.liveModels) {
+    for (const mid of options.liveModels) {
+      if (mid && !base.models[mid]) {
+        base.models[mid] = {
+          name: `${mid} (HTP0)`,
+          limit: {
+            context: DEFAULT_CONTEXT_WINDOW,
+            output: outputLimitFor(DEFAULT_CONTEXT_WINDOW),
+          },
+        };
+      }
+    }
+  }
   if (options.host || options.port) {
     const host = options.host ?? ROUTER_HOST;
     const port = options.port ?? ROUTER_PORT;
@@ -96,6 +110,7 @@ export interface SetupConfigOptions {
   iniPath?: string;
   host?: string;
   port?: number;
+  liveModels?: string[];
   mainModel?: string;
   smallModel?: string;
   pluginSpecifier?: string;
@@ -203,12 +218,11 @@ export async function installProviderConfig(
     /* fallback: parsing INI vuoto */
   }
   const ini = parseModelsIni(iniContent);
-  const provider = buildHexagonProvider(ini);
-  if (options.host || options.port) {
-    const host = options.host ?? ROUTER_HOST;
-    const port = options.port ?? ROUTER_PORT;
-    provider.options.baseURL = `http://${host}:${port}/v1`;
-  }
+  const provider = buildHexagonProvider(ini, {
+    host: options.host,
+    port: options.port,
+    liveModels: options.liveModels,
+  });
   const modelKeys = Object.keys(provider.models);
 
   const mainModel =
@@ -307,6 +321,15 @@ export async function installProviderConfig(
     small_model: existing.small_model ?? `hexagon/${smallModel}`,
   };
 
+  const content = `${JSON.stringify(mergedConfig, null, 2)}\n`;
+  if (fileExisted && originalRaw === content) {
+    return {
+      updated: false,
+      targetPath,
+      modelCount: modelKeys.length,
+    };
+  }
+
   const dir = dirname(targetPath);
   if (!(await exists(dir))) {
     await mkdir(dir);
@@ -324,7 +347,6 @@ export async function installProviderConfig(
     await writeFile(backupPath, originalRaw);
   }
 
-  const content = `${JSON.stringify(mergedConfig, null, 2)}\n`;
   await writeFile(targetPath, content);
 
   return {

@@ -104,10 +104,10 @@ powershell -ExecutionPolicy Bypass -File .\setup-kilo.ps1
 Verifiche effettuate:
 - Piattaforma Windows 11 ARM64.
 - Presenza di Node.js e CLI `kilo`.
-- Integrità runtime Hexagon e allineamento commit (`stack_manager.py`).
+- Integrità runtime Hexagon e allineamento commit (`cli.js status --check-runtime`).
 - Firma Authenticode DSP (`libggml-htp.cat`).
 - Presenza dei modelli GGUF nella cache locale.
-- Conformità offline di `kilo.json` (loopback obbligatorio, assenza di rotte cloud).
+- Conformità offline di `kilo.json` (`cli.js validate`, loopback obbligatorio, assenza di rotte cloud).
 - Presenza e permessi dei ruoli in `.kilo/agents/`.
 
 ### 2. `launch-kilo.ps1` (Launcher Unificato)
@@ -124,17 +124,18 @@ powershell -ExecutionPolicy Bypass -File .\launch-kilo.ps1 -Agent code
 ```
 Caratteristiche:
 - Rileva automaticamente se il router su `127.0.0.1:18803` è già attivo. Se offline, lo avvia su loopback.
-- Rigenera `kilo.json` per garantire sincronizzazione con i modelli effettivamente esposti da `/v1/models`.
+- Rigenera `kilo.json` tramite `plugins/hexagon-runtime/dist/cli.js setup --workspace --port <P> --host <H>`.
 - Inoltra l'esecuzione a `kilo.cmd`.
 
-### 3. `kilo_config.py` (Modulo di Sincronizzazione)
-Utility Python per interrogare e aggiornare la configurazione:
+### 3. `plugins/hexagon-runtime/dist/cli.js` (CLI TypeScript nativa, zero Python)
+Utility nativa per interrogare, validare e aggiornare la configurazione:
 ```powershell
-python kilo_config.py --status          # Mostra stato configurazione e router
-python kilo_config.py --check           # Valida vincoli di sicurezza offline
-python kilo_config.py --generate        # Ricrea kilo.json dai preset hardware
-python kilo_config.py --install-global  # Installa/aggiorna il provider hexagon nel config globale
+node plugins\hexagon-runtime\dist\cli.js status --check-runtime --port 18803 --host 127.0.0.1  # Stato router, modelli e runtime GenieX
+node plugins\hexagon-runtime\dist\cli.js validate --workspace .                                 # Valida kilo.json e .kilo/agents/*.md
+node plugins\hexagon-runtime\dist\cli.js setup --workspace --port 18803 --host 127.0.0.1        # Ricrea kilo.json nel workspace
+node plugins\hexagon-runtime\dist\cli.js setup --global --port 18803 --host 127.0.0.1           # Installa/aggiorna il provider hexagon nel config globale
 ```
+*(Gli script Python originali `stack_manager.py` e `kilo_config.py` sono stati archiviati in `legacy/` e deprecati.)*
 
 ### 4. Selezione della Cartella di Progetto (TUI Control Center)
 Quando la TUI di controllo avvia Kilo Code (menu Router + Kilo), chiede la

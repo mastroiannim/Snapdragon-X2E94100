@@ -2,10 +2,15 @@
 """Test di integrazione e sicurezza offline per Kilo Code su runtime Hexagon."""
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+
+LEGACY_DIR = Path(__file__).resolve().parent.parent
+if str(LEGACY_DIR) not in sys.path:
+    sys.path.insert(0, str(LEGACY_DIR))
 
 import kilo_config
 
@@ -14,7 +19,7 @@ class TestGlobalProviderInstall(unittest.TestCase):
     """Test per install_global_provider (provider hexagon nel config globale Kilo)."""
 
     def setUp(self):
-        self.workspace_dir = Path(__file__).resolve().parent.parent
+        self.workspace_dir = Path(__file__).resolve().parent.parent.parent
         self.tmp = tempfile.TemporaryDirectory()
         self.config_dir = Path(self.tmp.name) / "kilo"
 
@@ -73,7 +78,7 @@ class TestKiloConfig(unittest.TestCase):
     """Test unitari per la generazione e validazione di kilo.json."""
 
     def setUp(self):
-        self.workspace_dir = Path(__file__).resolve().parent.parent
+        self.workspace_dir = Path(__file__).resolve().parent.parent.parent
         self.ini_path = self.workspace_dir / "hexagon-models.ini"
 
     def test_parse_hexagon_models_ini(self):
@@ -271,7 +276,7 @@ class TestKiloAgents(unittest.TestCase):
     """Test di validazione dei ruoli e permessi per gli agenti in .kilo/agents/."""
 
     def setUp(self):
-        self.workspace_dir = Path(__file__).resolve().parent.parent
+        self.workspace_dir = Path(__file__).resolve().parent.parent.parent
         self.agents_dir = self.workspace_dir / ".kilo" / "agents"
 
     def test_agents_directory_and_files_exist(self):

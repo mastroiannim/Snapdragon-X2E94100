@@ -92,9 +92,12 @@ export async function bootstrapRuntime(
   const ini = await ensureModelsIni({
     iniPath,
     workspaceDir: paths.workspaceDir,
+    modelsDir,
     exec: deps.exec,
     exists: deps.exists,
     writeFile: deps.writeFile,
+    listDir: deps.listDir,
+    mkdir: options.mkdir,
   });
   if (!ini.generated) {
     await syncDiscoveredModelsToIni({

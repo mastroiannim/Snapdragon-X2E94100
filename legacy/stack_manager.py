@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Ispezione e aggiornamento dello stack GenieX / llama.cpp.
+"""[DEPRECATED] Ispezione e aggiornamento dello stack GenieX / llama.cpp.
 
-La presenza e l'identità dei file non verificano firma, ABI o offload reale.
-Installazione e aggiornamento delegano a sync-geniex.ps1, condiviso con il launcher.
+DEPRECATO: sostituito integralmente dal plugin TypeScript @hexagon/kilo-plugin
+(plugins/hexagon-runtime/src/sync.ts, tools.ts, cli.ts status --check-runtime).
+Conservato in legacy/ solo per riferimento storico.
 """
 
 import hashlib
@@ -15,16 +16,23 @@ import subprocess
 import sys
 import tempfile
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+warnings.warn(
+    "legacy/stack_manager.py e' deprecato: usare plugins/hexagon-runtime/dist/cli.js (status --check-runtime, sync).",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
 USER_PROFILE = Path(os.environ.get("USERPROFILE") or Path.home())
 LOCAL_APPDATA = Path(os.environ.get("LOCALAPPDATA") or USER_PROFILE / "AppData" / "Local")
 DEFAULT_GENIEX_DIR = LOCAL_APPDATA / "GenieX CLI"
 DEFAULT_LLAMA_BIN_DIR = USER_PROFILE / "llama-cpp" / "llama-bin-win-cpu-arm64"
-DEFAULT_WORKSPACE = Path(__file__).resolve().parent
+DEFAULT_WORKSPACE = Path(__file__).resolve().parent.parent
 
 
 def calculate_sha256(path: Path) -> str:

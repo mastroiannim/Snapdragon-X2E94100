@@ -4,6 +4,7 @@ import {
   ensureRuntime,
   extractGeniexHash,
   extractLlamaCommit,
+  inspectRuntimeStatus,
   resolveSyncScript,
   runSyncScript,
   sameCommit,
@@ -344,5 +345,148 @@ describe("ensureRuntime", () => {
     expect(outcome.updated).toBe(true);
     expect(outcome.message).toBe("forzato");
     expect(exec.mock.calls.some(([command]) => command === "powershell")).toBe(true);
+  });
+});
+
+describe("inspectRuntimeStatus", () => {
+  it("restituisce dettagli completi su runtime allineato inclusa firma .cat", async () => {
+    const norm = (p: string) => p.replace(/\\/g, "/");
+    const exists = vi.fn(async () => true);
+    const listDir = vi.fn(async () => ALL_RUNTIME_FILES);
+    const { fn: exec } = recordingExec((call) => {
+      if (call.command === "powershell") {
+        if (call.args.includes("-CheckOnly")) {
+          return okExec(
+            '{"Aligned":true,"CommitAligned":true,"MissingFiles":[],"StaleFiles":[],"ServerRunning":true}',
+          );
+        }
+        return okExec("Valid\n");
+      }
+      if (norm(call.command).endsWith("geniex.exe")) {
+        return okExec(GENIEX_VERSION_OUTPUT);
+      }
+      return okExec(LLAMA_VERSION_OUTPUT);
+    });
+
+    const details = await inspectRuntimeStatus(
+      PATHS,
+      { exec, exists, listDir },
+      { geniexDir: "C:/genie" },
+    );
+    expect(details.geniexInstalled).toBe(true);
+    expect(details.geniexVersion).toBe("0.10.0");
+    expect(details.qairtVersion).toBe("2.50");
+    expect(details.llamaServerInstalled).toBe(true);
+    expect(details.llamaServerVersion).toBe("11938 (19cce6919)");
+    expect(details.commitAligned).toBe(true);
+    expect(details.allFilesAligned).toBe(true);
+    expect(details.catalogSignature).toBe(process.platform === "win32" ? "Valida" : "N/D");
+    expect(details.needsSync).toBe(false);
+  });
+
+  it("gestisce geniex.exe assente senza lanciare eccezioni e risolve fallback PATH", async () => {
+    const exists = vi.fn(async (p: string) => p.replace(/\\/g, "/") === "C:/path/geniex.exe");
+    const listDir = vi.fn(async () => []);
+    const { fn: exec } = recordingExec((call) => {
+      if (call.command === "where.exe") {
+        return okExec("C:\\path\\geniex.exe\n");
+      }
+      if (call.command.includes("geniex.exe")) {
+        return okExec(GENIEX_VERSION_OUTPUT);
+      }
+      return { code: 1, stdout: "", stderr: "" };
+    });
+
+    const resolved = await inspectRuntimeStatus(PATHS, { exec, exists, listDir });
+    expect(resolved.geniexInstalled).toBe(process.platform === "win32");
+    expect(resolved.llamaServerInstalled).toBe(false);
+    expect(resolved.allFilesAligned).toBe(false);
+
+    const missingAll = await inspectRuntimeStatus(
+      PATHS,
+      {
+        exec: async () => ({ code: 1, stdout: "", stderr: "" }),
+        exists: async () => false,
+        listDir: async () => [],
+      },
+      { resolveFromPath: false },
+    );
+    expect(missingAll.geniexInstalled).toBe(false);
+    expect(missingAll.geniexVersion).toBe("Non rilevato");
+    expect(missingAll.needsSync).toBe(true);
+    expect(missingAll.error).toContain("geniex.exe non trovato");
+  });
+
+  it("gestisce errori di lettura version e firma NotSigned", async () => {
+    const exists = vi.fn(async () => true);
+    const listDir = vi.fn(async () => ALL_RUNTIME_FILES);
+    const { fn: exec } = recordingExec((call) => {
+      if (call.command === "powershell") {
+        if (call.args.includes("-CheckOnly")) {
+          return okExec('{"Aligned":false,"CommitAligned":false,"MissingFiles":["x.dll"]}');
+        }
+        return okExec("NotSigned\n");
+      }
+      return { code: 2, stdout: "", stderr: "errore eseguibile" };
+    });
+
+    const details = await inspectRuntimeStatus(
+      PATHS,
+      { exec, exists, listDir },
+      { geniexDir: "C:/genie" },
+    );
+    expect(details.geniexVersion).toBe("Errore lettura");
+    expect(details.llamaServerVersion).toBe("Errore lettura");
+    expect(details.allFilesAligned).toBe(false);
+    expect(details.missingFiles).toContain("x.dll");
+    expect(details.catalogSignature).toBe(process.platform === "win32" ? "Non firmata" : "N/D");
+    expect(details.error).toContain("geniex.exe --version fallito");
+  });
+
+  it("copre edge case catalogSignature, where.exe fallback fallito e output vuoti", async () => {
+    const exists = vi.fn(async (p: string) => p.replace(/\\/g, "/").endsWith("libggml-htp.cat") || p.replace(/\\/g, "/") === PATHS.geniexExe);
+    const { fn: execUnknown } = recordingExec((call) => {
+      if (call.command === "powershell") return okExec("UnknownError\n");
+      return okExec("output senza campi");
+    });
+    const d1 = await inspectRuntimeStatus(PATHS, { exec: execUnknown, exists, listDir: async () => [] });
+    expect(d1.geniexVersion).toBe("Non rilevato");
+    expect(d1.qairtVersion).toBe("N/A");
+    expect(d1.catalogSignature).toBe(process.platform === "win32" ? "UnknownError" : "N/D");
+
+    const { fn: execThrow } = recordingExec(async (call) => {
+      if (call.command === "powershell") throw new Error("ps broken");
+      if (call.command === "where.exe") throw new Error("where broken");
+      return { code: 1, stdout: "", stderr: "" };
+    });
+    const d2 = await inspectRuntimeStatus(
+      PATHS,
+      { exec: execThrow, exists: async (p) => p.replace(/\\/g, "/").endsWith("libggml-htp.cat"), listDir: async () => [] },
+    );
+    expect(d2.catalogSignature).toBe("N/D");
+    expect(d2.geniexInstalled).toBe(false);
+
+    const { fn: execEmpty } = recordingExec((call) => {
+      if (call.command === "powershell") return { code: 1, stdout: "", stderr: "fail" };
+      if (call.command === "where.exe") return okExec("");
+      return { code: 1, stdout: "out-only", stderr: "" };
+    });
+    const d3 = await inspectRuntimeStatus(
+      PATHS,
+      { exec: execEmpty, exists: async (p) => p.replace(/\\/g, "/").endsWith("libggml-htp.cat") || p.replace(/\\/g, "/") === PATHS.geniexExe, listDir: async () => [] },
+    );
+    expect(d3.catalogSignature).toBe("N/D");
+    expect(d3.error).toContain("out-only");
+
+    const d4 = await inspectRuntimeStatus(
+      PATHS,
+      {
+        exec: async () => ({ code: 1, stdout: "", stderr: "" }),
+        exists: async (p) => p.replace(/\\/g, "/") === PATHS.geniexExe,
+        listDir: async () => [],
+      },
+      { resolveFromPath: false },
+    );
+    expect(d4.error).toContain("output vuoto");
   });
 });

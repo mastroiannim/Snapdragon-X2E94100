@@ -376,18 +376,28 @@ describe("bootstrapRuntime", () => {
     ).toContain("hexagon-models.ini");
   });
 
-  it("INI assente: generazione zero-setup via launch-hexagon.ps1 -DryRun -Json", async () => {
-    const iniContent =
-      "[*]\nthreads = 12\n\n[fixture]\nmodel = /virtual/models/fixture.gguf\ndevice = HTP0\nctx-size = 65536\n";
+  it("INI assente: generazione zero-setup in TypeScript senza launch-hexagon.ps1", async () => {
     const { fn: exec, calls } = recordingExec((call) => {
       if (call.command === "powershell") {
-        if (call.args.some((arg) => arg.includes("launch-hexagon.ps1"))) {
+        if (call.args.some((arg) => arg.includes("inspect-gguf.ps1"))) {
           return okExec(
-            JSON.stringify(
-              { mode: "Router", ini_content: iniContent, models: [{ alias: "fixture" }] },
-              null,
-              2,
-            ),
+            JSON.stringify({
+              architecture: "qwen35",
+              model_name: "Fixture Model",
+              context_length: 65536,
+              embedding_length: 4096,
+              block_count: 32,
+              head_count: 16,
+              head_count_kv: 4,
+              expert_count: 0,
+              expert_used_count: 0,
+              sliding_window: 0,
+              file_type: 2,
+              file_size_bytes: 5_000_000_000,
+              size_gb: 4.66,
+              quant_name: "Q4_0",
+              is_moe: false,
+            }),
           );
         }
         return okExec('{"Message":"allineato","Files":[]}');
@@ -410,7 +420,8 @@ describe("bootstrapRuntime", () => {
         readFile: async () => "",
         writeFile,
         exists: async (path) => !path.endsWith("hexagon-models.ini"),
-        listDir: async () => ALL_RUNTIME_FILES,
+        listDir: async (dir) =>
+          dir.includes("models") ? ["fixture.gguf"] : ALL_RUNTIME_FILES,
         spawn: recordingSpawn().fn,
         sleep: async () => {},
         now: () => 0,
@@ -420,13 +431,10 @@ describe("bootstrapRuntime", () => {
     expect(result.ini.modelCount).toBe(1);
     expect(writes).toHaveLength(1);
     expect(writes[0].path).toContain("hexagon-models.ini");
-    expect(writes[0].content).toBe(iniContent);
-    const launcher = calls.find((call) =>
-      call.args.some((arg) => arg.includes("launch-hexagon.ps1")),
-    );
-    expect(launcher?.args).toContain("-DryRun");
-    expect(launcher?.args).toContain("-Json");
-    expect(launcher?.args).toContain("Router");
+    expect(writes[0].content).toContain("[fixture]");
+    expect(writes[0].content).toContain("device = HTP0");
+    expect(calls.some((c) => c.args.some((a) => a.includes("launch-hexagon.ps1")))).toBe(false);
+    expect(calls.some((c) => c.args.some((a) => a.includes("inspect-gguf.ps1")))).toBe(true);
   });
 });
 

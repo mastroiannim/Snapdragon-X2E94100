@@ -8,6 +8,11 @@ on:
       - 'benchmark-hexagon.ps1'
       - 'runtime-update.psm1'
       - 'sync-geniex.ps1'
+      - 'kilo.json'
+      - '.kilo/agents/**'
+      - 'setup-kilo.ps1'
+      - 'launch-kilo.ps1'
+      - 'tests/kilo-cli-no-python.ps1'
       - '.github/workflows/plugin-checks.yml'
   pull_request:
     paths:
@@ -15,6 +20,11 @@ on:
       - 'benchmark-hexagon.ps1'
       - 'runtime-update.psm1'
       - 'sync-geniex.ps1'
+      - 'kilo.json'
+      - '.kilo/agents/**'
+      - 'setup-kilo.ps1'
+      - 'launch-kilo.ps1'
+      - 'tests/kilo-cli-no-python.ps1'
       - '.github/workflows/plugin-checks.yml'
   workflow_dispatch:
 
@@ -43,6 +53,11 @@ jobs:
       - name: Run Vitest suite with coverage
         working-directory: plugins/hexagon-runtime
         run: npx vitest run --coverage
+      - name: Validate Kilo config and agents natively (no Python)
+        run: node plugins/hexagon-runtime/dist/cli.js validate --workspace .
+      - name: Verify setup-kilo.ps1 and launch-kilo.ps1 without Python in PATH
+        shell: powershell
+        run: .\tests\kilo-cli-no-python.ps1
       - name: Check duplicate script parity (root vs plugin assets)
         shell: powershell
         run: |
