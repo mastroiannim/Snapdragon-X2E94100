@@ -212,6 +212,34 @@ public class HexagonCliFixture {
     Assert-True ($badChk.Code -eq 1 -and $badChk.Out -match 'loopback') 'launch-kilo.ps1 -CheckOnly non ha bloccato baseURL esterna'
     Write-Host 'PASS cli.js validate blocca configurazioni non loopback'
 
+    # 10. Auto-discovery cache senza Ornith-1.5 e differenziazione explore/ask in cli.js setup
+    $altWs = Join-Path $root 'alt-ws'
+    $altCache = Join-Path $root 'alt-cache'
+    [void][IO.Directory]::CreateDirectory((Join-Path $altWs 'plugins\hexagon-runtime'))
+    [void][IO.Directory]::CreateDirectory($altCache)
+    [IO.File]::WriteAllText((Join-Path $altCache 'Qwen3.8-27B-Q4_0.gguf'), 'GGUF')
+    [IO.File]::WriteAllText((Join-Path $altCache 'Spark-X2.5-4B-Q4_K_M.gguf'), 'GGUF')
+    $savedEnvPath = $env:PATH
+    $savedProf = $env:USERPROFILE
+    $savedLad = $env:LOCALAPPDATA
+    try {
+        $env:PATH = $cleanPath
+        $env:USERPROFILE = $profileDir
+        $env:LOCALAPPDATA = $appDataDir
+        $cliSetupOut = & $nodeCmd.Source (Join-Path $ws 'plugins\hexagon-runtime\dist\cli.js') setup --workspace $altWs --models-dir $altCache --ini (Join-Path $altWs 'missing.ini') --port ($port + 2) --host 127.0.0.1 2>&1 | ForEach-Object { "$_" }
+        Assert-True ($LASTEXITCODE -eq 0) "cli.js setup auto-discovery fallito: $($cliSetupOut -join '`n')"
+    } finally {
+        $env:PATH = $savedEnvPath
+        $env:USERPROFILE = $savedProf
+        $env:LOCALAPPDATA = $savedLad
+    }
+    $altCfg = Get-Content -LiteralPath (Join-Path $altWs 'kilo.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-True ($altCfg.model -eq 'hexagon/Qwen3.8-27B-Q4_0') "Atteso model auto-scoperto Qwen3.8-27B-Q4_0, ottenuto $($altCfg.model)"
+    Assert-True ($altCfg.small_model -eq 'hexagon/Spark-X2.5-4B-Q4_K_M') "Atteso small_model differenziato Spark-X2.5-4B-Q4_K_M, ottenuto $($altCfg.small_model)"
+    Assert-True ($altCfg.agent.explore.model -eq 'hexagon/Spark-X2.5-4B-Q4_K_M') "agent.explore.model non differenziato: $($altCfg.agent.explore.model)"
+    Assert-True ($altCfg.agent.ask.model -eq 'hexagon/Spark-X2.5-4B-Q4_K_M') "agent.ask.model non differenziato: $($altCfg.agent.ask.model)"
+    Write-Host 'PASS auto-discovery cache e differenziazione explore/ask'
+
     Write-Host 'NO_PYTHON_CLI_TESTS=PASS (setup-kilo.ps1, launch-kilo.ps1, cli.js senza Python nel PATH)'
 } finally {
     if ($listener) {

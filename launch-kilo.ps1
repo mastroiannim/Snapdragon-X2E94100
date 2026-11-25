@@ -41,8 +41,8 @@
 param(
     [int]$Port = 18803,
     [string]$BindHost = "127.0.0.1",
-    [string]$Model = "hexagon/Ornith-1.5-9B-Q4_0",
-    [string]$SmallModel = "hexagon/MiniCPM5-2B-Q4_K_M",
+    [string]$Model = "",
+    [string]$SmallModel = "",
     [string]$Agent = "",
     [string]$Message = "",
     [switch]$CheckOnly,
@@ -95,11 +95,19 @@ if (-not (Test-Path -LiteralPath $PluginCli -PathType Leaf)) {
 
 $BaseUrl = "http://${BindHost}:${Port}/v1"
 
+$setupArgs = @("setup", "--workspace", $ScriptDir, "--port", "$Port", "--host", $BindHost)
+if ($Model -ne "") {
+    $setupArgs += @("--main-model", ($Model -replace '^hexagon/', ''))
+}
+if ($SmallModel -ne "") {
+    $setupArgs += @("--small-model", ($SmallModel -replace '^hexagon/', ''))
+}
+
 # Generazione config isolata senza richiedere l'avvio automatico del router
 if ($GenerateConfigOnly) {
     Write-Host " * Endpoint Router:   $BaseUrl" -ForegroundColor Green
     Write-Host " * Sincronizzazione:  Aggiornamento kilo.json via plugin TS..." -ForegroundColor Gray
-    $setupRes = Invoke-CliCaptured $NodeCmd.Source @("setup", "--workspace", $ScriptDir, "--port", "$Port", "--host", $BindHost)
+    $setupRes = Invoke-CliCaptured $NodeCmd.Source $setupArgs
     if ($setupRes.Code -ne 0) {
         Write-Error "cli.js setup fallito (exit $($setupRes.Code)): $($setupRes.Text)"
         exit 1
@@ -187,10 +195,23 @@ if (-not $IsOnline) {
 # 3. Sincronizzazione o verifica sola lettura kilo.json + runtime (100% TypeScript via cli.js)
 if (-not $CheckOnly) {
     Write-Host " * Sincronizzazione:  Aggiornamento kilo.json via plugin TS..." -ForegroundColor Gray
-    $setupRes = Invoke-CliCaptured $NodeCmd.Source @("setup", "--workspace", $ScriptDir, "--port", "$Port", "--host", $BindHost)
+    $setupRes = Invoke-CliCaptured $NodeCmd.Source $setupArgs
     if ($setupRes.Code -ne 0) {
         Write-Warning "cli.js setup ha restituito codice $($setupRes.Code). Verifica kilo.json: $($setupRes.Text)"
     }
+}
+
+$KiloJsonPath = Join-Path $ScriptDir "kilo.json"
+if (($Model -eq "" -or $SmallModel -eq "") -and (Test-Path -LiteralPath $KiloJsonPath -PathType Leaf)) {
+    try {
+        $resolvedCfg = Get-Content -LiteralPath $KiloJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($Model -eq "" -and $resolvedCfg.model) {
+            $Model = [string]$resolvedCfg.model
+        }
+        if ($SmallModel -eq "" -and $resolvedCfg.small_model) {
+            $SmallModel = [string]$resolvedCfg.small_model
+        }
+    } catch { }
 }
 
 if ($CheckOnly) {
@@ -228,8 +249,8 @@ if ($CheckOnly) {
 
 # 4. Avvio di Kilo Code
 Write-Host "--------------------------------------------------------" -ForegroundColor DarkGray
-Write-Host " Modello Principale:  $Model" -ForegroundColor White
-Write-Host " Modello Ausiliario:  $SmallModel" -ForegroundColor White
+Write-Host " Modello Principale:  $(if ($Model -ne '') { $Model } else { '(auto da kilo.json)' })" -ForegroundColor White
+Write-Host " Modello Ausiliario:  $(if ($SmallModel -ne '') { $SmallModel } else { '(auto da kilo.json)' })" -ForegroundColor White
 if ($Agent) {
     Write-Host " Ruolo Agente:        $Agent" -ForegroundColor White
 }
@@ -242,7 +263,10 @@ if ($Pure) {
 
 if ($Message -ne "") {
     Write-Host "Esecuzione prompt singolo non interattivo..." -ForegroundColor Cyan
-    $runArgs = @("run", $Message, "-m", $Model)
+    $runArgs = @("run", $Message)
+    if ($Model -ne "") {
+        $runArgs += @("-m", $Model)
+    }
     if ($Agent) {
         $runArgs += @("--agent", $Agent)
     }
@@ -252,7 +276,10 @@ if ($Message -ne "") {
     & $KiloCmd.Source @runArgs
     exit $LASTEXITCODE
 } else {
-    $startArgs = @("-m", $Model)
+    $startArgs = @()
+    if ($Model -ne "") {
+        $startArgs += @("-m", $Model)
+    }
     if ($Agent) {
         $startArgs += @("--agent", $Agent)
     }

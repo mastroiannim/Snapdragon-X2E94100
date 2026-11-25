@@ -828,4 +828,89 @@ ctx-size = 32768
     expect(iniWritten).not.toContain("[already-in-ini-bad]");
     expect(iniWritten).not.toContain("[new-bad]");
   });
+
+  it("calculateOptimalConfig allinea IQ-Quants, IQ4_NL, MXFP4 e Type_36+ (TQ1_0/TQ2_0) con dev/ts/ctx sicuri", async () => {
+    const { calculateOptimalConfig } = await import("../src/discovery.js");
+    const baseMeta = {
+      architecture: "llama",
+      model_name: "Test",
+      context_length: 131_072,
+      embedding_length: 4096,
+      block_count: 32,
+      head_count: 32,
+      head_count_kv: 8,
+      expert_count: 0,
+      expert_used_count: 0,
+      sliding_window: 0,
+      file_type: 2,
+      file_size_bytes: 5e9,
+      size_gb: 5.0,
+      quant_name: "Q4_0",
+      is_moe: false,
+    };
+
+    const iq3 = calculateOptimalConfig({
+      ...baseMeta,
+      file_type: 20,
+      quant_name: "IQ-Quants",
+      size_gb: 4.2,
+    });
+    expect(iq3.device).toBe("GPUOpenCL");
+    expect(iq3.strategy).toContain("IQ-Quants");
+
+    const iq4nl = calculateOptimalConfig({
+      ...baseMeta,
+      file_type: 23,
+      quant_name: "IQ4_NL",
+      size_gb: 9.0,
+    });
+    expect(iq4nl.device).toBe("HTP0,GPUOpenCL");
+    expect(iq4nl.tensorSplit).toBe("75,25");
+    expect(iq4nl.contextSize).toBe(65_536);
+
+    const mxfp4MoE = calculateOptimalConfig({
+      ...baseMeta,
+      file_type: 38,
+      quant_name: "MXFP4",
+      is_moe: true,
+      expert_count: 32,
+      expert_used_count: 4,
+      size_gb: 11.5,
+    });
+    expect(mxfp4MoE.device).toBe("HTP0,GPUOpenCL");
+    expect(mxfp4MoE.tensorSplit).toBe("80,20");
+    expect(mxfp4MoE.strategy).toContain("MXFP4");
+
+    const tq1DenseMed = calculateOptimalConfig({
+      ...baseMeta,
+      file_type: 36,
+      quant_name: "TQ1_0",
+      size_gb: 8.5,
+    });
+    expect(tq1DenseMed.device).toBe("HTP0,GPUOpenCL");
+    expect(tq1DenseMed.tensorSplit).toBe("85,15");
+    expect(tq1DenseMed.contextSize).toBe(32_768);
+
+    const tq2DenseGiant = calculateOptimalConfig({
+      ...baseMeta,
+      file_type: 37,
+      quant_name: "TQ2_0",
+      size_gb: 16.0,
+    });
+    expect(tq2DenseGiant.device).toBe("HTP0");
+    expect(tq2DenseGiant.contextSize).toBe(32_768);
+
+    const type39MoEGiant = calculateOptimalConfig({
+      ...baseMeta,
+      file_type: 39,
+      quant_name: "Type_39",
+      is_moe: true,
+      expert_count: 64,
+      expert_used_count: 8,
+      size_gb: 18.0,
+    });
+    expect(type39MoEGiant.device).toBe("HTP0,GPUOpenCL");
+    expect(type39MoEGiant.tensorSplit).toBe("85,15");
+    expect(type39MoEGiant.contextSize).toBe(32_768);
+  });
 });

@@ -199,6 +199,42 @@ try {
     Assert-True ($count -eq 2) 'REST array was treated as one release'
     Pass 'REST JSON arrays are enumerated before release selection'
 
+    # Test GITHUB_TOKEN / GH_TOKEN opzionale e segnalazione rate-limit 403/429
+    $savedGitHubToken = $env:GITHUB_TOKEN
+    $savedGhToken = $env:GH_TOKEN
+    try {
+        $m = Import-Module $modulePath -Force -PassThru
+        & $m {
+            $script:CapturedHeaders = @()
+            function script:Invoke-RestMethod($Uri, $Headers, $TimeoutSec) {
+                $script:CapturedHeaders += [pscustomobject]@{ Uri = $Uri; Headers = $Headers }
+                if ($Uri -like '*rate-limit-403*') {
+                    $errObj = [pscustomobject]@{ Response = [pscustomobject]@{ StatusCode = 403 } }
+                    $ex = New-Object System.Exception 'Forbidden'
+                    $ex | Add-Member -NotePropertyName Response -NotePropertyValue $errObj.Response -Force
+                    throw $ex
+                }
+                return @{ ok = $true }
+            }
+        }
+        $env:GITHUB_TOKEN = '  tok-secret-123  '
+        $env:GH_TOKEN = ''
+        [void](& $m { Get-RuntimeJson 'https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=5' })
+        [void](& $m { Get-RuntimeJson 'https://example.com/other' })
+        $env:GITHUB_TOKEN = ''
+        $env:GH_TOKEN = 'gh-tok-fallback'
+        [void](& $m { Get-RuntimeJson 'https://api.github.com/repos/ggml-org/llama.cpp/commits/main' })
+        $captured = & $m { $script:CapturedHeaders }
+        Assert-True ($captured[0].Headers['Authorization'] -eq 'Bearer tok-secret-123') 'GITHUB_TOKEN Bearer header not attached on api.github.com'
+        Assert-True (-not $captured[1].Headers.ContainsKey('Authorization')) 'Bearer header leaked to non-GitHub URL'
+        Assert-True ($captured[2].Headers['Authorization'] -eq 'Bearer gh-tok-fallback') 'GH_TOKEN fallback header not attached'
+        Assert-Rejected { & $m { Get-RuntimeJson 'https://api.github.com/rate-limit-403' } } 'GITHUB_TOKEN'
+        Pass 'optional GITHUB_TOKEN/GH_TOKEN auth header scoping and 403/429 guidance'
+    } finally {
+        $env:GITHUB_TOKEN = $savedGitHubToken
+        $env:GH_TOKEN = $savedGhToken
+    }
+
     $m = Import-Module $modulePath -Force -PassThru
     & $m {
         function script:Get-RuntimeJson([string]$Url) {

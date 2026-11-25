@@ -114,8 +114,26 @@ function Test-FrontendRuntime($Frontend, [string]$Commit) {
 function Get-RuntimeJson([string]$Url) {
     # Invoke-RestMethod puo' emettere un array JSON come un solo oggetto di pipeline.
     # Assegna prima il risultato: il return della variabile ne enumera gli elementi.
-    $data = Invoke-RestMethod -Uri $Url -Headers @{ 'User-Agent' = 'Snapdragon-X2E94100'; Accept = 'application/vnd.github+json' } -TimeoutSec 30
-    return $data
+    $headers = @{ 'User-Agent' = 'Snapdragon-X2E94100'; Accept = 'application/vnd.github+json' }
+    # GITHUB_TOKEN opzionale: se presente e verso GitHub API, autentica le richieste
+    # per evitare il rate-limit anonimo di 60 req/h (autenticato: 5000 req/h).
+    $token = $env:GITHUB_TOKEN
+    if ([string]::IsNullOrWhiteSpace($token)) { $token = $env:GH_TOKEN }
+    if (-not [string]::IsNullOrWhiteSpace($token) -and $Url -match '^https://api\.github\.com/') {
+        $headers['Authorization'] = "Bearer $($token.Trim())"
+    }
+    try {
+        $data = Invoke-RestMethod -Uri $Url -Headers $headers -TimeoutSec 30
+        return $data
+    } catch {
+        if ($_.Exception.PSObject.Properties['Response'] -and $_.Exception.Response) {
+            $statusCode = [int]$_.Exception.Response.StatusCode
+            if ($statusCode -eq 403 -or $statusCode -eq 429) {
+                throw "Rate-limit GitHub API (HTTP $statusCode) su $Url. Impostare `$env:GITHUB_TOKEN per passare da 60 a 5000 req/h."
+            }
+        }
+        throw
+    }
 }
 
 function Get-TagCommit([string]$Tag) {

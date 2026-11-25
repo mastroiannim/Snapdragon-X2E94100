@@ -48,10 +48,12 @@ describe("collectStatus", () => {
     });
     expect(report.latencyMs).toBe(42);
     expect(report.loadedModels).toEqual(["Ornith-1.5-9B-Q4_0"]);
+    // 2 sonde HTTP: /health + /v1/models (telemetria warm-up/offload letta dai log)
     expect(calls.map((call) => call.url)).toEqual([
       "http://127.0.0.1:18803/health",
       "http://127.0.0.1:18803/v1/models",
     ]);
+    expect(report.warmUp).toBeUndefined();
     expect(report.error).toBeUndefined();
   });
 
@@ -112,6 +114,69 @@ describe("collectStatus", () => {
     const { fn: fetch, calls } = recordingFetch(() => fakeResponse(200));
     await collectStatus({ fetch, host: "127.0.0.2", port: 19000, now: () => 0 });
     expect(calls[0].url).toBe("http://127.0.0.2:19000/health");
+  });
+
+  it("runBenchmark integra sidecar .telemetry.json e fallback da stderr", async () => {
+    const { fn: exec } = recordingExec(() => okExec(""));
+    const readFile = vi.fn(async (p: string) => {
+      if (p === "/virtual/tmp/bench.md") return BENCH_MARKDOWN;
+      if (p === "/virtual/tmp/bench.md.telemetry.json") {
+        return JSON.stringify({
+          results: [
+            {
+              model: "Ornith-1.5-9B-Q4_0.gguf",
+              profile: "HTP0 (100% NPU)",
+              test: "pp512",
+              loadTimeMs: 1120,
+              warmUpMs: 1150,
+              offload: {
+                layersOffloaded: 36,
+                layersTotal: 36,
+                offloadPercent: 100,
+                layersByDevice: { HTP0: 36 },
+                modelBuffersMiB: { HTP0: 5100 },
+                kvBuffersMiB: { HTP0: 256 },
+                computeBuffersMiB: { HTP0: 64 },
+                cpuFallback: false,
+              },
+            },
+          ],
+        });
+      }
+      return "";
+    });
+    const report = await runBenchmark({
+      exec,
+      readFile,
+      workspaceDir: "/virtual/repo",
+      reportPath: "/virtual/tmp/bench.md",
+      exists: () => false,
+    });
+    expect(report.telemetryPath).toBe("/virtual/tmp/bench.md.telemetry.json");
+    expect(report.offload?.layersOffloaded).toBe(36);
+    expect(report.warmUpMs).toBe(1150);
+    expect(report.loadTimeMs).toBe(1120);
+    expect(report.results[0].offload?.layersByDevice).toEqual({ HTP0: 36 });
+
+    // Fallback da stderr di llama-bench senza sidecar JSON
+    const stderrReport = await runBenchmark({
+      exec: async () => ({
+        code: 0,
+        stdout: "",
+        stderr: [
+          "load_tensors: offloaded 24/24 layers to GPU",
+          "load_tensors: HTP0 model buffer size = 1800.00 MiB",
+          "llama_perf_context_print: load time = 620.50 ms",
+        ].join("\n"),
+      }),
+      readFile: async (p) => (p.endsWith(".md") ? BENCH_MARKDOWN : "{}"),
+      workspaceDir: "/virtual/repo",
+      reportPath: "/virtual/tmp/bench2.md",
+      exists: () => false,
+    });
+    expect(stderrReport.offload?.offloadPercent).toBe(100);
+    expect(stderrReport.warmUpMs).toBe(620.5);
+    expect(stderrReport.loadTimeMs).toBe(620.5);
   });
 });
 
@@ -689,10 +754,22 @@ describe("createHexagonTools", () => {
     expect(setupParsed.updated).toBe(true);
   });
 
-  it("hexagon_status include runtime checkRuntime quando fornito e gestisce errori", async () => {
+  it("hexagon_status include runtime checkRuntime quando fornito e espone offload reale e warm-up da log", async () => {
     const { deps } = makeDeps();
+    const serverLog = [
+      "ggml-hex: Hexagon Arch version v81, DMA64 enabled",
+      "srv loading model 'Ornith-1.5-9B-Q4_0'",
+      "load_tensors: offloaded 36/36 layers to GPU",
+      "load_tensors: HTP0 model buffer size = 5100.00 MiB",
+      "llama_perf_context_print: load time = 1350.00 ms",
+      "llama_perf_context_print: eval time = 1000.00 ms / 45 runs (22.22 ms per token, 45.00 tokens per second)",
+    ].join("\n");
     const tools = createHexagonTools({
       ...deps,
+      logPath: "/virtual/logs/llama-server.log",
+      logsDir: "/virtual/logs",
+      exists: async (p) => p === "/virtual/logs/llama-server.log",
+      readFile: async (p) => (p === "/virtual/logs/llama-server.log" ? serverLog : ""),
       checkRuntime: async () => ({
         geniexHash: "93cf736",
         llamaCommit: "93cf736",
@@ -705,6 +782,9 @@ describe("createHexagonTools", () => {
     const parsed = JSON.parse(await tools.hexagon_status.execute({}, undefined as never));
     expect(parsed.runtime.needsSync).toBe(true);
     expect(parsed.runtime.staleFiles).toEqual(["ggml-hexagon.dll"]);
+    expect(parsed.offload[0].offloadPercent).toBe(100);
+    expect(parsed.warmUp.htpWarmUpMs).toBe(1350);
+    expect(parsed.throughput.evalTokPerSec).toBe(45);
 
     const toolsErr = createHexagonTools({
       ...deps,

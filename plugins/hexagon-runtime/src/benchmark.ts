@@ -8,6 +8,7 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BUNDLED_BENCH_SCRIPT } from "./process.js";
+import { parseLlamaLogs, type RealOffloadTelemetry } from "./telemetry.js";
 import type { ExecFn, ReadFileFn } from "./types.js";
 
 export interface BenchRow {
@@ -23,6 +24,9 @@ export interface BenchRow {
   infraW: number | null;
   socW: number | null;
   sysW: number | null;
+  offload?: RealOffloadTelemetry;
+  warmUpMs?: number | null;
+  loadTimeMs?: number | null;
 }
 
 const POWER_FIELDS = [
@@ -85,6 +89,10 @@ export interface BenchReport {
   model: string;
   results: BenchRow[];
   reportPath: string;
+  telemetryPath?: string;
+  offload?: RealOffloadTelemetry;
+  warmUpMs?: number | null;
+  loadTimeMs?: number | null;
 }
 
 export interface BenchmarkOptions {
@@ -169,10 +177,92 @@ export async function runBenchmark(options: BenchmarkOptions): Promise<BenchRepo
       );
     }
     const markdown = await options.readFile(reportPath);
+    const results = parseBenchReport(markdown);
+    const telemetryPath = `${reportPath}.telemetry.json`;
+    let hasTelemetrySidecar = false;
+    let reportOffload: RealOffloadTelemetry | undefined;
+    let reportWarmUpMs: number | null | undefined;
+    let reportLoadTimeMs: number | null | undefined;
+
+    try {
+      const sidecarRaw = await options.readFile(telemetryPath);
+      if (sidecarRaw.trim()) {
+        const parsedSidecar = JSON.parse(sidecarRaw) as {
+          results?: Array<{
+            model?: string;
+            profile?: string;
+            test?: string;
+            warmUpMs?: number | null;
+            loadTimeMs?: number | null;
+            offload?: RealOffloadTelemetry | null;
+          }>;
+        };
+        if (Array.isArray(parsedSidecar?.results)) {
+          hasTelemetrySidecar = true;
+          for (const row of results) {
+            const match = parsedSidecar.results.find(
+              (entry) =>
+                entry.test === row.test &&
+                (!entry.profile || entry.profile === row.profile) &&
+                (!entry.model || entry.model === row.model),
+            );
+            if (!match) continue;
+            if (match.offload) {
+              row.offload = match.offload;
+              if (!reportOffload) reportOffload = match.offload;
+            }
+            if (match.warmUpMs !== undefined) {
+              row.warmUpMs = match.warmUpMs;
+              if (reportWarmUpMs === undefined || reportWarmUpMs === null) {
+                reportWarmUpMs = match.warmUpMs;
+              }
+            }
+            if (match.loadTimeMs !== undefined) {
+              row.loadTimeMs = match.loadTimeMs;
+              if (reportLoadTimeMs === undefined || reportLoadTimeMs === null) {
+                reportLoadTimeMs = match.loadTimeMs;
+              }
+            }
+          }
+          if (!reportOffload) {
+            const firstWithOffload = parsedSidecar.results.find((r) => Boolean(r.offload));
+            if (firstWithOffload?.offload) reportOffload = firstWithOffload.offload;
+          }
+          if (reportWarmUpMs === undefined || reportWarmUpMs === null) {
+            const firstWarm = parsedSidecar.results.find((r) => typeof r.warmUpMs === "number");
+            if (firstWarm) reportWarmUpMs = firstWarm.warmUpMs ?? null;
+          }
+          if (reportLoadTimeMs === undefined || reportLoadTimeMs === null) {
+            const firstLoad = parsedSidecar.results.find((r) => typeof r.loadTimeMs === "number");
+            if (firstLoad) reportLoadTimeMs = firstLoad.loadTimeMs ?? null;
+          }
+        }
+      }
+    } catch {
+      /* sidecar telemetria opzionale: assenza o file non valido ignorati */
+    }
+
+    if (!reportOffload && (result.stderr.trim() || result.stdout.trim())) {
+      const fromOutput = parseLlamaLogs(`${result.stderr}\n${result.stdout}`, "llama-bench");
+      if (fromOutput.offload) {
+        reportOffload = fromOutput.offload;
+      }
+      if (reportLoadTimeMs === undefined && fromOutput.warmUp.loadTimeMs !== null) {
+        reportLoadTimeMs = fromOutput.warmUp.loadTimeMs;
+      }
+      if (reportWarmUpMs === undefined && fromOutput.warmUp.htpWarmUpMs !== null) {
+        reportWarmUpMs = fromOutput.warmUp.htpWarmUpMs;
+      }
+    }
+
     return {
       model: options.model ?? "suite predefinita",
-      results: parseBenchReport(markdown),
+      results,
       reportPath,
+      ...(hasTelemetrySidecar ? { telemetryPath } : {}),
+      ...(reportOffload ? { offload: reportOffload } : {}),
+      ...(reportWarmUpMs !== undefined ? { warmUpMs: reportWarmUpMs } : {}),
+      ...(reportLoadTimeMs !== undefined ? { loadTimeMs: reportLoadTimeMs } : {}),
     };
   } finally {
     benchmarkInProgress = false;

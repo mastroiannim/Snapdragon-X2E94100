@@ -73,7 +73,12 @@ try {
         @{ FType = 7;  Expected = 'Q8_0' },
         @{ FType = 15; Expected = 'K-Quants' },
         @{ FType = 19; Expected = 'IQ-Quants' },
-        @{ FType = 32; Expected = 'BF16' }
+        @{ FType = 23; Expected = 'IQ-Quants' },
+        @{ FType = 32; Expected = 'BF16' },
+        @{ FType = 36; Expected = 'TQ1_0' },
+        @{ FType = 37; Expected = 'TQ2_0' },
+        @{ FType = 38; Expected = 'MXFP4' },
+        @{ FType = 39; Expected = 'Type_39' }
     )) {
         $fixture = Join-Path $tempRoot ("ftype-" + $case.FType + ".gguf")
         $bw = New-Object System.IO.BinaryWriter([System.IO.File]::Create($fixture))
@@ -237,7 +242,53 @@ try {
     $routerObj = ($routerOut -join "`n") | ConvertFrom-Json
     Assert-True (@($routerObj.models).Count -eq 1 -and $routerObj.models[0].alias -eq 'multimodal') 'Router preview should include only standalone valid LLM'
 
-    Write-Host 'GGUF_PARSER_TESTS=PASS (INT32/INT64, nested arrays, clip.vision.*, truncation, launcher integration)'
+    # 10. Allineamento euristiche IQ-Quants (GPUOpenCL) vs MXFP4 MoE vs TQ1_0
+    $heurDir = Join-Path $tempRoot 'heuristics-models'
+    [void][IO.Directory]::CreateDirectory($heurDir)
+
+    $iqFixture = Join-Path $heurDir 'test-iq3.gguf'
+    $bw = New-Object System.IO.BinaryWriter([System.IO.File]::Create($iqFixture))
+    try {
+        Write-GgufHeader $bw 4
+        Write-GgufKvString $bw 'general.architecture' 'llama'
+        Write-GgufKvUInt32 $bw 'llama.context_length' 131072
+        Write-GgufKvUInt32 $bw 'llama.block_count' 32
+        Write-GgufKvUInt32 $bw 'general.file_type' 20
+    } finally { $bw.Dispose() }
+
+    $mxfp4Fixture = Join-Path $heurDir 'test-mxfp4-moe.gguf'
+    $bw = New-Object System.IO.BinaryWriter([System.IO.File]::Create($mxfp4Fixture))
+    try {
+        Write-GgufHeader $bw 6
+        Write-GgufKvString $bw 'general.architecture' 'qwen3moe'
+        Write-GgufKvUInt32 $bw 'qwen3moe.context_length' 131072
+        Write-GgufKvUInt32 $bw 'qwen3moe.block_count' 32
+        Write-GgufKvUInt32 $bw 'qwen3moe.expert_count' 32
+        Write-GgufKvUInt32 $bw 'qwen3moe.expert_used_count' 4
+        Write-GgufKvUInt32 $bw 'general.file_type' 38
+    } finally { $bw.Dispose() }
+
+    $tq1Fixture = Join-Path $heurDir 'test-tq1.gguf'
+    $bw = New-Object System.IO.BinaryWriter([System.IO.File]::Create($tq1Fixture))
+    try {
+        Write-GgufHeader $bw 4
+        Write-GgufKvString $bw 'general.architecture' 'llama'
+        Write-GgufKvUInt32 $bw 'llama.context_length' 131072
+        Write-GgufKvUInt32 $bw 'llama.block_count' 32
+        Write-GgufKvUInt32 $bw 'general.file_type' 36
+    } finally { $bw.Dispose() }
+
+    $heurOut = & $shell -NoProfile -ExecutionPolicy Bypass -File $launchScript -ListOnly -Json -ModelsDir $heurDir
+    Assert-True ($LASTEXITCODE -eq 0) "launch-hexagon.ps1 -ListOnly -Json (heuristics) failed: $heurOut"
+    $heurObj = ($heurOut -join "`n") | ConvertFrom-Json
+    $iqRow = @($heurObj.models | Where-Object { $_.alias -eq 'test-iq3' })[0]
+    $mxRow = @($heurObj.models | Where-Object { $_.alias -eq 'test-mxfp4-moe' })[0]
+    $tqRow = @($heurObj.models | Where-Object { $_.alias -eq 'test-tq1' })[0]
+    Assert-True ($iqRow.device -eq 'GPUOpenCL') "Expected IQ-Quant device GPUOpenCL, got $($iqRow.device)"
+    Assert-True ($mxRow.device -eq 'HTP0,GPUOpenCL' -and $mxRow.tensor_split -eq '80,20') "Expected MXFP4 MoE HTP0,GPUOpenCL 80,20, got $($mxRow.device) $($mxRow.tensor_split)"
+    Assert-True ($tqRow.device -eq 'HTP0' -and $tqRow.quantization -eq 'TQ1_0') "Expected TQ1_0 device HTP0, got $($tqRow.device) quant=$($tqRow.quantization)"
+
+    Write-Host 'GGUF_PARSER_TESTS=PASS (INT32/INT64, nested arrays, clip.vision.*, Type_36+/MXFP4/IQ heuristics, truncation, launcher integration)'
 } finally {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

@@ -207,16 +207,32 @@ export function buildDirectArgs(
   return args;
 }
 
+/** Directory log locale (%LOCALAPPDATA%/Hexagon/logs). */
+export function defaultLogsDir(
+  localAppData: string = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"),
+): string {
+  return join(localAppData, "Hexagon", "logs");
+}
+
+/** Percorso predefinito del file di log di llama-server.exe. */
+export function defaultServerLogPath(
+  localAppData?: string,
+): string {
+  return join(defaultLogsDir(localAppData), "llama-server.log");
+}
+
 /** Ambiente FastRPC/Hexagon: ADSP_LIBRARY_PATH e' obbligatorio per la NPU. */
 export function serverEnv(
   runtimeDir: string,
   base: NodeJS.ProcessEnv = process.env,
+  logFile?: string,
 ): NodeJS.ProcessEnv {
   return {
     ...base,
     ADSP_LIBRARY_PATH: runtimeDir,
     GGML_HEXAGON_OPBATCH: "512",
     GGML_HEXAGON_VTCM_SIZE: "8M",
+    ...(logFile ? { LLAMA_ARG_LOG_FILE: logFile } : {}),
   };
 }
 
@@ -258,6 +274,7 @@ export interface EnsureServerOptions {
   port?: number;
   host?: string;
   modelsMax?: number;
+  logFile?: string;
 }
 
 export interface EnsureServerResult {
@@ -348,9 +365,12 @@ export async function ensureServer(
     );
   }
   const args = buildRouterArgs(options);
+  if (options.logFile) {
+    mkdirSync(dirname(options.logFile), { recursive: true });
+  }
   const child = options.spawn(options.serverExe, args, {
     cwd: options.runtimeDir,
-    env: serverEnv(options.runtimeDir),
+    env: serverEnv(options.runtimeDir, process.env, options.logFile),
     detached: true,
   });
   return {

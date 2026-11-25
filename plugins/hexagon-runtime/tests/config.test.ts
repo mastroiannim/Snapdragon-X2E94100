@@ -549,4 +549,139 @@ describe("installProviderConfig", () => {
       limit: { context: 131072, output: 16384 },
     });
   });
+
+  it("selectBestModels e installProviderConfig auto-scoprono dalla cache quando Ornith-1.5 è assente", async () => {
+    const { selectBestModels } = await import("../src/config.js");
+
+    expect(selectBestModels([])).toEqual({
+      mainModel: "default",
+      smallModel: "default",
+    });
+
+    const ranked = selectBestModels([
+      { id: "Qwen3.5-0.8B-WSP-Q4_0", sizeGb: 0.56, device: "HTP0", status: "certified", genTokPerSec: 90 },
+      { id: "Spark-X2.5-4B-Q4_K_M", sizeGb: 2.5, device: "HTP0", status: "untested" },
+      { id: "Qwen3.8-27B-Q4_0", sizeGb: 15.8, device: "HTP0,GPUOpenCL", status: "certified", genTokPerSec: 22 },
+    ]);
+    expect(ranked.mainModel).toBe("Qwen3.8-27B-Q4_0");
+    expect(ranked.smallModel).toBe("Qwen3.5-0.8B-WSP-Q4_0");
+
+    const rankedWith2B = selectBestModels([
+      { id: "Qwen3.5-0.8B-WSP-Q4_0", sizeGb: 0.56, device: "HTP0", status: "untested" },
+      { id: "Spark-X2.5-4B-Q4_K_M", sizeGb: 2.5, device: "HTP0", status: "certified", genTokPerSec: 35 },
+      { id: "Qwen3.8-27B-Q4_0", sizeGb: 15.8, device: "HTP0,GPUOpenCL", status: "certified", genTokPerSec: 22 },
+    ]);
+    expect(rankedWith2B.smallModel).toBe("Spark-X2.5-4B-Q4_K_M");
+
+    const target = join("/virtual-autodisc", "kilo.json");
+    const fs = createMemoryFs({
+      [target]: JSON.stringify({
+        model: "hexagon/Ornith-1.5-9B-Q4_0",
+        small_model: "hexagon/MiniCPM5-2B-Q4_K_M",
+        agent: { explore: { model: "hexagon/MiniCPM5-2B-Q4_K_M" } },
+      }),
+    });
+
+    const res = await installProviderConfig({
+      workspaceDir: "/virtual-autodisc",
+      iniPath: "/virtual-autodisc/missing.ini",
+      discoveredModels: [
+        {
+          id: "granite-4.2-8b-Q4_0",
+          fileName: "granite-4.2-8b-Q4_0.gguf",
+          filePath: "/cache/granite-4.2-8b-Q4_0.gguf",
+          sizeGb: 5.0,
+          status: "untested",
+          device: "HTP0",
+          contextWindow: 65_536,
+          strategy: "Dense",
+        },
+        {
+          id: "Qwen3.5-0.8B-WSP-Q4_0",
+          fileName: "Qwen3.5-0.8B-WSP-Q4_0.gguf",
+          filePath: "/cache/Qwen3.5-0.8B-WSP-Q4_0.gguf",
+          sizeGb: 0.6,
+          status: "certified",
+          device: "HTP0",
+          contextWindow: 65_536,
+          strategy: "Dense compatto",
+        },
+      ],
+      readFile: fs.readFile,
+      writeFile: fs.writeFile,
+      exists: fs.exists,
+      mkdir: fs.mkdir,
+    });
+
+    expect(res.mainModel).toBe("granite-4.2-8b-Q4_0");
+    expect(res.smallModel).toBe("Qwen3.5-0.8B-WSP-Q4_0");
+    const parsed = JSON.parse(fs.files.get(target)!);
+    expect(parsed.model).toBe("hexagon/granite-4.2-8b-Q4_0");
+    expect(parsed.small_model).toBe("hexagon/Qwen3.5-0.8B-WSP-Q4_0");
+    expect(parsed.agent.explore.model).toBe("hexagon/Qwen3.5-0.8B-WSP-Q4_0");
+    expect(parsed.agent.ask.model).toBe("hexagon/Qwen3.5-0.8B-WSP-Q4_0");
+
+    // Copre edge case ranking selectBestModels (MoE HTP0, >24GB, 2-4GB, tag 0b/assente, tie-break, liveModels)
+    const complexRanked = selectBestModels([
+      { id: "model-no-size", status: "untested" },
+      { id: "model-0b", sizeGb: undefined, status: "untested" },
+      { id: "moe-20b-htp", sizeGb: 12.0, device: "HTP0", isMoE: true, status: "untested", genTokPerSec: 8 },
+      { id: "giant-60b", sizeGb: 34.0, device: "HTP0,GPUOpenCL", status: "untested" },
+      { id: "tiny-alpha", sizeGb: 2.5, status: "untested" },
+      { id: "tiny-beta", sizeGb: 2.6, status: "untested" },
+      { id: "bad-incompat", sizeGb: 9.0, status: "incompatible" },
+    ]);
+    expect(complexRanked.mainModel).toBe("moe-20b-htp");
+    expect(complexRanked.smallModel).toBe("tiny-alpha");
+
+    // Tie-breaking deterministico con uguale score e size vicina + liveModels
+    const tieRanked = selectBestModels([
+      { id: "zeta-model", sizeGb: 8.0, device: "GPUOpenCL", status: "untested" },
+      { id: "alpha-model", sizeGb: 8.1, device: "GPUOpenCL", status: "untested" },
+    ]);
+    expect(tieRanked.mainModel).toBe("alpha-model");
+
+    const fsLive = createMemoryFs();
+    const liveRes = await installProviderConfig({
+      workspaceDir: "/virtual-live",
+      iniPath: "/virtual-live/missing.ini",
+      liveModels: ["CustomLive-14B-Q4_0", "incompat-model"],
+      registry: {
+        "incompat-model": {
+          modelId: "incompat-model",
+          status: "incompatible",
+          device: "HTP0",
+          contextWindow: 32_768,
+          timestamp: "2026-11-25T00:00:00Z",
+        },
+      },
+      discoveredModels: [
+        {
+          id: "skip-bad",
+          fileName: "skip-bad.gguf",
+          filePath: "/cache/skip-bad.gguf",
+          sizeGb: 5,
+          status: "incompatible",
+          device: "HTP0",
+          contextWindow: 32_768,
+          strategy: "bad",
+        },
+        {
+          id: "CustomLive-14B-Q4_0",
+          fileName: "CustomLive-14B-Q4_0.gguf",
+          filePath: "/cache/CustomLive-14B-Q4_0.gguf",
+          sizeGb: 8.5,
+          status: "untested",
+          device: "",
+          contextWindow: undefined as unknown as number,
+          strategy: "hybrid",
+        },
+      ],
+      readFile: fsLive.readFile,
+      writeFile: fsLive.writeFile,
+      exists: fsLive.exists,
+      mkdir: fsLive.mkdir,
+    });
+    expect(liveRes.mainModel).toBe("CustomLive-14B-Q4_0");
+  });
 });

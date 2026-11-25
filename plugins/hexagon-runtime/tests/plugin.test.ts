@@ -851,7 +851,9 @@ describe("hook config: provider hexagon dinamico", () => {
     );
     expect(provider?.models?.["flint-UD-Q4_K_XL"].limit.context).toBe(131072);
     expect(input.model).toBe("hexagon/Ornith-1.5-9B-Q4_0");
-    expect(input.small_model).toBe("hexagon/MiniCPM5-2B-Q4_K_M");
+    expect(input.small_model).toBe("hexagon/extra-model");
+    expect(input.agent?.explore?.model).toBe("hexagon/extra-model");
+    expect(input.agent?.ask?.model).toBe("hexagon/extra-model");
   });
 
   it("INI assente: catalogo testato comunque disponibile", async () => {
@@ -956,7 +958,37 @@ describe("hook config: provider hexagon dinamico", () => {
       name: "extra-model (HTP0,GPUOpenCL)",
       limit: { context: 131_072, output: 16_384 },
     });
-    expect(input.model).toBe("hexagon/MiniCPM5-2B-Q4_K_M");
+    expect(input.model).toBe("hexagon/extra-model");
+  });
+
+  it("auto-discovery da cache differenzia model, small_model e agenti explore/ask quando Ornith è assente", async () => {
+    const hooks = createHexagonHooks({
+      workspaceDir: "/virtual/repo",
+      modelsDir: "/virtual/cache/models",
+      iniPath: "/virtual/repo/missing.ini",
+      deps: {
+        exists: async (p) => p === "/virtual/cache/models",
+        listDir: async () => [
+          "Qwen3.8-27B-Q4_0.gguf",
+          "Spark-X2.5-4B-Q4_K_M.gguf",
+        ],
+        readFile: async () => "",
+      },
+    });
+    const input = {
+      model: "hexagon/Ornith-1.5-9B-Q4_0",
+      small_model: "hexagon/MiniCPM5-2B-Q4_K_M",
+      agent: {
+        explore: { model: "hexagon/MiniCPM5-2B-Q4_K_M" },
+        ask: { model: "hexagon/custom-ask" },
+      },
+    } as unknown as ConfigInput;
+    await hooks.config!(input);
+    expect(input.model).toBe("hexagon/Qwen3.8-27B-Q4_0");
+    expect(input.small_model).toBe("hexagon/Spark-X2.5-4B-Q4_K_M");
+    expect(input.agent?.explore?.model).toBe("hexagon/Spark-X2.5-4B-Q4_K_M");
+    expect(input.agent?.ask?.model).toBe("hexagon/custom-ask");
+    expect(input.provider?.hexagon?.models?.["Qwen3.8-27B-Q4_0"]).toBeDefined();
   });
 });
 

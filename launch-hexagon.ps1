@@ -110,7 +110,16 @@ function Get-HexagonOptimalConfig([GgufModelMeta]$meta) {
     $sizeGB = [Math]::Round($meta.FileSizeBytes / 1GB, 2)
     $isMoE = ($meta.ExpertCount -gt 0 -and $meta.ExpertUsedCount -gt 0)
     $hasSWA = ($meta.SlidingWindow -gt 0)
-    $isKQuant = ($meta.QuantName -eq "K-Quants")
+    $quantName = if ($meta.QuantName) { $meta.QuantName.Trim() } else { "" }
+    $fileType = [long]$meta.FileType
+    $blockCount = [long]$meta.BlockCount
+    $isKQuant = ($quantName -eq "K-Quants")
+    $isIQ4NL = ($fileType -eq 23 -or $quantName -match 'IQ4_NL')
+    $isIQQuant = ($quantName -eq "IQ-Quants" -or $quantName -match '^IQ\d' -or ($fileType -ge 19 -and $fileType -le 31 -and $fileType -ne 21))
+    $isMXFP4 = ($fileType -eq 38 -or $quantName -match 'MXFP4')
+    $isType36PlusOther = (-not $isMXFP4) -and ($fileType -ge 36 -or $quantName -match '^(?:TQ[12]_0|Type_(?:3[6-9]|[4-9]\d|\d{3,}))$')
+    $isSubByteCompact = ($isIQQuant -or $isMXFP4 -or $isType36PlusOther)
+    $quantLabel = if ($quantName) { $quantName } else { "Type_$fileType" }
 
     $dev = "HTP0"
     $ts = $null
@@ -119,7 +128,12 @@ function Get-HexagonOptimalConfig([GgufModelMeta]$meta) {
     $ctxReason = ""
 
     # Regola 1: Selezione Dispositivo e Split Vettoriale
-    if ($isMoE) {
+    if ($isIQQuant -and -not $isIQ4NL) {
+        # ggml-opencl.dll implementa kernel nativi IQ1..IQ4; libggml-htp-v81.so supporta solo IQ4_NL
+        $dev = "GPUOpenCL"
+        $ts = $null
+        $strategy = "IQ-Quants ($quantLabel): 100% GPUOpenCL -- kernel IQ nativi su Adreno senza fallback CPU HTP0"
+    } elseif ($isMoE) {
         if ($sizeGB -le 13.5) {
             # es. LFM2.5 24B (12.65 GB, 4 attivi su 64):
             # Pure HTP0 fa 44.5 t/s, Hybrid 80/20 fa 46.0 t/s aprendo il canale crossbar della GPU
@@ -130,6 +144,10 @@ function Get-HexagonOptimalConfig([GgufModelMeta]$meta) {
                 $dev = "HTP0"
                 $ts = $null
                 $strategy = "MoE Leggero lfm2moe (LFM2.5): 100% HTP0; l'ibrido GPU va in crash (0xC0000005) su questa architettura"
+            } elseif ($isMXFP4) {
+                $dev = "HTP0,GPUOpenCL"
+                $ts = "80,20"
+                $strategy = "MoE Leggero ${quantLabel}: Ibrido HTP0 (80%) + GPU (20%) con kernel MXFP4 nativi su NPU e Adreno"
             } else {
                 $dev = "HTP0,GPUOpenCL"
                 $ts = "80,20"
@@ -137,16 +155,23 @@ function Get-HexagonOptimalConfig([GgufModelMeta]$meta) {
             }
         } else {
             # es. Flint Preview (23.3 GB) o Qwen 35B MoE (19.4 GB)
-            if ($isKQuant) {
-                # Kernel OpenCL Adreno lenti su K-Quants: concentrare 85% su HTP0
+            if ($isKQuant -or $isType36PlusOther) {
                 $dev = "HTP0,GPUOpenCL"
                 $ts = "85,15"
-                $strategy = "MoE Gigante K-Quants (Flint): Ibrido HTP0 (85%) + GPU (15%) per preservare SIMD NPU"
+                if ($isType36PlusOther) {
+                    $strategy = "MoE Gigante ${quantLabel}: Ibrido HTP0 (85%) + GPU (15%) per preservare SIMD NPU e limitare fallback OpenCL"
+                } else {
+                    $strategy = "MoE Gigante K-Quants (Flint): Ibrido HTP0 (85%) + GPU (15%) per preservare SIMD NPU"
+                }
             } else {
-                # Q4_0 MoE (Qwen 35B MoE): split 50/50 evita picchi CPU a 41W e dimezza il consumo (88W -> 64W)
+                # Q4_0 / MXFP4 / IQ4_NL MoE: split 50/50 con kernel nativi su NPU HTP0 e Adreno GPUOpenCL
                 $dev = "HTP0,GPUOpenCL"
                 $ts = "50,50"
-                $strategy = "MoE Gigante Q4_0: Ibrido 50/50 per azzerare il fallback CPU e quintuplicare il prefill (152 t/s)"
+                if ($isMXFP4 -or $isIQ4NL) {
+                    $strategy = "MoE Gigante ${quantLabel}: Ibrido 50/50 con kernel nativi su NPU HTP0 e GPUOpenCL"
+                } else {
+                    $strategy = "MoE Gigante Q4_0: Ibrido 50/50 per azzerare il fallback CPU e quintuplicare il prefill (152 t/s)"
+                }
             }
         }
     } else {
@@ -155,38 +180,80 @@ function Get-HexagonOptimalConfig([GgufModelMeta]$meta) {
             # es. Qwen 0.8B (0.5 GB), Spark 4B (2.4 GB), Ornith 9B (5.1 GB)
             $dev = "HTP0"
             $ts = $null
-            $strategy = "Dense Compatto (<=6GB): 100% NPU HTP0 (prefill 750-3800 t/s, consumo 14-18W)"
+            if ($isSubByteCompact) {
+                $strategy = "Dense Compatto ${quantLabel} (<=6GB): 100% NPU HTP0"
+            } else {
+                $strategy = "Dense Compatto (<=6GB): 100% NPU HTP0 (prefill 750-3800 t/s, consumo 14-18W)"
+            }
         } elseif ($sizeGB -le 13.5) {
-            # es. Qwen 14B (7.9 GB): Pure HTP0 crolla a 2.9 t/s su contesti lunghi per saturazione bus DMA!
-            # Hybrid 75/25 scarica l'attention sulla GPU e raddoppia i canali fisici LPDDR5X
-            $dev = "HTP0,GPUOpenCL"
-            $ts = "75,25"
-            $strategy = "Dense Medio (Qwen 14B): Ibrido HTP0 (75%) + GPU (25%) per sbloccare la saturazione DMA a contesti lunghi"
+            if ($isType36PlusOther) {
+                $dev = "HTP0,GPUOpenCL"
+                $ts = "85,15"
+                $strategy = "Dense Medio ${quantLabel}: Ibrido HTP0 (85%) + GPU (15%) per bilanciare buffer sub-byte"
+            } else {
+                # es. Qwen 14B (7.9 GB): Pure HTP0 crolla a 2.9 t/s su contesti lunghi per saturazione bus DMA!
+                # Hybrid 75/25 scarica l'attention sulla GPU e raddoppia i canali fisici LPDDR5X
+                $dev = "HTP0,GPUOpenCL"
+                $ts = "75,25"
+                if ($isMXFP4 -or $isIQ4NL) {
+                    $strategy = "Dense Medio ${quantLabel}: Ibrido HTP0 (75%) + GPU (25%) con kernel nativi"
+                } else {
+                    $strategy = "Dense Medio (Qwen 14B): Ibrido HTP0 (75%) + GPU (25%) per sbloccare la saturazione DMA a contesti lunghi"
+                }
+            }
         } else {
             # es. Qwen 27B (15.2 GB): Oltre 15 GB FastRPC NPU collassa in fallback CPU
-            if ($isKQuant) {
-                # K-Quants mantengono output.weight in BF16/FP16 (2.4 GB): supererebbe il limite OpenCL Adreno di 2 GiB (CL_INVALID_BUFFER_SIZE)
+            if ($isKQuant -or $isType36PlusOther) {
+                # K-Quants e Type_36+ non-MXFP4 mantengono output.weight in BF16/FP16 (>2 GiB OpenCL buffer limit)
                 $dev = "HTP0"
                 $ts = $null
-                $strategy = "Dense Enorme K-Quants (>15GB): 100% NPU HTP0 (evita overflow buffer OpenCL 2GB per output.weight BF16)"
+                if ($isType36PlusOther) {
+                    $strategy = "Dense Enorme ${quantLabel} (>13.5GB): 100% NPU HTP0 (evita overflow buffer OpenCL 2GB)"
+                } else {
+                    $strategy = "Dense Enorme K-Quants (>15GB): 100% NPU HTP0 (evita overflow buffer OpenCL 2GB per output.weight BF16)"
+                }
             } else {
                 $dev = "HTP0,GPUOpenCL"
                 $ts = "50,50"
-                $strategy = "Dense Enorme (>15GB): Ibrido 50/50 per prevenire overflow FastRPC e throttling termico"
+                if ($isMXFP4 -or $isIQ4NL) {
+                    $strategy = "Dense Enorme ${quantLabel}: Ibrido 50/50 per prevenire overflow FastRPC"
+                } else {
+                    $strategy = "Dense Enorme (>15GB): Ibrido 50/50 per prevenire overflow FastRPC e throttling termico"
+                }
             }
         }
     }
 
-    # Regola 2: Limite Buffer FastRPC (1 GiB) e Dimensione Contesto (-c)
+    # Regola 2: Limite Buffer FastRPC (1 GiB), OpenCL (2 GiB) e Dimensione Contesto (-c)
     # Il driver Qualcomm qcnspmcdm8480.sys rifiuta singoli descrittori >= 1 GiB (1.073.741.824 byte) con errore 0x200.
     if ($hasSWA) {
-        # Sliding Window Attention (es. Flint a 513 token): la cache attiva e' minuscola, 131k e' sicuro
-        $ctx = [Math]::Min(131072, $meta.ContextLength)
-        if ($ctx -eq 0) { $ctx = 131072 }
-        $ctxReason = "Sliding Window attivo (window: $($meta.SlidingWindow)): 131k token sicuro e leggerissimo in RAM"
+        if ($isType36PlusOther) {
+            $ctx = [Math]::Min(65536, $meta.ContextLength)
+            if ($ctx -eq 0) { $ctx = 65536 }
+            $ctxReason = "Sliding Window ($($meta.SlidingWindow)) su ${quantLabel}: 64k conservativo"
+        } else {
+            # Sliding Window Attention (es. Flint a 513 token): la cache attiva e' minuscola, 131k e' sicuro
+            $ctx = [Math]::Min(131072, $meta.ContextLength)
+            if ($ctx -eq 0) { $ctx = 131072 }
+            $ctxReason = "Sliding Window attivo (window: $($meta.SlidingWindow)): 131k token sicuro e leggerissimo in RAM"
+        }
     } elseif ($isMoE) {
+        if ($isType36PlusOther -and $sizeGB -gt 13.5) {
+            $ctx = 32768
+            $ctxReason = "MoE >13.5GB ${quantLabel}: limitato a 32k per pressione buffer/repack"
+        } else {
+            $ctx = 65536
+            $ctxReason = "MoE: 64k token ottimale (KV Cache nativa f16 senza collo di bottiglia)"
+        }
+    } elseif ($isSubByteCompact -and $sizeGB -gt 13.5) {
+        $ctx = 32768
+        $ctxReason = "Dense >13.5GB ${quantLabel}: limitato a 32k per buffer KV/output sotto 1-2 GiB"
+    } elseif ($isType36PlusOther -and $sizeGB -ge 4.5) {
+        $ctx = 32768
+        $ctxReason = "Dense >=4.5GB ${quantLabel}: limitato a 32k per alta densita' layer/FastRPC"
+    } elseif ($isSubByteCompact -and ($sizeGB -ge 4.5 -or $blockCount -ge 40)) {
         $ctx = 65536
-        $ctxReason = "MoE: 64k token ottimale (KV Cache nativa f16 senza collo di bottiglia)"
+        $ctxReason = "Dense sub-byte >=4.5GB (${quantLabel}): limitato a 64k per KV cache/FastRPC"
     } elseif ($sizeGB -ge 7.0) {
         # Dense 14B/27B: 128k sfora il limite di 1 GiB sul buffer FastRPC (1026 MB -> crash). 64k consuma 513 MB -> perfetto
         $ctx = 65536
@@ -411,6 +478,11 @@ if ($Mode -eq "Router") {
         exit 0
     }
 
+    $logBase = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE "AppData\Local" } else { [IO.Path]::GetTempPath() }
+    $serverLogDir = Join-Path $logBase "Hexagon\logs"
+    [void][IO.Directory]::CreateDirectory($serverLogDir)
+    $env:LLAMA_ARG_LOG_FILE = Join-Path $serverLogDir "llama-server.log"
+
     Write-Host "Avvio llama-server.exe ROUTER su porta $Port con $modelCount modelli..." -ForegroundColor Green
     Write-Host "Endpoint OpenAI compatibile: http://127.0.0.1:$Port/v1" -ForegroundColor Cyan
     Write-Host "I modelli vengono caricati on-demand alla prima richiesta.`n" -ForegroundColor Cyan
@@ -555,6 +627,11 @@ if ($DryRun) {
     Write-Host "& `"$ServerExe`" $($cliArgs -join ' ')" -ForegroundColor White
     exit 0
 }
+
+$logBase = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE "AppData\Local" } else { [IO.Path]::GetTempPath() }
+$serverLogDir = Join-Path $logBase "Hexagon\logs"
+[void][IO.Directory]::CreateDirectory($serverLogDir)
+$env:LLAMA_ARG_LOG_FILE = Join-Path $serverLogDir "llama-server.log"
 
 Write-Host "Avvio llama-server.exe su porta $Port..." -ForegroundColor Green
 Write-Host "Endpoint OpenAI compatibile per Cline: http://127.0.0.1:$Port/v1`n" -ForegroundColor Cyan

@@ -336,4 +336,60 @@ describe("qualifyModel", () => {
     expect(nonErrResult.status).toBe("incompatible");
     expect(nonErrResult.error).toBe("string-failure");
   });
+
+  it("propaga offload reale per-layer e htpWarmUpMs dal sidecar .telemetry.json", async () => {
+    const storage = new Map<string, string>();
+    const { fn: exec } = recordingExec(() => okExec(""));
+    const readFile = vi.fn(async (p: string) => {
+      if (p.endsWith(".md")) return BENCH_REPORT;
+      if (p.endsWith(".telemetry.json")) {
+        return JSON.stringify({
+          results: [
+            {
+              model: "test.gguf",
+              profile: "HTP0",
+              test: "tg128",
+              loadTimeMs: 1450,
+              warmUpMs: 1480,
+              offload: {
+                layersOffloaded: 32,
+                layersTotal: 32,
+                offloadPercent: 100,
+                layersByDevice: { HTP0: 32 },
+                modelBuffersMiB: { HTP0: 4200 },
+                kvBuffersMiB: { HTP0: 200 },
+                computeBuffersMiB: { HTP0: 48 },
+                cpuFallback: false,
+                htpArch: "v81",
+                dma64: true,
+              },
+            },
+          ],
+        });
+      }
+      return storage.get(p) ?? "{}";
+    });
+    const result = await qualifyModel({
+      model,
+      workspaceDir: "/virtual/ws",
+      exec,
+      readFile,
+      writeFile: async (p, c) => {
+        storage.set(p, c);
+      },
+      exists: async () => true,
+      mkdir: async () => {},
+      registryPath: "/virtual/registry.json",
+    });
+
+    expect(result.status).toBe("certified");
+    expect(result.metrics?.prefillTokPerSec).toBe(850.5);
+    expect(result.metrics?.genTokPerSec).toBe(45.0);
+    expect(result.metrics?.layersOffloaded).toBe(32);
+    expect(result.metrics?.layersTotal).toBe(32);
+    expect(result.metrics?.offloadPercent).toBe(100);
+    expect(result.metrics?.htpWarmUpMs).toBe(1480);
+    expect(result.metrics?.loadTimeMs).toBe(1450);
+    expect(result.metrics?.offload?.htpArch).toBe("v81");
+  });
 });

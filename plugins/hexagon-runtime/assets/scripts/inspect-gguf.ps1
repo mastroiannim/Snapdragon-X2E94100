@@ -259,6 +259,9 @@ public class GgufModelMeta {
             case 19: case 20: case 22: case 23: case 24: case 25: case 26: case 27: case 28: case 29: case 30: case 31:
                 m.QuantName = "IQ-Quants"; break;
             case 32: m.QuantName = "BF16"; break;
+            case 36: m.QuantName = "TQ1_0"; break;
+            case 37: m.QuantName = "TQ2_0"; break;
+            case 38: m.QuantName = "MXFP4"; break;
             default: m.QuantName = "Type_" + m.FileType; break;
         }
         return m;

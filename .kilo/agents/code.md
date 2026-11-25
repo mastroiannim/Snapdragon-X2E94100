@@ -2,7 +2,7 @@
 name: code
 description: Primary autonomous coding agent for Hexagon Local Coding Agent
 mode: primary
-model: hexagon/Ornith-1.5-9B-Q4_0
+# model is resolved dynamically from kilo.json "model" (best available in cache)
 permission:
   read: allow
   edit: ask

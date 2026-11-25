@@ -10,12 +10,21 @@ import { dirname, join } from "node:path";
 import { type DiscoveredModel } from "./discovery.js";
 import { BUNDLED_BENCH_SCRIPT } from "./process.js";
 import { runBenchmark, type BenchReport } from "./benchmark.js";
+import type { RealOffloadTelemetry } from "./telemetry.js";
 import type { ExecFn, ExistsFn, MkdirFn, ReadFileFn, WriteFileFn } from "./types.js";
 
 export interface BenchmarkMetrics {
   prefillTokPerSec: number;
   genTokPerSec: number;
   device: string;
+  tensorSplit?: string;
+  layersOffloaded?: number;
+  layersTotal?: number;
+  offloadPercent?: number;
+  warmUpMs?: number;
+  htpWarmUpMs?: number;
+  loadTimeMs?: number;
+  offload?: RealOffloadTelemetry;
   npuWatts?: number;
   gpuWatts?: number;
   socWatts?: number;
@@ -190,10 +199,21 @@ export async function qualifyModel(options: QualifyOptions): Promise<Qualificati
       );
     }
 
+    const offload = tgRow?.offload ?? ppRow?.offload ?? report.offload;
+    const rawWarmUpMs = tgRow?.warmUpMs ?? ppRow?.warmUpMs ?? report.warmUpMs;
+    const rawLoadTimeMs = tgRow?.loadTimeMs ?? ppRow?.loadTimeMs ?? report.loadTimeMs;
+
     const metrics: BenchmarkMetrics = {
       prefillTokPerSec: ppRow ? ppRow.tokPerSec : 0,
       genTokPerSec: tgRow ? tgRow.tokPerSec : 0,
       device: model.device,
+      ...(model.tensorSplit ? { tensorSplit: model.tensorSplit } : {}),
+      ...(offload?.layersOffloaded !== undefined ? { layersOffloaded: offload.layersOffloaded } : {}),
+      ...(offload?.layersTotal !== undefined ? { layersTotal: offload.layersTotal } : {}),
+      ...(offload?.offloadPercent !== undefined ? { offloadPercent: offload.offloadPercent } : {}),
+      ...(typeof rawWarmUpMs === "number" ? { warmUpMs: rawWarmUpMs, htpWarmUpMs: rawWarmUpMs } : {}),
+      ...(typeof rawLoadTimeMs === "number" ? { loadTimeMs: rawLoadTimeMs } : {}),
+      ...(offload ? { offload } : {}),
       npuWatts: ppRow?.npuW ?? tgRow?.npuW ?? undefined,
       gpuWatts: ppRow?.gpuW ?? tgRow?.gpuW ?? undefined,
       socWatts: ppRow?.socW ?? tgRow?.socW ?? undefined,

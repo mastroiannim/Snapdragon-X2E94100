@@ -18,11 +18,26 @@
 import type { Hooks, Plugin } from "@kilocode/plugin";
 import { runBootstrapCycle, type BootstrapCycleResult } from "./bootstrap.js";
 import { probeHealth, waitForHealth, type HealthResult } from "./health.js";
-import { buildHexagonProvider } from "./config.js";
-import { isLocalModel, LOCAL_PROVIDER_ID } from "./models.js";
+import {
+  buildCandidatePool,
+  buildHexagonProvider,
+  RECOMMENDED_MAIN_MODEL,
+  RECOMMENDED_SMALL_MODEL,
+  resolveConfiguredModelRef,
+  selectBestModels,
+  type ModelCandidateInfo,
+} from "./config.js";
+import { scanModels, type DiscoveredModel } from "./discovery.js";
+import {
+  isLocalModel,
+  LOCAL_PROVIDER_ID,
+  TESTED_CONTEXT_WINDOWS,
+} from "./models.js";
 import { nodeDeps } from "./os.js";
 import {
+  defaultLogsDir,
   defaultPaths,
+  defaultServerLogPath,
   ensureServer,
   parseModelsIni,
   type EnsureIniResult,
@@ -164,6 +179,7 @@ export function createHexagonHooks(options: HookOptions): Hooks {
       serverExe: paths.serverExe,
       iniPath,
       modelsDir,
+      logFile: defaultServerLogPath(),
     });
     await waitForHealth({ fetch: deps.fetch, sleep: deps.sleep, now: deps.now });
   };
@@ -271,7 +287,22 @@ export function createHexagonHooks(options: HookOptions): Hooks {
     if (await deps.exists(registryPath)) {
       registry = await loadRegistry(registryPath, { readFile: deps.readFile });
     }
-    const provider = buildHexagonProvider(ini, { registry });
+    const canScanModelsDir = Boolean(options.deps?.listDir) || !options.deps;
+    let discoveredModels: DiscoveredModel[] | undefined;
+    if (canScanModelsDir && (await deps.exists(modelsDir).catch(() => false))) {
+      discoveredModels = await scanModels({
+        modelsDir,
+        registry,
+        deps: {
+          listDir: deps.listDir,
+          exists: deps.exists,
+          exec: deps.exec,
+          readFile: deps.readFile,
+        },
+        skipInspection: true,
+      }).catch(() => undefined);
+    }
+    const provider = buildHexagonProvider(ini, { discoveredModels, registry });
     const existing = input.provider?.[LOCAL_PROVIDER_ID];
     const mergedModels = { ...existing?.models, ...provider.models };
     if (registry) {
@@ -293,15 +324,61 @@ export function createHexagonHooks(options: HookOptions): Hooks {
         models: mergedModels,
       },
     };
-    const availableIds = Object.keys(mergedModels);
-    const defaultMain = mergedModels["Ornith-1.5-9B-Q4_0"]
-      ? "Ornith-1.5-9B-Q4_0"
-      : availableIds[0];
-    const defaultSmall = mergedModels["MiniCPM5-2B-Q4_K_M"]
-      ? "MiniCPM5-2B-Q4_K_M"
-      : defaultMain;
-    if (!input.model && defaultMain) input.model = `${LOCAL_PROVIDER_ID}/${defaultMain}`;
-    if (!input.small_model && defaultSmall) input.small_model = `${LOCAL_PROVIDER_ID}/${defaultSmall}`;
+
+    const { candidateMap, hasRealDiscovery } = buildCandidatePool({
+      discoveredModels,
+      ini,
+      extraIds: Object.keys(existing?.models ?? {}),
+      registry,
+      testedIds: TESTED_CONTEXT_WINDOWS,
+    });
+    const selectionPool: ModelCandidateInfo[] = hasRealDiscovery
+      ? [...candidateMap.values()]
+      : Object.keys(mergedModels).map((id) => ({
+          id,
+          device: registry?.[id]?.device,
+          status:
+            registry?.[id]?.status === "certified" || id in TESTED_CONTEXT_WINDOWS
+              ? "certified"
+              : "untested",
+        }));
+
+    if (selectionPool.length > 0) {
+      const selected = selectBestModels(selectionPool);
+      input.model = resolveConfiguredModelRef({
+        existingValue: input.model,
+        discoveredId: selected.mainModel,
+        legacyDefaultId: RECOMMENDED_MAIN_MODEL,
+        hasRealDiscovery,
+        candidateMap,
+      });
+      input.small_model = resolveConfiguredModelRef({
+        existingValue: input.small_model,
+        discoveredId: selected.smallModel,
+        legacyDefaultId: RECOMMENDED_SMALL_MODEL,
+        hasRealDiscovery,
+        candidateMap,
+      });
+      const resolveAgent = (current?: string) =>
+        resolveConfiguredModelRef({
+          existingValue: current,
+          discoveredId: selected.smallModel,
+          legacyDefaultId: RECOMMENDED_SMALL_MODEL,
+          hasRealDiscovery,
+          candidateMap,
+        });
+      input.agent = {
+        ...input.agent,
+        explore: {
+          ...input.agent?.explore,
+          model: resolveAgent(input.agent?.explore?.model),
+        },
+        ask: {
+          ...input.agent?.ask,
+          model: resolveAgent(input.agent?.ask?.model),
+        },
+      };
+    }
   };
 
   const chatParams: NonNullable<Hooks["chat.params"]> = async (input, output) => {
@@ -330,6 +407,8 @@ export function createHexagonHooks(options: HookOptions): Hooks {
       iniPath,
       registryPath: options.registryPath,
       configDir: options.configDir,
+      logPath: defaultServerLogPath(),
+      logsDir: defaultLogsDir(),
       workspaceDir: paths.workspaceDir,
       sync: ({ force, stopServer } = {}) =>
         ensureRuntime({

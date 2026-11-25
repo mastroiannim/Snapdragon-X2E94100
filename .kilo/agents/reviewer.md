@@ -2,7 +2,7 @@
 name: reviewer
 description: Read-only code review and diff inspection subagent
 mode: subagent
-model: hexagon/Ornith-1.5-9B-Q4_0
+# model is resolved dynamically from kilo.json "model" (best available in cache)
 permission:
   read: allow
   edit: deny

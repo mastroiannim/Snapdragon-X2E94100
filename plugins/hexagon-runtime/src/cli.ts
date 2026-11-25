@@ -4,18 +4,24 @@
  *
  * Sostituisce integralmente stack_manager.py e kilo_config.py (zero dipendenze Python).
  * Uso:
- *   node dist/cli.js setup [--workspace [dir]] [--global] [--port 18803] [--host 127.0.0.1] [--json]
+ *   node dist/cli.js setup [--workspace [dir]] [--global] [--port 18803] [--host 127.0.0.1] [--models-dir dir] [--ini path] [--main-model id] [--small-model id] [--json]
  *   node dist/cli.js sync [--workspace [dir]] [--port 18803] [--host 127.0.0.1]
  *   node dist/cli.js status [--check-runtime] [--port 18803] [--host 127.0.0.1] [--workspace [dir]]
  *   node dist/cli.js validate [--workspace [dir]] [--config path] [--json]
  */
 import { join, resolve } from "node:path";
 import { installProviderConfig } from "./config.js";
-import { syncDiscoveredModelsToIni } from "./discovery.js";
+import {
+  scanModels,
+  syncDiscoveredModelsToIni,
+  type DiscoveredModel,
+} from "./discovery.js";
 import { collectStatus } from "./health.js";
 import { nodeDeps } from "./os.js";
 import {
+  defaultLogsDir,
   defaultPaths,
+  defaultServerLogPath,
   getLoadedModels,
   reloadServerIfStale,
   ROUTER_HOST,
@@ -31,6 +37,8 @@ interface ParsedFlags {
   isGlobal: boolean;
   port?: number;
   host?: string;
+  modelsDir?: string;
+  iniPath?: string;
   mainModel?: string;
   smallModel?: string;
   configPath?: string;
@@ -83,6 +91,12 @@ function parseFlags(args: string[]): ParsedFlags {
         throw new Error("Opzione --host non puo' essere vuota.");
       }
       i++;
+    } else if (arg === "--models-dir") {
+      parsed.modelsDir = resolve(readFlagValue(args, i, "--models-dir"));
+      i++;
+    } else if (arg === "--ini") {
+      parsed.iniPath = resolve(readFlagValue(args, i, "--ini"));
+      i++;
     } else if (arg === "--main-model") {
       parsed.mainModel = readFlagValue(args, i, "--main-model");
       i++;
@@ -114,19 +128,38 @@ async function main(): Promise<void> {
   const port = flags.port ?? ROUTER_PORT;
 
   if (command === "setup") {
+    const paths = defaultPaths(activeWorkspace);
+    const modelsDir = flags.modelsDir ?? paths.modelsDir;
+    const iniPath = flags.iniPath ?? paths.iniPath;
+    const registryPath = defaultRegistryPath();
+
     const liveModels = await getLoadedModels({
       fetch: nodeDeps.fetch,
       host,
       port,
       timeoutMs: 1_500,
     });
+
+    let discoveredModels: DiscoveredModel[] | undefined;
+    if (await nodeDeps.exists(modelsDir).catch(() => false)) {
+      discoveredModels = await scanModels({
+        modelsDir,
+        registryPath,
+        deps: nodeDeps,
+        skipInspection: true,
+      }).catch(() => undefined);
+    }
+
     const result = await installProviderConfig({
       workspaceDir,
+      iniPath,
+      registryPath,
       host: flags.host,
       port: flags.port,
       mainModel: flags.mainModel,
       smallModel: flags.smallModel,
       liveModels,
+      discoveredModels,
     });
     if (flags.json) {
       console.log(JSON.stringify(result, null, 2));
@@ -136,6 +169,11 @@ async function main(): Promise<void> {
       `[hexagon-plugin] Provider Hexagon configurato in: ${result.targetPath} (${workspaceDir ? "workspace" : "globale"}, endpoint http://${host}:${port}/v1)`,
     );
     console.log(`[hexagon-plugin] Modelli registrati: ${result.modelCount}`);
+    if (result.mainModel || result.smallModel) {
+      console.log(
+        `[hexagon-plugin] Preset attivi: model=${result.mainModel ?? "N/D"}, small_model=${result.smallModel ?? "N/D"} (explore/ask)`,
+      );
+    }
     return;
   }
 
@@ -177,7 +215,16 @@ async function main(): Promise<void> {
   }
 
   if (command === "status") {
-    const status = await collectStatus({ fetch: nodeDeps.fetch, host, port });
+    const status = await collectStatus({
+      fetch: nodeDeps.fetch,
+      host,
+      port,
+      logPath: defaultServerLogPath(),
+      logsDir: defaultLogsDir(),
+      readFile: nodeDeps.readFile,
+      exists: nodeDeps.exists,
+      listDir: nodeDeps.listDir,
+    });
     if (flags.checkRuntime) {
       const paths = defaultPaths(activeWorkspace);
       status.runtime = await inspectRuntimeStatus(

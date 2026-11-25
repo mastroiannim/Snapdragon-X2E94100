@@ -923,4 +923,35 @@ device = HTP0
     expect(emptyIni.reloaded).toBe(false);
     expect(emptyIni.reason).toContain("Nessun modello configurato");
   });
+
+  it("defaultLogsDir, defaultServerLogPath e serverEnv impostano LLAMA_ARG_LOG_FILE", async () => {
+    const {
+      defaultLogsDir,
+      defaultServerLogPath,
+      ensureServer,
+      serverEnv,
+    } = await import("../src/process.js");
+    const logsDir = defaultLogsDir("C:/Users/demo/AppData/Local");
+    expect(logsDir).toContain("Hexagon");
+    expect(defaultServerLogPath("C:/Users/demo/AppData/Local")).toContain("llama-server.log");
+
+    const env = serverEnv("C:/bin", {}, "C:/logs/llama-server.log");
+    expect(env.LLAMA_ARG_LOG_FILE).toBe("C:/logs/llama-server.log");
+    expect(env.ADSP_LIBRARY_PATH).toBe("C:/bin");
+
+    const { fn: spawn, calls: spawnCalls } = recordingSpawn(1234);
+    const res = await ensureServer({
+      fetch: async () => {
+        throw new Error("offline");
+      },
+      spawn,
+      runtimeDir: "/virtual/bin",
+      serverExe: "/virtual/bin/llama-server.exe",
+      iniPath: "/virtual/ini/hexagon-models.ini",
+      modelsDir: "/virtual/models",
+      logFile: "",
+    });
+    expect(res.started).toBe(true);
+    expect(spawnCalls[0].options?.env?.LLAMA_ARG_LOG_FILE).toBeUndefined();
+  });
 });

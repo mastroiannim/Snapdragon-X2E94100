@@ -21,10 +21,12 @@ import { installProviderConfig } from "./config.js";
 import { scanModels } from "./discovery.js";
 import { nodeExists, nodeListDir, nodeNow, nodeSpawn } from "./os.js";
 import {
+  defaultLogsDir,
   defaultPaths,
+  defaultServerLogPath,
   restartServer,
 } from "./process.js";
-import { collectStatus, type StatusOptions, type StatusReport } from "./health.js";
+import { collectStatus, type StatusOptions, type StatusReport, type OffloadInfo, type WarmUpInfo } from "./health.js";
 import { qualifyModel } from "./qualify.js";
 import type { RuntimeCheck, SyncOutcome } from "./sync.js";
 import type {
@@ -51,8 +53,10 @@ export {
   type BenchmarkOptions,
   type BenchReport,
   type BenchRow,
+  type OffloadInfo,
   type StatusOptions,
   type StatusReport,
+  type WarmUpInfo,
 };
 
 export interface HexagonToolDeps {
@@ -70,6 +74,8 @@ export interface HexagonToolDeps {
   iniPath?: string;
   registryPath?: string;
   configDir?: string;
+  logPath?: string;
+  logsDir?: string;
   workspaceDir: string;
   sync: (options: { force?: boolean; stopServer?: boolean }) => Promise<SyncOutcome>;
   checkRuntime?: () => Promise<RuntimeCheck>;
@@ -81,12 +87,22 @@ export function createHexagonTools(deps: HexagonToolDeps) {
     hexagon_status: tool({
       description:
         "Stato del runtime Hexagon locale (Snapdragon X2 Elite): router llama-server " +
-        "su 127.0.0.1:18803, latenza /health, modelli caricati e allineamento binario " +
-        "GenieX (commit e SHA-256 DLL). Se runtime.needsSync e' true, chiama direttamente " +
+        "su 127.0.0.1:18803, latenza /health, modelli caricati, offload reale per-modello " +
+        "(device, tensor-split, layer offloaded), tempi di warm-up HTP separati dal throughput " +
+        "e allineamento binario GenieX (commit e SHA-256 DLL). " +
+        "Se runtime.needsSync e' true, chiama direttamente " +
         "hexagon_sync senza eseguire comandi shell manuali.",
       args: {},
       async execute() {
-        const status = await collectStatus({ fetch: deps.fetch, now: deps.now });
+        const status = await collectStatus({
+          fetch: deps.fetch,
+          now: deps.now,
+          logPath: deps.logPath ?? defaultServerLogPath(),
+          logsDir: deps.logsDir ?? defaultLogsDir(),
+          readFile: deps.readFile,
+          exists: deps.exists,
+          listDir: deps.listDir,
+        });
         if (deps.checkRuntime) {
           status.runtime = await deps.checkRuntime().catch((error: unknown) => ({
             error: error instanceof Error ? error.message : String(error),
@@ -165,6 +181,7 @@ export function createHexagonTools(deps: HexagonToolDeps) {
           serverExe: paths.serverExe,
           iniPath: deps.iniPath ?? paths.iniPath,
           modelsDir: deps.modelsDir ?? paths.modelsDir,
+          logFile: deps.logPath ?? defaultServerLogPath(),
         });
         return JSON.stringify(res, null, 2);
       },
@@ -242,7 +259,9 @@ export function createHexagonTools(deps: HexagonToolDeps) {
     }),
     hexagon_qualify: tool({
       description:
-        "Esegue il Qualification Gate hardware (benchmark e calibrazione) su un modello locale per promuoverlo a CERTIFIED.",
+        "Esegue il Qualification Gate hardware (benchmark e calibrazione) su un modello locale " +
+        "per promuoverlo a CERTIFIED. L'output include offload reale (device, layer offloaded/totali, " +
+        "tensor-split), tempi di warm-up HTP separati dal throughput steady-state, e metriche PMIC.",
       args: {
         model: tool.schema
           .string()

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { probeHealth, waitForHealth } from "../src/health.js";
+import { collectStatus, probeHealth, waitForHealth } from "../src/health.js";
 import { fakeResponse, recordingFetch } from "./helpers.js";
 
 function fakeClock() {
@@ -179,5 +179,93 @@ describe("probeHealth", () => {
     const { fn: fetch, calls } = recordingFetch(() => fakeResponse(200));
     await probeHealth({ fetch, url: "http://127.0.0.1:19999/health" });
     expect(calls[0].url).toBe("http://127.0.0.1:19999/health");
+  });
+});
+
+describe("collectStatus — offload reale e warm-up HTP da log", () => {
+  it("waitForHealth espone warmUpMs quando servono più tentativi (503 -> 200)", async () => {
+    let attempt = 0;
+    const { fn: fetch } = recordingFetch(() => {
+      attempt += 1;
+      return attempt < 2 ? fakeResponse(503) : fakeResponse(200);
+    });
+    const clock = fakeClock();
+    const res = await waitForHealth({ fetch, sleep: clock.sleep, now: clock.now });
+    expect(res.warmUpMs).toBe(1000);
+  });
+
+  it("legge llama-server.log e fallback *_stderr.txt senza chiamare probe extra", async () => {
+    const serverLog = [
+      "ggml-hex: Hexagon Arch version v81, DMA64 enabled",
+      "srv loading model 'Qwen3.8-27B-Q4_0'",
+      "load_tensors: offloaded 64/64 layers to GPU",
+      "load_tensors: HTP0 model buffer size = 14000.00 MiB",
+      "load_tensors: CPU model buffer size = 200.00 MiB",
+      "llama_perf_context_print: load time = 2100.00 ms",
+      "llama_perf_context_print: prompt eval time = 500.00 ms / 512 tokens (0.98 ms per token, 1024.00 tokens per second)",
+      "llama_perf_context_print: eval time = 1000.00 ms / 25 runs (40.00 ms per token, 25.00 tokens per second)",
+    ].join("\n");
+    const benchLog = [
+      "load_tensors: layer 0 assigned to device HTP0",
+      "load_tensors: offloaded 24/24 layers to GPU",
+      "llama_perf_context_print: load time = 450.00 ms",
+    ].join("\n");
+
+    const { fn: fetch, calls } = recordingFetch((call) =>
+      call.url.endsWith("/v1/models")
+        ? fakeResponse(200, { data: [{ id: "Qwen3.8-27B-Q4_0" }] })
+        : fakeResponse(200),
+    );
+    const status = await collectStatus({
+      fetch,
+      now: () => 100,
+      logPath: "/virtual/logs/llama-server.log",
+      logsDir: "/virtual/logs",
+      exists: async (p) => p === "/virtual/logs/llama-server.log" || p === "/virtual/logs",
+      listDir: async () => ["run1_stderr.txt", "run1_stdout.json"],
+      readFile: async (p) => {
+        if (p.endsWith("llama-server.log")) return serverLog;
+        if (p.endsWith("run1_stderr.txt")) return benchLog;
+        throw new Error("ENOENT");
+      },
+    });
+    expect(calls).toHaveLength(2);
+    expect(status.offload?.[0].modelId).toBe("Qwen3.8-27B-Q4_0");
+    expect(status.warmUp?.htpWarmUpMs).toBe(2100);
+    expect(status.throughput).toEqual({
+      promptEvalTokPerSec: 1024,
+      evalTokPerSec: 25,
+    });
+
+    // Offline ma con soli log anonimi bench fallback
+    const { fn: downFetch } = recordingFetch(() => {
+      throw new Error("ECONNREFUSED");
+    });
+    const offlineStatus = await collectStatus({
+      fetch: downFetch,
+      logPath: "/virtual/logs/missing.log",
+      logsDir: "/virtual/logs",
+      exists: async (p) => p === "/virtual/logs",
+      listDir: async () => ["run1_stderr.txt", "broken_stderr.txt"],
+      readFile: async (p) => {
+        if (p.endsWith("run1_stderr.txt")) return benchLog;
+        throw new Error("unreadable");
+      },
+    });
+    expect(offlineStatus.router.active).toBe(false);
+    expect(offlineStatus.offload?.[0].layersOffloaded).toBe(24);
+    expect(offlineStatus.warmUp?.loadTimeMs).toBe(450);
+
+    // Gestisce listDir che lancia errore in modo sicuro
+    const safeEmpty = await collectStatus({
+      fetch,
+      logsDir: "/virtual/broken-logs",
+      exists: async () => true,
+      listDir: async () => {
+        throw new Error("EACCES");
+      },
+      readFile: async () => "",
+    });
+    expect(safeEmpty.offload).toBeUndefined();
   });
 });

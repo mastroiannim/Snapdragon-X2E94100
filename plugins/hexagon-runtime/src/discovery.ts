@@ -135,7 +135,20 @@ export function calculateOptimalConfig(meta: GgufMetadata): OptimalConfig {
   const isMoE = expertCount > 0 && expertUsed > 0;
   const slidingWindow = typeof meta.sliding_window === "number" ? meta.sliding_window : 0;
   const hasSwa = slidingWindow > 0;
-  const isKQuant = meta.quant_name === "K-Quants";
+  const quantName = (meta.quant_name ?? "").trim();
+  const fileType = typeof meta.file_type === "number" ? meta.file_type : 0;
+  const blockCount = typeof meta.block_count === "number" ? meta.block_count : 0;
+  const isKQuant = quantName === "K-Quants";
+  const isIQ4NL = fileType === 23 || /IQ4_NL/i.test(quantName);
+  const isIQQuant =
+    quantName === "IQ-Quants" ||
+    /^IQ\d/i.test(quantName) ||
+    (fileType >= 19 && fileType <= 31 && fileType !== 21);
+  const isMXFP4 = fileType === 38 || /MXFP4/i.test(quantName);
+  const isType36PlusOther =
+    !isMXFP4 &&
+    (fileType >= 36 || /^(?:TQ[12]_0|Type_(?:3[6-9]|[4-9]\d|\d{3,}))$/i.test(quantName));
+  const isSubByteCompact = isIQQuant || isMXFP4 || isType36PlusOther;
   const archLower = meta.architecture.toLowerCase();
   const metaCtxLen =
     typeof meta.context_length === "number" &&
@@ -151,60 +164,106 @@ export function calculateOptimalConfig(meta: GgufMetadata): OptimalConfig {
   let contextReason = "";
 
   // Regola 1: Selezione Dispositivo e Split Vettoriale
-  if (isMoE) {
+  if (isIQQuant && !isIQ4NL) {
+    // ggml-opencl.dll implementa kernel nativi IQ1..IQ4; libggml-htp-v81.so supporta solo IQ4_NL
+    device = "GPUOpenCL";
+    strategy =
+      `IQ-Quants (${quantName || `ftype ${fileType}`}): 100% GPUOpenCL — kernel IQ nativi su Adreno senza fallback CPU HTP0`;
+  } else if (isMoE) {
     if (sizeGb <= 13.5) {
       if (archLower === "lfm2moe") {
         // L'ibrido HTP0+GPUOpenCL va in access violation (0xC0000005) su lfm2moe
         device = "HTP0";
         strategy =
           "MoE Leggero lfm2moe (LFM2.5): 100% HTP0; l'ibrido GPU va in crash (0xC0000005) su questa architettura";
+      } else if (isMXFP4) {
+        device = "HTP0,GPUOpenCL";
+        tensorSplit = "80,20";
+        strategy =
+          `MoE Leggero ${quantName || "MXFP4"}: Ibrido HTP0 (80%) + GPU (20%) con kernel MXFP4 nativi su NPU e Adreno`;
       } else {
         device = "HTP0,GPUOpenCL";
         tensorSplit = "80,20";
         strategy =
           "MoE Leggero (LFM/A2B): Ibrido HTP0 (80%) + GPU (20%) per doppio canale di banda RAM (~46 t/s)";
       }
-    } else if (isKQuant) {
+    } else if (isKQuant || isType36PlusOther) {
       device = "HTP0,GPUOpenCL";
       tensorSplit = "85,15";
-      strategy =
-        "MoE Gigante K-Quants (Flint): Ibrido HTP0 (85%) + GPU (15%) per preservare SIMD NPU";
+      strategy = isType36PlusOther
+        ? `MoE Gigante ${quantName || `Type_${fileType}`}: Ibrido HTP0 (85%) + GPU (15%) per preservare SIMD NPU e limitare fallback OpenCL`
+        : "MoE Gigante K-Quants (Flint): Ibrido HTP0 (85%) + GPU (15%) per preservare SIMD NPU";
     } else {
       device = "HTP0,GPUOpenCL";
       tensorSplit = "50,50";
-      strategy =
-        "MoE Gigante Q4_0: Ibrido 50/50 per azzerare il fallback CPU e quintuplicare il prefill (152 t/s)";
+      strategy = isMXFP4 || isIQ4NL
+        ? `MoE Gigante ${quantName || (isMXFP4 ? "MXFP4" : "IQ4_NL")}: Ibrido 50/50 con kernel nativi su NPU HTP0 e GPUOpenCL`
+        : "MoE Gigante Q4_0: Ibrido 50/50 per azzerare il fallback CPU e quintuplicare il prefill (152 t/s)";
     }
   } else {
     // Modelli Densi (Full Self-Attention)
     if (sizeGb <= 6.0) {
       device = "HTP0";
-      strategy = "Dense Compatto (<=6GB): 100% NPU HTP0 (prefill 750-3800 t/s, consumo 14-18W)";
+      strategy = isSubByteCompact
+        ? `Dense Compatto ${quantName || `Type_${fileType}`} (<=6GB): 100% NPU HTP0`
+        : "Dense Compatto (<=6GB): 100% NPU HTP0 (prefill 750-3800 t/s, consumo 14-18W)";
     } else if (sizeGb <= 13.5) {
-      device = "HTP0,GPUOpenCL";
-      tensorSplit = "75,25";
-      strategy =
-        "Dense Medio (Qwen 14B): Ibrido HTP0 (75%) + GPU (25%) per sbloccare la saturazione DMA a contesti lunghi";
-    } else if (isKQuant) {
-      // K-Quants mantengono output.weight in BF16/FP16 (>2 GiB OpenCL buffer limit)
+      if (isType36PlusOther) {
+        device = "HTP0,GPUOpenCL";
+        tensorSplit = "85,15";
+        strategy =
+          `Dense Medio ${quantName || `Type_${fileType}`}: Ibrido HTP0 (85%) + GPU (15%) per bilanciare buffer sub-byte`;
+      } else {
+        device = "HTP0,GPUOpenCL";
+        tensorSplit = "75,25";
+        strategy = isMXFP4 || isIQ4NL
+          ? `Dense Medio ${quantName || (isMXFP4 ? "MXFP4" : "IQ4_NL")}: Ibrido HTP0 (75%) + GPU (25%) con kernel nativi`
+          : "Dense Medio (Qwen 14B): Ibrido HTP0 (75%) + GPU (25%) per sbloccare la saturazione DMA a contesti lunghi";
+      }
+    } else if (isKQuant || isType36PlusOther) {
+      // K-Quants e Type_36+ non-MXFP4 mantengono output.weight in BF16/FP16 (>2 GiB OpenCL buffer limit)
       device = "HTP0";
-      strategy =
-        "Dense Enorme K-Quants (>15GB): 100% NPU HTP0 (evita overflow buffer OpenCL 2GB per output.weight BF16)";
+      strategy = isType36PlusOther
+        ? `Dense Enorme ${quantName || `Type_${fileType}`} (>13.5GB): 100% NPU HTP0 (evita overflow buffer OpenCL 2GB)`
+        : "Dense Enorme K-Quants (>15GB): 100% NPU HTP0 (evita overflow buffer OpenCL 2GB per output.weight BF16)";
     } else {
       device = "HTP0,GPUOpenCL";
       tensorSplit = "50,50";
-      strategy =
-        "Dense Enorme (>15GB): Ibrido 50/50 per prevenire overflow FastRPC e throttling termico";
+      strategy = isMXFP4 || isIQ4NL
+        ? `Dense Enorme ${quantName || (isMXFP4 ? "MXFP4" : "IQ4_NL")}: Ibrido 50/50 per prevenire overflow FastRPC`
+        : "Dense Enorme (>15GB): Ibrido 50/50 per prevenire overflow FastRPC e throttling termico";
     }
   }
 
-  // Regola 2: Limite Buffer FastRPC (1 GiB) e Dimensione Contesto (-c)
+  // Regola 2: Limite Buffer FastRPC (1 GiB), OpenCL (2 GiB) e Dimensione Contesto (-c)
   if (hasSwa) {
-    contextSize = metaCtxLen > 0 ? Math.min(131_072, metaCtxLen) : 131_072;
-    contextReason = `Sliding Window attivo (window: ${slidingWindow}): 131k token sicuro e leggerissimo in RAM`;
+    if (isType36PlusOther) {
+      contextSize = metaCtxLen > 0 ? Math.min(65_536, metaCtxLen) : 65_536;
+      contextReason = `Sliding Window (${slidingWindow}) su ${quantName || `Type_${fileType}`}: 64k conservativo`;
+    } else {
+      contextSize = metaCtxLen > 0 ? Math.min(131_072, metaCtxLen) : 131_072;
+      contextReason = `Sliding Window attivo (window: ${slidingWindow}): 131k token sicuro e leggerissimo in RAM`;
+    }
   } else if (isMoE) {
+    if (isType36PlusOther && sizeGb > 13.5) {
+      contextSize = 32_768;
+      contextReason = `MoE >13.5GB ${quantName || `Type_${fileType}`}: limitato a 32k per pressione buffer/repack`;
+    } else {
+      contextSize = 65_536;
+      contextReason = "MoE: 64k token ottimale (KV Cache nativa f16 senza collo di bottiglia)";
+    }
+  } else if (isSubByteCompact && sizeGb > 13.5) {
+    contextSize = 32_768;
+    contextReason =
+      `Dense >13.5GB ${quantName || `Type_${fileType}`}: limitato a 32k per buffer KV/output sotto 1-2 GiB`;
+  } else if (isType36PlusOther && sizeGb >= 4.5) {
+    contextSize = 32_768;
+    contextReason =
+      `Dense >=4.5GB ${quantName || `Type_${fileType}`}: limitato a 32k per alta densita' layer/FastRPC`;
+  } else if (isSubByteCompact && (sizeGb >= 4.5 || blockCount >= 40)) {
     contextSize = 65_536;
-    contextReason = "MoE: 64k token ottimale (KV Cache nativa f16 senza collo di bottiglia)";
+    contextReason =
+      `Dense sub-byte >=4.5GB (${quantName || `Type_${fileType}`}): limitato a 64k per KV cache/FastRPC`;
   } else if (sizeGb >= 7.0) {
     contextSize = 65_536;
     contextReason =

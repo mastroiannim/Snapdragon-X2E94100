@@ -16,6 +16,7 @@ import {
 } from "./discovery.js";
 import { waitForHealth, type HealthResult } from "./health.js";
 import {
+  defaultServerLogPath,
   ensureModelsIni,
   ensureServer,
   reloadServerIfStale,
@@ -68,6 +69,7 @@ export interface BootstrapCycleOptions {
   iniPath: string;
   registryPath?: string;
   configDir?: string;
+  logFile?: string;
   host?: string;
   port?: number;
   forceSync?: boolean;
@@ -176,6 +178,7 @@ export async function runBootstrapCycle(
         modelsDir: options.modelsDir,
         host,
         port,
+        logFile: options.logFile ?? defaultServerLogPath(),
       }).catch(() => {});
     }
     throw err;
@@ -237,6 +240,7 @@ export async function runBootstrapCycle(
       modelsDir: options.modelsDir,
       host,
       port,
+      logFile: options.logFile ?? defaultServerLogPath(),
     });
     server = options.ignoreServerErrors
       ? await startPromise.catch((err) => ({
@@ -271,6 +275,7 @@ export async function runBootstrapCycle(
       modelsDir: options.modelsDir,
       host,
       port,
+      logFile: options.logFile ?? defaultServerLogPath(),
     });
     reload = options.ignoreServerErrors
       ? await reloadPromise.catch((err) => ({

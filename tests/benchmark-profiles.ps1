@@ -102,7 +102,15 @@ try {
         $rows = @($result)
         if ($script:multipleResults) { $rows = @($result, $result, $result, $result) }
         ConvertTo-Json -InputObject $rows | Set-Content -LiteralPath $RedirectStandardOutput
-        Set-Content -LiteralPath $RedirectStandardError -Value ''
+        $mockStderr = @(
+            'ggml-hex: Hexagon Arch version v81, DMA64 enabled',
+            'load_tensors: layer 0 assigned to device HTP0',
+            'load_tensors: offloaded 24/24 layers to GPU',
+            'load_tensors: HTP0 model buffer size = 1200.00 MiB',
+            'llama_kv_cache: HTP0 KV buffer size = 128.00 MiB',
+            'llama_perf_context_print: load time = 842.50 ms'
+        ) -join "`r`n"
+        Set-Content -LiteralPath $RedirectStandardError -Value $mockStderr
         $process = [pscustomobject]@{ HasExited = $true; ExitCode = 0 }
         $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {}
         return $process
@@ -112,6 +120,7 @@ try {
     $logDir = Join-Path $testRoot 'logs'
     . $source -BinPath $testRoot -ModelsDir $testRoot -Models 'fixture.gguf' -Repetitions 1 -ReportPath $report -LogDir $logDir
     Assert-True ($script:benchCalls.Count -eq 10) 'Expected prefill and decode for each of five profiles'
+    Assert-True ($script:benchCalls[0] -match '(?:^|\s)-v(?:\s|$)') 'llama-bench call missing verbose flag -v for offload telemetry'
     $table = @(Get-Content -LiteralPath $report | Where-Object { $_.StartsWith('|') })
     Assert-True ($table.Count -eq 12) 'Report lost results'
     foreach ($line in $table) {
@@ -120,12 +129,19 @@ try {
     $reportText = Get-Content -LiteralPath $report -Raw
     Assert-True ($reportText.Contains('`fixture.gguf`') -and $reportText.Contains('`pp512`') -and $reportText.Contains('`tg128`')) 'Report prints PowerShell expressions instead of values'
     Assert-True ($reportText.Contains('N/D') -and -not $reportText.Contains('| J/tok')) 'Missing PMIC misrepresented'
+    $telemetryPath = "$report.telemetry.json"
+    Assert-True (Test-Path -LiteralPath $telemetryPath) 'Missing sidecar telemetry JSON report'
+    $telemetryJson = Get-Content -LiteralPath $telemetryPath -Raw | ConvertFrom-Json
+    Assert-True (@($telemetryJson.results).Count -eq 10) 'Sidecar telemetry results count mismatch'
+    Assert-True ($telemetryJson.results[0].loadTimeMs -eq 842.5 -and $telemetryJson.results[0].warmUpMs -eq 842.5) 'Warm-up time missing from sidecar telemetry'
+    Assert-True ($telemetryJson.results[0].offload.layersOffloaded -eq 24 -and $telemetryJson.results[0].offload.offloadPercent -eq 100) 'Offload layer telemetry missing from sidecar'
 
     # A successful process returning several variants must not publish a misleading report.
     $script:multipleResults = $true
     $rejectedReport = Join-Path $testRoot 'rejected.md'
     . $source -BinPath $testRoot -ModelsDir $testRoot -Models 'fixture.gguf' -Repetitions 1 -ReportPath $rejectedReport -LogDir $logDir
     Assert-True (-not (Test-Path -LiteralPath $rejectedReport)) 'Rejected JSON was published'
+    Assert-True (-not (Test-Path -LiteralPath "$rejectedReport.telemetry.json")) 'Rejected telemetry JSON was published'
 
     # Specific -Device and -TensorSplit must execute ONLY that single profile.
     $script:multipleResults = $false

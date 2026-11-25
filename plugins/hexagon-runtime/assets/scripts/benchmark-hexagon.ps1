@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$BinPath = (Join-Path $env:USERPROFILE "llama-cpp\llama-bin-win-cpu-arm64"),
     [string]$ModelsDir = (Join-Path $env:USERPROFILE ".cache\geniex\models"),
     [string[]]$Models = @(
@@ -105,6 +105,124 @@ function Get-ValidatedBenchResult {
     return $row
 }
 
+function Normalize-BackendLabel([string]$Raw) {
+    $clean = $Raw.Trim()
+    $upper = $clean.ToUpperInvariant()
+    if ($upper.StartsWith("HTP")) { return $upper }
+    if ($upper -eq "OPENCL" -or $upper -eq "GPUOPENCL") { return "GPUOpenCL" }
+    if ($upper.StartsWith("CPU")) { return "CPU" }
+    return $clean
+}
+
+function Parse-LlamaBenchStderr([string]$StderrText, [double]$BenchWallMs, $EvalTotalMs, [string]$SourceName) {
+    $layersByDevice = [ordered]@{}
+    $seenLayers = New-Object 'System.Collections.Generic.HashSet[int]'
+    $modelBuffers = [ordered]@{}
+    $kvBuffers = [ordered]@{}
+    $computeBuffers = [ordered]@{}
+    $layersOffloaded = $null
+    $layersTotal = $null
+    $htpArch = $null
+    $dma64 = $null
+    $loadTimeMs = $null
+
+    foreach ($line in ($StderrText -split "\r?\n")) {
+        $t = $line.Trim()
+        if (-not $t) { continue }
+
+        if ($t -match 'Hexagon backend.*?arch=([A-Za-z0-9._-]+)') {
+            $htpArch = $Matches[1]
+            $dma64 = ($t -match 'dma64=1')
+        }
+        if ($t -match 'layer\s+(\d+)\s+assigned to device\s+([A-Za-z0-9_-]+)') {
+            $idx = [int]$Matches[1]
+            if ($seenLayers.Add($idx)) {
+                $dev = Normalize-BackendLabel $Matches[2]
+                $prev = if ($layersByDevice.Contains($dev)) { [int]$layersByDevice[$dev] } else { 0 }
+                $layersByDevice[$dev] = $prev + 1
+            }
+            continue
+        }
+        if ($t -match 'load_tensors:\s+offloaded\s+(\d+)/(\d+)\s+layers') {
+            $layersOffloaded = [int]$Matches[1]
+            $layersTotal = [int]$Matches[2]
+            continue
+        }
+        if ($t -match 'load_tensors:\s+([A-Za-z0-9_-]+)\s+model buffer size\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*MiB') {
+            $dev = Normalize-BackendLabel $Matches[1]
+            $val = [double]::Parse($Matches[2], [Globalization.CultureInfo]::InvariantCulture)
+            $prev = if ($modelBuffers.Contains($dev)) { [double]$modelBuffers[$dev] } else { 0.0 }
+            $modelBuffers[$dev] = [math]::Round(($prev + $val), 2)
+            continue
+        }
+        if ($t -match 'llama_kv_cache:\s+([A-Za-z0-9_-]+)\s+KV buffer size\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*MiB') {
+            $dev = Normalize-BackendLabel $Matches[1]
+            $val = [double]::Parse($Matches[2], [Globalization.CultureInfo]::InvariantCulture)
+            if (-not $kvBuffers.Contains($dev) -or $val -gt [double]$kvBuffers[$dev]) {
+                $kvBuffers[$dev] = [math]::Round($val, 2)
+            }
+            continue
+        }
+        if ($t -match 'sched_reserve:\s+([A-Za-z0-9_-]+)\s+compute buffer size\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*MiB') {
+            $dev = Normalize-BackendLabel $Matches[1]
+            $val = [double]::Parse($Matches[2], [Globalization.CultureInfo]::InvariantCulture)
+            if (-not $computeBuffers.Contains($dev) -or $val -gt [double]$computeBuffers[$dev]) {
+                $computeBuffers[$dev] = [math]::Round($val, 2)
+            }
+            continue
+        }
+        if ($t -match 'load time\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*ms') {
+            $loadTimeMs = [math]::Round([double]::Parse($Matches[1], [Globalization.CultureInfo]::InvariantCulture), 2)
+        }
+    }
+
+    if ($null -eq $layersTotal -and $layersByDevice.Count -gt 0) {
+        $sumAll = 0
+        $cpuCount = if ($layersByDevice.Contains("CPU")) { [int]$layersByDevice["CPU"] } else { 0 }
+        foreach ($v in $layersByDevice.Values) { $sumAll += [int]$v }
+        $layersTotal = $sumAll
+        $layersOffloaded = $sumAll - $cpuCount
+    }
+
+    $offloadPercent = if ($null -ne $layersTotal -and $layersTotal -gt 0 -and $null -ne $layersOffloaded) {
+        [math]::Round(($layersOffloaded * 100.0) / $layersTotal, 2)
+    } else { $null }
+
+    $cpuCountVal = if ($layersByDevice.Contains("CPU")) { [int]$layersByDevice["CPU"] } else { 0 }
+    $cpuFallback = ($cpuCountVal -gt 0) -or ($null -ne $layersTotal -and $layersTotal -gt 0 -and $null -ne $layersOffloaded -and $layersOffloaded -lt $layersTotal)
+
+    $warmUpMs = if ($null -ne $loadTimeMs) {
+        $loadTimeMs
+    } elseif ($null -ne $EvalTotalMs -and $BenchWallMs -gt $EvalTotalMs) {
+        [math]::Round([math]::Max(0.0, $BenchWallMs - [double]$EvalTotalMs), 2)
+    } else {
+        $null
+    }
+
+    $hasOffload = ($layersByDevice.Count -gt 0) -or ($null -ne $layersOffloaded) -or ($modelBuffers.Count -gt 0) -or ($null -ne $htpArch)
+    $offloadObj = if ($hasOffload) {
+        [ordered]@{
+            layersOffloaded   = $layersOffloaded
+            layersTotal       = $layersTotal
+            offloadPercent    = $offloadPercent
+            layersByDevice    = $layersByDevice
+            modelBuffersMiB   = $modelBuffers
+            kvBuffersMiB      = $kvBuffers
+            computeBuffersMiB = $computeBuffers
+            cpuFallback       = $cpuFallback
+            htpArch           = $htpArch
+            dma64             = $dma64
+            source            = $SourceName
+        }
+    } else { $null }
+
+    return [PSCustomObject]@{
+        LoadTimeMs = $loadTimeMs
+        WarmUpMs   = $warmUpMs
+        Offload    = $offloadObj
+    }
+}
+
 function Invoke-BenchWithPower {
     param(
         [string]$ModelFile,
@@ -132,7 +250,7 @@ function Invoke-BenchWithPower {
     $outFile = Join-Path $logDir ($runId + "_stdout.json")
     $errFile = Join-Path $logDir ($runId + "_stderr.txt")
 
-    $argStr = "-m `"$fullModelPath`" -ngl 999 -sm layer -fa on -b 4096 -ub 512 -t $Threads -p $PromptTokens -n $GenTokens -d $Depth -r $Repetitions $DevArgs -o json"
+    $argStr = "-m `"$fullModelPath`" -ngl 999 -sm layer -fa on -b 4096 -ub 512 -t $Threads -p $PromptTokens -n $GenTokens -d $Depth -r $Repetitions $DevArgs -v -o json"
 
     $samples = @()
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -168,6 +286,7 @@ function Invoke-BenchWithPower {
             }
         }
         $proc.WaitForExit()
+        $benchWallMs = [math]::Round($sw.Elapsed.TotalMilliseconds, 2)
     } finally {
         if ($proc -and -not $proc.HasExited) {
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
@@ -211,21 +330,44 @@ function Invoke-BenchWithPower {
     $jPerTok = $null
     $tokPerJ = $null
 
+    $evalTotalMs = $null
+    if ($result.samples_ns -and @($result.samples_ns).Count -gt 0) {
+        $sumNs = 0.0
+        foreach ($ns in @($result.samples_ns)) { $sumNs += [double]$ns }
+        $evalTotalMs = [math]::Round($sumNs / 1e6, 2)
+    } elseif ($null -ne $result.avg_ns) {
+        $evalTotalMs = [math]::Round(([double]$result.avg_ns * [double]$Repetitions) / 1e6, 2)
+    }
+
+    $stderrText = ""
+    if (Test-Path -LiteralPath $errFile -PathType Leaf) {
+        try {
+            $stderrText = Get-Content -LiteralPath $errFile -Raw -ErrorAction Stop
+        } catch {
+            $stderrText = ""
+        }
+    }
+    $parsedTelemetry = Parse-LlamaBenchStderr -StderrText $stderrText -BenchWallMs $benchWallMs -EvalTotalMs $evalTotalMs -SourceName ([IO.Path]::GetFileName($errFile))
+
     return [PSCustomObject]@{
-        Model     = $ModelFile
-        Profile   = $ProfileName
-        Test      = $testType
-        TokPerSec = $tokPerSec
-        StdDev    = $stdDev
-        NPU_W     = $avgNPU
-        GPU_W     = $avgGPU
-        CPU_W     = $avgCPU
-        MEM_W     = $avgMEM
-        INFRA_W   = $avgINFRA
-        SOC_W     = $avgSOC
-        SYS_W     = $avgSYS
-        J_per_Tok = $jPerTok
-        Tok_per_J = $tokPerJ
+        Model       = $ModelFile
+        Profile     = $ProfileName
+        Test        = $testType
+        TokPerSec   = $tokPerSec
+        StdDev      = $stdDev
+        NPU_W       = $avgNPU
+        GPU_W       = $avgGPU
+        CPU_W       = $avgCPU
+        MEM_W       = $avgMEM
+        INFRA_W     = $avgINFRA
+        SOC_W       = $avgSOC
+        SYS_W       = $avgSYS
+        J_per_Tok   = $jPerTok
+        Tok_per_J   = $tokPerJ
+        LoadTimeMs  = $parsedTelemetry.LoadTimeMs
+        WarmUpMs    = $parsedTelemetry.WarmUpMs
+        BenchWallMs = $benchWallMs
+        Offload     = $parsedTelemetry.Offload
     }
 }
 
@@ -327,5 +469,28 @@ if (-not $SkipReportWrite -and $allResults.Count -gt 0) {
     }
     [System.IO.File]::WriteAllText($ReportPath, $sb.ToString(), [System.Text.Encoding]::UTF8)
     Write-Host "[OK] Report salvato in: $ReportPath" -ForegroundColor Green
+
+    $telemetryRows = @(
+        foreach ($row in $allResults) {
+            [ordered]@{
+                model       = $row.Model
+                profile     = $row.Profile
+                test        = $row.Test
+                tokPerSec   = $row.TokPerSec
+                stdDev      = $row.StdDev
+                loadTimeMs  = $row.LoadTimeMs
+                warmUpMs    = $row.WarmUpMs
+                benchWallMs = $row.BenchWallMs
+                offload     = $row.Offload
+            }
+        }
+    )
+    $telemetryPayload = [ordered]@{
+        generatedAt = (Get-Date -Format "o")
+        results     = $telemetryRows
+    }
+    $telemetryPath = "$ReportPath.telemetry.json"
+    [System.IO.File]::WriteAllText($telemetryPath, ($telemetryPayload | ConvertTo-Json -Depth 8), [System.Text.Encoding]::UTF8)
+    Write-Host "[OK] Telemetria offload/warm-up salvata in: $telemetryPath" -ForegroundColor Green
 }
 
