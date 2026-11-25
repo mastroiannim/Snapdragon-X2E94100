@@ -1,3 +1,0 @@
-# Dipendenze degli helper runtime Python (stack_manager.py, kilo_config.py).
-# Lo stack TUI/Control Center e' stato rimosso: niente rich, prompt_toolkit o textual.
-httpx>=0.25.0
