@@ -1,211 +1,169 @@
-# Hexagon Local Coding Agent: Architettura, Integrazione e Validazione
+# Get Started: Hexagon Kilo Plugin
 
-Guida tecnica e architetturale per l'esecuzione di un coding agent locale completo su **Windows 11 ARM64** e **Qualcomm Snapdragon X2 Elite Extreme** (`X2E94100`), utilizzando **Kilo Code** come frontend/agent framework e il runtime **GGUF Hexagon (`llama-server`)** come motore di inferenza locale.
-
----
-
-## 1. Architettura di Sistema
-
-Il sistema realizza una pipeline di inferenza ed esecuzione agentica **100% offline e locale**:
-
-```
-+-----------------------------------------------------------------+
-|                   Kilo Code CLI / VS Code                       |
-|               (@kilocode/cli, nativo ARM64)                     |
-+-----------------------------------------------------------------+
-                                |
-                                | API OpenAI-compatibile (/v1)
-                                | Streaming SSE & Tool Calling
-                                v
-+-----------------------------------------------------------------+
-|             Router llama-server Hexagon (Loopback)              |
-|                   http://127.0.0.1:18803/v1                     |
-|           (Gestione on-demand e LRU cache dei modelli)          |
-+-----------------------------------------------------------------+
-                                |
-        +-----------------------+-----------------------+
-        |                                               |
-        v                                               v
-+-------------------------------+               +---------------+
-|         NPU Hexagon           |               |  GPU Adreno   |
-|         HTP0 (v81)            |               |  OpenCL       |
-|  (Dense <=6GB, Q4_0, K-Quants)|               | (Offload 25%) |
-+-------------------------------+               +---------------+
-        |                                               |
-        +-----------------------+-----------------------+
-                                |
-                                v
-+-----------------------------------------------------------------+
-|                          CPU Oryon                              |
-|         (Controllo di processo, fallback e I/O di rete)         |
-+-----------------------------------------------------------------+
-```
-
-### Componenti Principali
-1. **Frontend / Agent Framework:** Upstream **Kilo Code CLI** (`@kilocode/cli` v7.8.32, pacchetto nativo `@kilocode/cli-windows-arm64`), basato su Node.js v24. Integra il provider `@ai-sdk/openai-compatible`. **Nessun fork di Kilo Code è stato necessario.**
-2. **Motore di Inferenza:** `llama-server.exe` compilato per Windows ARM64 (build `b12323`, commit `93cf736`), con backend GGML Hexagon (`ggml-hexagon.dll`, catalogo Authenticode `libggml-htp.cat` valido) e supporto OpenCL.
-3. **Router Multi-Modello:** Binding fisso su `127.0.0.1:18803`, caricamento modelli on-demand da directory `.cache\geniex\models` e parametri di calcolo ricavati da `hexagon-models.ini`.
-4. **Hardware Target:** Qualcomm Snapdragon X2 Elite Extreme (12 core Oryon, GPU Adreno, NPU Hexagon NPU 45 TOPS, 48 GB LPDDR5X unificata).
+Guida operativa per installare, configurare e usare **Kilo Code** in locale e offline su **Windows 11 ARM64 (Qualcomm Snapdragon X2 Elite)** con il plugin [`@hexagon/kilo-plugin`](../plugins/hexagon-runtime/package.json) e `llama-server.exe` accelerato su NPU Hexagon (`HTP0`) e GPU Adreno (`GPUOpenCL`).
 
 ---
 
-## 2. Configurazione Riproducibile (`kilo.json` e Agenti)
+## 1. Prerequisiti
 
-La configurazione del progetto è centralizzata in due punti del repository:
-
-### `kilo.json` (Workspace Root)
-- **Provider locale:** configurato con ID `hexagon`, endpoint `http://127.0.0.1:18803/v1` e pacchetto `@ai-sdk/openai-compatible`.
-- **Modelli primari:**
-  - `model`: `hexagon/Ornith-1.5-9B-Q4_0` (Coding agent principale con tool calling nativo verificato).
-  - `small_model`: `hexagon/MiniCPM5-2B-Q4_K_M` (Modello leggero e veloce per compattazione e compiti rapidi).
-- **Politica di Sicurezza:**
-  - `read`: `allow` (esplorazione del codice consentita).
-  - `edit`: `ask` (richiede approvazione prima di modificare file).
-  - `write`: `ask` (richiede approvazione prima di creare nuovi file).
-  - `bash`: `ask` (comandi di sola lettura come `git status`, `git diff`, `git log` pre-autorizzati).
-  - `task` e `external_directory`: `ask` (nessuna evasione dal workspace o deleghe non supervisionate).
-
-### Ruoli Agente (`.kilo/agents/`)
-Nella directory `.kilo/agents/` sono configurati 5 ruoli specializzati:
-1. **`code.md` (primary):** Agente per sviluppo e refactoring. Permessi di edit e bash su `ask`.
-2. **`plan.md` (primary):** Agente di progettazione architetturale. Modifiche al codice sorgente **deny**, consentita solo la scrittura dei piani in `plans/*.md`.
-3. **`debug.md` (primary):** Agente per diagnosi ed esecuzione test mirati.
-4. **`explore.md` (subagent):** Subagente di ricognizione a sola lettura. `edit: deny`, `write: deny`, `bash: deny`.
-5. **`reviewer.md` (subagent):** Subagente di revisione diff e security audit. `edit: deny`, `write: deny`, `bash: deny`.
-
----
-
-## 3. Matrice di Compatibilità dei Modelli
-
-I test eseguiti sul runtime Hexagon hanno identificato le reali capacità dei modelli disponibili nella cache:
-
-| Modello | Dimensione | Backend Hardware | Prefill (t/s) | Decode (t/s) | Tool Calling Nativo | Stato & Raccomandazione |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Ornith-1.5-9B-Q4_0** | 5.11 GB | **HTP0 (100% NPU)** | **762 - 964** | **12.3** | **Funzionante** (`tool_calls`) | **RACCOMANDATO come modello principale**. Ottimo ragionamento e aderenza ai tool. |
-| **MiniCPM5-2B-Q4_K_M** | 1.45 GB | **HTP0 (100% NPU)** | **>1000** | **28 - 32** | **Funzionante** (`tool_calls`) | **RACCOMANDATO come small_model**. Estremamente rapido, ideale per subtask. |
-| **Qwen3.5-0.8B-Q4_0** | 0.47 GB | **HTP0 (100% NPU)** | **461** | **97 - 99** | Non affidabile | Ottimo per classificazione o chat sintetica; sconsigliato per tool calling complesso. |
-| **qwen2.5-coder-14b-instruct-q4_0** | 7.93 GB | **HTP0 (75%) + GPU (25%)** | **215 - 339** | **11.4 - 11.6** | **Non funzionante** (emette testo `<function-call>`) | Supporta chat e spiegazione del codice; il template Jinja corrente non converte i tool in schema OpenAI strutturato. |
-| **granite-4.2-8b-Q4_0** | 4.71 GB | **HTP0 (100% NPU)** | - | - | Non testato | Tempo di allocazione grafo HTP elevato al primo caricamento (>60s). |
+1. **Piattaforma:** Windows 11 **ARM64** su Snapdragon supportato, con driver NPU/FastRPC e OpenCL funzionanti.
+2. **Qualcomm GenieX CLI:** installato in `%LOCALAPPDATA%\GenieX CLI` (o nel `PATH`) con almeno un modello `.gguf` scaricato nella cache `%USERPROFILE%\.cache\geniex\models` (es. tramite `geniex pull`).
+3. **Node.js (v20+)** e **Kilo Code CLI** (`@kilocode/cli`, comando `kilo` disponibile nel `PATH`).
 
 > [!NOTE]
-> **Tool Calling:** A differenza di quanto comunemente ipotizzato, modelli orientati al coding come Qwen 2.5 Coder 14B non emettono nativamente chiamate strutturate conformi ad `@ai-sdk/openai-compatible` con l'attuale template Jinja di `llama-server`. Al contrario, **Ornith-1.5-9B** e **MiniCPM5-2B** generano chiamate `finish_reason: "tool_calls"` impeccabili, consentendo all'agente Kilo di eseguire comandi bash, leggere ed editare file senza errori di parsing.
+> Internet serve solo al primo allineamento per scaricare i frontend Windows ARM64 di `llama.cpp` corrispondenti al commit di GenieX (con verifica SHA-256). Dopo la preparazione, il runtime lavora esclusivamente in locale su `http://127.0.0.1:18803/v1`.
 
 ---
 
-## 4. Script e Strumenti di Gestione
+## 2. Primo avvio in 3 passi
 
-Il progetto include tre strumenti pronti all'uso:
+Esegui i comandi dalla root del repository:
 
-### 1. `setup-kilo.ps1` (Verifica Prerequisiti e Sicurezza)
-Controlla lo stato del sistema su 11 punti critici:
+### Passo 1 — Compila il plugin
+
+*(Necessario la prima volta o dopo un aggiornamento del repository.)*
+
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\setup-kilo.ps1
-```
-Verifiche effettuate:
-- Piattaforma Windows 11 ARM64.
-- Presenza di Node.js e CLI `kilo`.
-- Integrità runtime Hexagon e allineamento commit (`cli.js status --check-runtime`).
-- Firma Authenticode DSP (`libggml-htp.cat`).
-- Presenza dei modelli GGUF nella cache locale.
-- Conformità offline di `kilo.json` (`cli.js validate`, loopback obbligatorio, assenza di rotte cloud).
-- Presenza e permessi dei ruoli in `.kilo/agents/`.
-
-### 2. `launch-kilo.ps1` (Launcher Unificato)
-Avvia e gestisce il ciclo di vita dell'agente:
-```powershell
-# Esegue un controllo rapido dello stato senza avviare
-powershell -ExecutionPolicy Bypass -File .\launch-kilo.ps1 -CheckOnly
-
-# Avvia una sessione interattiva con Kilo Code
-powershell -ExecutionPolicy Bypass -File .\launch-kilo.ps1
-
-# Avvia l'agente specificando un ruolo (es. debug o code)
-powershell -ExecutionPolicy Bypass -File .\launch-kilo.ps1 -Agent code
-```
-Caratteristiche:
-- Rileva automaticamente se il router su `127.0.0.1:18803` è già attivo. Se offline, lo avvia su loopback.
-- Rigenera `kilo.json` tramite `plugins/hexagon-runtime/dist/cli.js setup --workspace --port <P> --host <H>`.
-- Inoltra l'esecuzione a `kilo.cmd`.
-
-### 3. `plugins/hexagon-runtime/dist/cli.js` (CLI TypeScript nativa)
-Utility nativa per interrogare, validare e aggiornare la configurazione:
-```powershell
-node plugins\hexagon-runtime\dist\cli.js status --check-runtime --port 18803 --host 127.0.0.1  # Stato router, modelli e runtime GenieX
-node plugins\hexagon-runtime\dist\cli.js validate --workspace .                                 # Valida kilo.json e .kilo/agents/*.md
-node plugins\hexagon-runtime\dist\cli.js setup --workspace --port 18803 --host 127.0.0.1        # Ricrea kilo.json nel workspace
-node plugins\hexagon-runtime\dist\cli.js setup --global --port 18803 --host 127.0.0.1           # Installa/aggiorna il provider hexagon nel config globale
+cd plugins\hexagon-runtime
+npm install
+npm run build
+cd ..\..
 ```
 
-### 4. Uso su Progetti Esterni (Configurazione Globale)
-Kilo Code risolve `kilo.json` risalendo dalla cartella del progetto corrente.
-Per i progetti **fuori** dal workspace Hexagon, il provider `hexagon` viene
-reso disponibile tramite configurazione globale `~/.config/kilo/kilo.jsonc`
-eseguendo una tantum `node plugins\hexagon-runtime\dist\cli.js setup --global`
-(aggiornamento sicuro con backup timestamped del file precedente; non sovrascrive
-file non parsabili).
+### Passo 2 — Controlla prerequisiti e sicurezza offline
+
+```powershell
+.\setup-kilo.ps1 -VerifyOffline
+```
+
+Verifica piattaforma ARM64, Node.js, Kilo CLI, allineamento tra GenieX e `llama-server.exe`, firma del catalogo `libggml-htp.cat`, presenza dei modelli GGUF, sicurezza loopback di [kilo.json](../kilo.json) e integrità dei ruoli in [.kilo/agents/](../.kilo/agents/code.md).
+
+### Passo 3 — Configura il workspace e avvia Kilo Code
+
+```powershell
+node .\plugins\hexagon-runtime\dist\cli.js setup --workspace
+kilo
+```
+
+In alternativa puoi avviare direttamente con il launcher PowerShell o con doppio clic da Esplora File:
+
+```powershell
+.\launch-kilo.ps1        # oppure .\launch-kilo.bat
+```
+
+### Cosa fa automaticamente il plugin all'avvio della sessione
+
+1. **Allineamento runtime (`sync`):** controlla il commit tra `geniex.exe` e `%USERPROFILE%\llama-cpp\llama-bin-win-cpu-arm64`; se mancante o disallineato esegue l'aggiornamento atomico con backup e rollback automatico (`sync-geniex.ps1`).
+2. **Catalogo modelli (`hexagon-models.ini`):** scansiona `%USERPROFILE%\.cache\geniex\models` (associando eventuali `mmproj*.gguf` multimodali) e assegna a ciascun modello il backend (`HTP0`, `GPUOpenCL` o split ibrido) e il contesto supportato.
+3. **Avvio router (`127.0.0.1:18803`):** se la porta è libera, avvia `llama-server.exe` con `ADSP_LIBRARY_PATH` impostato sulla directory runtime e attende `/health` (fino a 30 secondi per il warm-up del grafo HTP). Se sulla porta risponde già un altro `llama-server`, lo riusa senza interferire; se risponde un processo estraneo, annulla l'avvio.
+4. **Continuità e tool calling:** un watchdog controlla `/health` ogni 15 secondi e sui modelli locali viene impostato `reasoning_effort: "none"` per rendere affidabili le chiamate ai tool.
 
 ---
 
-## 5. Report di Validazione (Scenari E2E Eseguiti)
+## 3. Usare Hexagon anche fuori da questo repository
 
-Tutti i 9 scenari previsti dalla specifica sono stati verificati in un repository di test isolato (`poc_test_repo`):
+Kilo Code legge la configurazione del workspace corrente (`kilo.json`). Per avere il provider `hexagon` e il plugin pronti in **qualsiasi progetto sul tuo PC**:
 
-1. **Lettura e spiegazione del codice:** L'agente ha letto `test_calc.py` tramite il tool `Read` e ne ha prodotto un'analisi accurata in italiano.
-2. **Modifica di più file:** L'agente ha creato `math_utils.py` con `multiply(a, b)` e modificato contemporaneamente `test_calc.py` aggiungendo l'import e la relativa asserzione.
-3. **Esecuzione di un test approvato:** Esecuzione di `python test_calc.py`, verifica dell'exit code `$LASTEXITCODE == 0`.
-4. **Diagnosi e correzione di un errore:** Inserito deliberatamente un bug (`return a - b`), l'agente ha eseguito il test, catturato l'errore `AssertionError`, modificato il codice ripristinando `a + b` e riverificato il superamento del test.
-5. **Revisione di un diff senza modifiche:** Eseguito `git diff` tramite l'agente; prodotta una code review tecnica dettagliata (casi limite divisione per zero, eccezioni native vs custom, stile PEP 8) confermando esplicitamente l'assenza di modifiche ai file.
-6. **Subagenti e perimetri di sicurezza:** Confermato che i subagenti `explore` e `reviewer` mantengono le direttive `edit: deny` e `bash: deny`.
-7. **Streaming e Compattazione KV Cache:** Il riuso della KV Cache (LCP similarity) ha raggiunto valori tra **98.7% e 99.9%**, abbattendo i tempi di prompt processing per i turni successivi da ~20s a meno di 400ms.
-8. **Gestione Errori e Casi Limite:**
-   - *Modello inesistente:* Restituisce immediatamente `Error: Model not found: hexagon/...` con exit code 1, senza tentare fallback cloud.
-   - *Server offline:* Diagnosi immediata ed exit controllato.
-9. **Operatività Offline Garantita:**
-   - Binding HTTP forzato su `127.0.0.1`.
-   - Nessun token o credenziale esterna richiesta o memorizzata.
-   - Disabilitati plugin remoti e Kilo Gateway.
+```powershell
+node .\plugins\hexagon-runtime\dist\cli.js setup --global
+```
+
+Il comando registra il provider e il percorso locale del plugin in `%USERPROFILE%\.config\kilo\kilo.jsonc` (o `kilo.json` se già presente), creando prima un backup con timestamp e rifiutandosi di sovrascrivere file non validi. Da quel momento puoi aprire qualsiasi cartella ed eseguire direttamente `kilo`.
 
 ---
 
-## 6. Suite di Test Automatizzati
+## 4. Selezione modelli e ruoli agente
 
-La suite di verifica del progetto copre il plugin TypeScript e i controlli PowerShell:
+### Modelli predefiniti e rilevamento automatico
+
+Durante il setup e all'avvio del plugin, i modelli disponibili vengono scoperti dinamicamente nella cache GGUF:
+
+- Se presenti, vengono privilegiati `Ornith-1.5-9B-Q4_0` come modello principale (`model`, contesto `65.536`) e `MiniCPM5-2B-Q4_K_M` come modello rapido (`small_model`, contesto `65.536`) per esplorazione e domande brevi.
+- Se quei due modelli non sono presenti, il plugin sceglie automaticamente la coppia migliore tra i `.gguf` disponibili (escludendo eventuali modelli marcati `incompatible` nel registro locale).
+- Puoi sempre impostare manualmente i modelli preferiti:
+  ```powershell
+  node .\plugins\hexagon-runtime\dist\cli.js setup --workspace --main-model "<id-modello>" --small-model "<id-small>"
+  ```
+  oppure al lancio con `.\launch-kilo.ps1 -Model "hexagon/<id>" -SmallModel "hexagon/<id>"`.
+
+### Ruoli disponibili (`.kilo/agents/`)
+
+| Ruolo | Modalità | Uso consigliato | Permessi di modifica / comandi |
+| :--- | :--- | :--- | :--- |
+| `code` | `primary` | Sviluppo e modifiche al codice | `edit: ask`, `write: ask`, `bash: ask` |
+| `plan` | `primary` | Progettazione e piani operativi | Scrive solo in `plans/*.md` / `.kilo/plans/*.md`, `bash: deny` |
+| `debug` | `primary` | Diagnosi errori ed esecuzione test | `edit: ask`, `write: ask`, `bash: ask` |
+| `ask` | `primary` | Spiegazioni e ispezione runtime | `edit: deny`, `write: deny`, `bash: ask` (include `hexagon_status` / `hexagon_models`) |
+| `explore` | `subagent` | Ricerca veloce nel repository | Sola lettura (`edit/write/bash/task: deny`) |
+| `reviewer` | `subagent` | Revisione diff e sicurezza | Sola lettura (`edit/write/bash/task: deny`) |
+
+Per avviare direttamente uno specifico ruolo o inviare un singolo prompt non interattivo:
+
 ```powershell
-cd plugins\hexagon-runtime && npm run build && npm test
-```
-```powershell
-node plugins\hexagon-runtime\dist\cli.js validate --workspace .
-powershell -ExecutionPolicy Bypass -File tests\kilo-cli-no-python.ps1
-powershell -ExecutionPolicy Bypass -File tests\runtime-readonly.ps1
-powershell -ExecutionPolicy Bypass -File tests\runtime-update.ps1
-powershell -ExecutionPolicy Bypass -File tests\entrypoints.ps1
-powershell -ExecutionPolicy Bypass -File tests\benchmark-profiles.ps1
-powershell -ExecutionPolicy Bypass -File tests\gguf-parser.ps1
+.\launch-kilo.ps1 -Agent plan
+.\launch-kilo.ps1 -Agent ask -Message "Verifica quali modelli GGUF sono disponibili"
 ```
 
 ---
 
-## 7. Inventario Componenti e Tracciabilità
+## 5. Tool disponibili dentro Kilo Code
 
-- **Componenti Upstream Invariati:**
-  - Kilo Code CLI (`@kilocode/cli` 7.8.32): nessuna modifica, zero fork.
-  - Runtime Qualcomm GenieX / GGML Hexagon (`b12323`, commit `93cf736`): binari preservati e verificati con Authenticode.
-- **Modifiche Locali Preservate:**
-  - `launch-hexagon.ps1`: mantenuta la regola locale per i modelli K-quants >15GB su `HTP0`.
-  - Log e file non tracciati del working tree (`*.txt`): rigorosamente intatti.
-- **Componenti di Integrazione Principali:**
-  - `kilo.json`
-  - `plugins/hexagon-runtime/`
-  - `launch-kilo.ps1` / `launch-kilo.bat`
-  - `setup-kilo.ps1`
-  - `.kilo/agents/*.md`
-  - `tests/kilo-cli-no-python.ps1`
-  - `docs/HEXAGON_LOCAL_CODING_AGENT.md`
+Durante una sessione, l'agente dispone di 7 tool dedicati per gestire e diagnosticare lo stack Hexagon:
+
+| Tool | Cosa fa |
+| :--- | :--- |
+| `hexagon_status` | Stato del router (`127.0.0.1:18803`), latenza `/health`, modelli caricati, telemetria offload/warm-up dai log e allineamento binario GenieX. |
+| `hexagon_models` | Elenca tutti i `.gguf` trovati in cache con stato (`certified`, `untested`, `incompatible`), dimensione e profilo hardware calcolato. |
+| `hexagon_qualify` | Esegue il Qualification Gate (`llama-bench`) su un singolo modello per promuoverlo a `certified` o isolarlo come `incompatible` in `%LOCALAPPDATA%\Hexagon\models-registry.json`. |
+| `hexagon_bench` | Esegue un benchmark empirico (`model`, `device`, `tensorSplit` opzionali) riportando velocità (`t/s`), offload e consumi PMIC quando disponibili. |
+| `hexagon_sync` | Riallinea manualmente `llama.cpp` ai binari GenieX e aggiorna catalogo INI e router. |
+| `hexagon_restart` | Arresta e riavvia in modo controllato il router `llama-server.exe` ricaricando `hexagon-models.ini`. |
+| `hexagon_setup` | Allinea il provider `hexagon` in `kilo.json` (`workspace: true`) o nella configurazione globale (`workspace: false`). |
+
+> [!TIP]
+> Il watcher periodico in background sincronizza il catalogo modelli senza eseguire benchmark pesanti automatici. Per abilitare anche la qualificazione automatica in background sui nuovi `.gguf`, imposta la variabile d'ambiente `HEXAGON_ENABLE_AUTO_BENCHMARK=1` prima di avviare `kilo`.
 
 ---
 
-## 8. Avvertenze Legali e Disclaimer
+## 6. Riferimento rapido comandi
 
-- Questo progetto è un'integrazione di ricerca indipendente e **non è un prodotto ufficiale o supportato da Qualcomm né da Kilo Code / Kilo-Org**.
-- I binari del runtime Hexagon provengono dall'installazione locale di Qualcomm GenieX e restano soggetti alle rispettive licenze di Qualcomm Technologies, Inc.
-- I modelli linguistici GGUF sono soggetti alle rispettive licenze d'uso (es. Qwen License, Apache 2.0).
+### CLI del plugin (`cli.js`)
+
+```powershell
+# Configura il workspace o il profilo globale (opzioni: --port, --host, --models-dir, --ini, --main-model, --small-model, --json)
+node .\plugins\hexagon-runtime\dist\cli.js setup --workspace
+node .\plugins\hexagon-runtime\dist\cli.js setup --global
+
+# Stato completo di router, modelli caricati e runtime GenieX
+node .\plugins\hexagon-runtime\dist\cli.js status --check-runtime
+
+# Aggiorna hexagon-models.ini dai GGUF in cache e ricarica il router se necessario
+node .\plugins\hexagon-runtime\dist\cli.js sync
+
+# Valida schema kilo.json, loopback obbligatorio e agenti .kilo/agents/*.md
+node .\plugins\hexagon-runtime\dist\cli.js validate --workspace .
+```
+
+### Script wrapper Windows
+
+| Comando | Uso |
+| :--- | :--- |
+| `.\setup-kilo.ps1 [-CheckOnly] [-VerifyOffline]` | Controllo prerequisiti, integrità runtime e conformità offline. |
+| `.\launch-kilo.ps1 [-CheckOnly] [-GenerateConfigOnly] [-NoAutoStart] [-Pure]` | Avvio integrato router + Kilo Code (o sola verifica / rigenerazione `kilo.json`). |
+| `.\launch-hexagon.ps1 [-Mode Router \| Direct] [-ListOnly] [-DryRun] [-Model <file>]` | Avvio diretto o router standalone di `llama-server.exe` senza Kilo (`llama-server.bat` / `llama-server-all.bat`). |
+
+---
+
+## 7. Diagnostica e risoluzione problemi
+
+- **Log del server:** `%LOCALAPPDATA%\Hexagon\logs\llama-server.log`
+- **Registro qualificazione modelli:** `%LOCALAPPDATA%\Hexagon\models-registry.json`
+- **File preset generato:** `hexagon-models.ini` (nella root del workspace o in `%LOCALAPPDATA%\Hexagon\hexagon-models.ini`)
+
+Problemi frequenti:
+
+- **`geniex.exe non trovato`:** installa Qualcomm GenieX CLI e assicurati che sia in `%LOCALAPPDATA%\GenieX CLI` o nel `PATH`.
+- **Nessun modello trovato:** scarica almeno un `.gguf` nella cache di GenieX (`%USERPROFILE%\.cache\geniex\models`) oppure specifica `--models-dir <percorso>`.
+- **Porta `18803` occupata da un altro processo:** libera la porta o usa una porta diversa con `--port <N>` / `-Port <N>`.
+- **Errore di caricamento NPU/GPU o timeout `/health`:** verifica `.\launch-kilo.ps1 -CheckOnly`, controlla i log in `%LOCALAPPDATA%\Hexagon\logs\llama-server.log` e consulta la checklist tecnica in [COMPATIBILITA.md](COMPATIBILITA.md).
+- **Avvertenze:** progetto sperimentale indipendente, non supportato ufficialmente da Qualcomm né da Kilo Code; mantenere il binding su `127.0.0.1` su reti non attendibili.
