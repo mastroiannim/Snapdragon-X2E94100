@@ -6,6 +6,7 @@ import pluginInit, {
   plugin,
 } from "../src/index.js";
 import type { WatchdogOptions } from "../src/watchdog.js";
+import type { ModelWatcherOptions } from "../src/watcher.js";
 import type { SpawnFn } from "../src/types.js";
 import {
   ALL_RUNTIME_FILES,
@@ -16,7 +17,6 @@ import {
   recordingFetch,
   recordingSpawn,
   recordingWriteFile,
-  fakeResponse,
   routerResponse,
 } from "./helpers.js";
 
@@ -29,8 +29,8 @@ function fakePluginInput(overrides: Partial<PluginInput> = {}): PluginInput {
   return {
     client: {} as PluginInput["client"],
     project: {} as PluginInput["project"],
-    directory: "C:/repo/dir",
-    worktree: "C:/repo",
+    directory: "/virtual/repo/dir",
+    worktree: "/virtual/repo",
     serverUrl: new URL("http://127.0.0.1:4096"),
     $: {} as PluginInput["$"],
     ...overrides,
@@ -60,8 +60,8 @@ describe("descrittore e ingresso del plugin", () => {
     expect(plugin.server).toBe(pluginInit);
   });
 
-  it("pluginInit ritorna gli hook con i sei tool agent", async () => {
-    const hooks = await pluginInit(fakePluginInput({ disableModelWatcher: true }));
+  it("pluginInit ritorna gli hook con i sette tool agent", async () => {
+    const hooks = await pluginInit(fakePluginInput());
     expect(Object.keys(hooks.tool ?? {}).sort()).toEqual([
       "hexagon_bench",
       "hexagon_models",
@@ -76,15 +76,15 @@ describe("descrittore e ingresso del plugin", () => {
     expect(typeof hooks.config).toBe("function");
   });
 
-  it("worktree vuoto: fallback su directory", async () => {
-    const hooks = await pluginInit(fakePluginInput({ worktree: "" }));
+  it("worktree e directory vuoti: fallback su process.cwd()", async () => {
+    const hooks = await pluginInit(fakePluginInput({ worktree: "", directory: "" }));
     expect(hooks.tool).toBeDefined();
   });
 });
 
 describe("hook chat.params", () => {
   it("modello locale: reasoning_effort none per tool-calling deterministico", async () => {
-    const hooks = createHexagonHooks({ workspaceDir: "C:/repo" });
+    const hooks = createHexagonHooks({ workspaceDir: "/virtual/repo" });
     const { input, output } = chatIO("hexagon");
     await hooks["chat.params"]!(input, output);
     expect(output.options.reasoning_effort).toBe("none");
@@ -92,7 +92,7 @@ describe("hook chat.params", () => {
   });
 
   it("provider remoto: nessuna mutazione", async () => {
-    const hooks = createHexagonHooks({ workspaceDir: "C:/repo" });
+    const hooks = createHexagonHooks({ workspaceDir: "/virtual/repo" });
     const { input, output } = chatIO("openai");
     await hooks["chat.params"]!(input, output);
     expect(output.options).toEqual({});
@@ -102,16 +102,19 @@ describe("hook chat.params", () => {
 describe("hook event / session.created", () => {
   it("avvia il bootstrap alla creazione sessione", async () => {
     const bootstrap = vi.fn(async () => undefined);
-    const hooks = createHexagonHooks({ workspaceDir: "C:/repo", bootstrap });
+    const hooks = createHexagonHooks({ workspaceDir: "/virtual/repo", bootstrap });
     await hooks.event!({
       event: { type: "session.created" } as EventInput,
     });
     expect(bootstrap).toHaveBeenCalledTimes(1);
+    await hooks.event!({
+      event: { type: "server.instance.disposed" } as EventInput,
+    });
   });
 
   it("altri eventi non avviano il bootstrap", async () => {
     const bootstrap = vi.fn(async () => undefined);
-    const hooks = createHexagonHooks({ workspaceDir: "C:/repo", bootstrap });
+    const hooks = createHexagonHooks({ workspaceDir: "/virtual/repo", bootstrap });
     await hooks.event!({
       event: { type: "session.updated" } as EventInput,
     });
@@ -123,7 +126,7 @@ describe("hook event / session.created", () => {
     const bootstrap = vi.fn(async () => {
       throw new Error("NPU non disponibile");
     });
-    const hooks = createHexagonHooks({ workspaceDir: "C:/repo", bootstrap });
+    const hooks = createHexagonHooks({ workspaceDir: "/virtual/repo", bootstrap });
     await hooks.event!({
       event: { type: "session.created" } as EventInput,
     });
@@ -142,10 +145,18 @@ describe("hook event / session.created", () => {
     );
     const { fn: fetch, calls } = recordingFetch((call) => routerResponse(call.url));
     const hooks = createHexagonHooks({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
+      modelsDir: "/virtual/models",
+      iniPath: "/virtual/repo/hexagon-models.ini",
+      configDir: "/virtual/config",
+      registryPath: "/virtual/registry.json",
+      mkdir: async () => {},
       deps: {
         exec,
         fetch,
+        spawn: recordingSpawn(111).fn,
+        readFile: async () => "",
+        writeFile: async () => {},
         exists: async () => true,
         listDir: async () => ALL_RUNTIME_FILES,
         sleep: async () => {},
@@ -158,38 +169,100 @@ describe("hook event / session.created", () => {
     await vi.waitFor(() =>
       expect(calls.some((call) => call.url.endsWith("/health"))).toBe(true),
     );
+    await hooks.event!({
+      event: { type: "server.instance.disposed" } as EventInput,
+    });
   });
 
   it("session.created: nessun benchmark/model-watcher automatico avviato all'avvio senza espresso consenso", async () => {
     const watcherFactory = vi.fn();
     const hooks = createHexagonHooks({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
       bootstrap: async () => undefined,
       startModelWatcherFn: watcherFactory,
+      startWatchdogFn: () => ({ stop: vi.fn(), running: true }),
     });
     await hooks.event!({
       event: { type: "session.created" } as EventInput,
     });
-    // Attende tick del bootstrap
     await new Promise((r) => setTimeout(r, 10));
     expect(watcherFactory).not.toHaveBeenCalled();
   });
 
-  it("session.created con enableAutoBenchmark: avvia il model watcher", async () => {
-    const watcherFactory = vi.fn(() => ({
-      checkNow: vi.fn(async () => []),
-      stop: vi.fn(),
-    }));
+  it("session.created con enableAutoBenchmark: avvia il model watcher e logga callback", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    let capturedOpts: ModelWatcherOptions | undefined;
+    const watcherFactory = vi.fn((opts: ModelWatcherOptions) => {
+      capturedOpts = opts;
+      return {
+        checkNow: vi.fn(async () => []),
+        stop: vi.fn(),
+      };
+    });
     const hooks = createHexagonHooks({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
       bootstrap: async () => undefined,
       enableAutoBenchmark: true,
       startModelWatcherFn: watcherFactory,
+      startWatchdogFn: () => ({ stop: vi.fn(), running: true }),
     });
     await hooks.event!({
       event: { type: "session.created" } as EventInput,
     });
     await vi.waitFor(() => expect(watcherFactory).toHaveBeenCalledTimes(1));
+
+    capturedOpts!.onModelsDiscovered!(["m1", "m2"]);
+    capturedOpts!.onQualified!("m1", true);
+    capturedOpts!.onQualified!("m2", false);
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("Rilevati e configurati 2 nuovi modelli"));
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("qualificato con successo"));
+    logSpy.mockRestore();
+  });
+
+  it("session.created con HEXAGON_ENABLE_AUTO_BENCHMARK=true avvia e ferma model watcher", async () => {
+    const saved = process.env.HEXAGON_ENABLE_AUTO_BENCHMARK;
+    process.env.HEXAGON_ENABLE_AUTO_BENCHMARK = "true";
+    try {
+      const stopWatcher = vi.fn();
+      const watcherFactory = vi.fn(() => ({
+        checkNow: vi.fn(async () => []),
+        stop: stopWatcher,
+      }));
+      const hooks = createHexagonHooks({
+        workspaceDir: "",
+        bootstrap: async () => undefined,
+        startModelWatcherFn: watcherFactory,
+        startWatchdogFn: () => ({ stop: vi.fn(), running: true }),
+      });
+      await hooks.event!({
+        event: { type: "session.created" } as EventInput,
+      });
+      await vi.waitFor(() => expect(watcherFactory).toHaveBeenCalledTimes(1));
+      await hooks.event!({
+        event: { type: "session.deleted" } as EventInput,
+      });
+      expect(stopWatcher).toHaveBeenCalledTimes(1);
+    } finally {
+      if (saved === undefined) delete process.env.HEXAGON_ENABLE_AUTO_BENCHMARK;
+      else process.env.HEXAGON_ENABLE_AUTO_BENCHMARK = saved;
+    }
+  });
+
+  it("disableModelWatcher: true impedisce avvio del watcher anche con enableAutoBenchmark", async () => {
+    const watcherFactory = vi.fn();
+    const hooks = createHexagonHooks({
+      workspaceDir: "/virtual/repo",
+      bootstrap: async () => undefined,
+      enableAutoBenchmark: true,
+      disableModelWatcher: true,
+      startModelWatcherFn: watcherFactory,
+      startWatchdogFn: () => ({ stop: vi.fn(), running: true }),
+    });
+    await hooks.event!({
+      event: { type: "session.created" } as EventInput,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(watcherFactory).not.toHaveBeenCalled();
   });
 
   it("session.created concorrenti: bootstrap serializzato e nessun avvio parallelo", async () => {
@@ -199,8 +272,9 @@ describe("hook event / session.created", () => {
     });
     const bootstrap = vi.fn(() => bootstrapPromise);
     const hooks = createHexagonHooks({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
       bootstrap,
+      startWatchdogFn: () => ({ stop: vi.fn(), running: true }),
     });
     const ev1 = hooks.event!({ event: { type: "session.created" } as EventInput });
     const ev2 = hooks.event!({ event: { type: "session.created" } as EventInput });
@@ -225,7 +299,6 @@ describe("bootstrapRuntime", () => {
       }
       return okExec(LLAMA_VERSION_OUTPUT);
     });
-    // Stato reale del server: down finche' la spawn non lo avvia.
     let serverDown = !options.serverUp;
     const { fn: fetch } = recordingFetch((call) => {
       if (serverDown) {
@@ -252,9 +325,23 @@ describe("bootstrapRuntime", () => {
     return { deps, calls, spawnCalls };
   }
 
-  it("tutto allineato e server attivo: nessuna azione distruttiva", async () => {
+  it("tutto allineato e server attivo: nessuna azione distruttiva (anche se listDir/reload falliscono)", async () => {
     const { deps, spawnCalls } = runtimeDeps({ aligned: true, serverUp: true });
-    const result = await bootstrapRuntime({ workspaceDir: "C:/repo", deps });
+    const result = await bootstrapRuntime({
+      workspaceDir: "/virtual/repo",
+      modelsDir: "/virtual/models",
+      iniPath: "/virtual/repo/hexagon-models.ini",
+      deps: {
+        ...deps,
+        listDir: async (dir) => {
+          if (dir.includes("models")) throw new Error("models dir unreadable");
+          return ALL_RUNTIME_FILES;
+        },
+        readFile: async () => {
+          throw new Error("ini unreadable");
+        },
+      },
+    });
     expect(result.sync.updated).toBe(false);
     expect(result.ini.generated).toBe(false);
     expect(result.server.started).toBe(false);
@@ -267,7 +354,12 @@ describe("bootstrapRuntime", () => {
       aligned: false,
       serverUp: false,
     });
-    const result = await bootstrapRuntime({ workspaceDir: "C:/repo", deps });
+    const result = await bootstrapRuntime({
+      workspaceDir: "/virtual/repo",
+      modelsDir: "/virtual/models",
+      iniPath: "/virtual/repo/hexagon-models.ini",
+      deps,
+    });
     expect(result.sync.updated).toBe(true);
     expect(result.server.started).toBe(true);
     expect(result.server.pid).toBe(777);
@@ -286,7 +378,7 @@ describe("bootstrapRuntime", () => {
 
   it("INI assente: generazione zero-setup via launch-hexagon.ps1 -DryRun -Json", async () => {
     const iniContent =
-      "[*]\nthreads = 12\n\n[fixture]\nmodel = C:/models/fixture.gguf\ndevice = HTP0\nctx-size = 65536\n";
+      "[*]\nthreads = 12\n\n[fixture]\nmodel = /virtual/models/fixture.gguf\ndevice = HTP0\nctx-size = 65536\n";
     const { fn: exec, calls } = recordingExec((call) => {
       if (call.command === "powershell") {
         if (call.args.some((arg) => arg.includes("launch-hexagon.ps1"))) {
@@ -309,10 +401,13 @@ describe("bootstrapRuntime", () => {
     const { fn: writeFile, calls: writes } = recordingWriteFile();
     const { fn: fetch } = recordingFetch((call) => routerResponse(call.url));
     const result = await bootstrapRuntime({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
+      modelsDir: "/virtual/models",
+      iniPath: "/virtual/repo/hexagon-models.ini",
       deps: {
         exec,
         fetch,
+        readFile: async () => "",
         writeFile,
         exists: async (path) => !path.endsWith("hexagon-models.ini"),
         listDir: async () => ALL_RUNTIME_FILES,
@@ -337,7 +432,7 @@ describe("bootstrapRuntime", () => {
 
 describe("hook config: provider hexagon dinamico", () => {
   const INI_TEXT =
-    "[*]\nthreads = 12\n[Ornith-1.5-9B-Q4_0]\nmodel = C:/m/Ornith.gguf\ndevice = HTP0\nctx-size = 4096\n[extra-model]\nmodel = C:/m/extra.gguf\ndevice = HTP0,GPUOpenCL\nctx-size = 32768\n";
+    "[*]\nthreads = 12\n[Ornith-1.5-9B-Q4_0]\nmodel = /virtual/m/Ornith.gguf\ndevice = HTP0\nctx-size = 4096\n[extra-model]\nmodel = /virtual/m/extra.gguf\ndevice = HTP0,GPUOpenCL\nctx-size = 32768\n";
 
   function configDeps(iniExists: boolean) {
     return {
@@ -348,7 +443,8 @@ describe("hook config: provider hexagon dinamico", () => {
 
   it("inietta provider, modelli INI e contesti testati senza toccare kilo.json", async () => {
     const hooks = createHexagonHooks({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
+      iniPath: "/virtual/repo/hexagon-models.ini",
       deps: configDeps(true),
     });
     const input = {} as ConfigInput;
@@ -356,7 +452,6 @@ describe("hook config: provider hexagon dinamico", () => {
     const provider = input.provider?.hexagon;
     expect(provider?.npm).toBe("@ai-sdk/openai-compatible");
     expect(provider?.options?.baseURL).toBe("http://127.0.0.1:18803/v1");
-    // Il contesto testato (65536) prevale sul ctx-size INI (4096).
     expect(provider?.models?.["Ornith-1.5-9B-Q4_0"].limit).toEqual({
       context: 65536,
       output: 16384,
@@ -375,7 +470,8 @@ describe("hook config: provider hexagon dinamico", () => {
 
   it("INI assente: catalogo testato comunque disponibile", async () => {
     const hooks = createHexagonHooks({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
+      iniPath: "/virtual/repo/hexagon-models.ini",
       deps: configDeps(false),
     });
     const input = {} as ConfigInput;
@@ -385,7 +481,8 @@ describe("hook config: provider hexagon dinamico", () => {
 
   it("opzioni utente e modelli ignoti preservati; scelta modello utente rispettata", async () => {
     const hooks = createHexagonHooks({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
+      iniPath: "/virtual/repo/hexagon-models.ini",
       deps: configDeps(true),
     });
     const input = {
@@ -413,7 +510,8 @@ describe("hook config: provider hexagon dinamico", () => {
 
   it("readFile fallito: nessun crash, catalogo testato", async () => {
     const hooks = createHexagonHooks({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
+      iniPath: "/virtual/repo/hexagon-models.ini",
       deps: {
         exists: async () => true,
         readFile: async () => {
@@ -440,7 +538,7 @@ describe("wiring watchdog negli hook", () => {
   it("session.created con bootstrap riuscito: watchdog avviato una sola volta", async () => {
     const { factory } = watchdogSpy();
     const hooks = createHexagonHooks({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
       bootstrap: async () => undefined,
       startWatchdogFn: factory,
     });
@@ -455,7 +553,7 @@ describe("wiring watchdog negli hook", () => {
   it("session.deleted: watchdog fermo solo quando l'ultima sessione chiude", async () => {
     const { factory, stop } = watchdogSpy();
     const hooks = createHexagonHooks({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
       bootstrap: async () => undefined,
       startWatchdogFn: factory,
     });
@@ -471,7 +569,7 @@ describe("wiring watchdog negli hook", () => {
   it("server.instance.disposed: watchdog fermato sempre", async () => {
     const { factory, stop } = watchdogSpy();
     const hooks = createHexagonHooks({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
       bootstrap: async () => undefined,
       startWatchdogFn: factory,
     });
@@ -487,7 +585,7 @@ describe("wiring watchdog negli hook", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const { factory } = watchdogSpy();
     const hooks = createHexagonHooks({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
       bootstrap: async () => {
         throw new Error("geniex assente");
       },
@@ -502,7 +600,7 @@ describe("wiring watchdog negli hook", () => {
   it("intervallo personalizzato inoltrato alla factory", async () => {
     const { factory } = watchdogSpy();
     const hooks = createHexagonHooks({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
       bootstrap: async () => undefined,
       startWatchdogFn: factory,
       watchdogIntervalMs: 5000,
@@ -520,7 +618,7 @@ describe("wiring watchdog negli hook", () => {
       return { stop: vi.fn(), running: true };
     };
     const hooks = createHexagonHooks({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
       bootstrap: async () => undefined,
       startWatchdogFn: factory,
     });
@@ -546,7 +644,7 @@ describe("wiring watchdog negli hook", () => {
         return spawnBase(command, args, spawnOptions);
       };
       const hooks = createHexagonHooks({
-        workspaceDir: "C:/repo",
+        workspaceDir: "/virtual/repo",
         bootstrap: async () => undefined,
         watchdogIntervalMs: 1000,
         deps: {
@@ -576,8 +674,8 @@ describe("wiring watchdog negli hook", () => {
   });
 });
 
-describe("wiring tool sync negli hook", () => {
-  it("hexagon_sync usa workspaceDir e deps iniettate", async () => {
+describe("wiring tool sync e status negli hook", () => {
+  it("hexagon_sync e hexagon_status usano workspaceDir e deps iniettate", async () => {
     const { fn: exec, calls } = recordingExec((call) => {
       if (call.command === "powershell") {
         return okExec('{"Message":"forzato","Files":[]}');
@@ -588,10 +686,22 @@ describe("wiring tool sync negli hook", () => {
           : LLAMA_VERSION_OUTPUT,
       );
     });
+    const { fn: fetch } = recordingFetch((call) => routerResponse(call.url));
     const hooks = createHexagonHooks({
-      workspaceDir: "C:/repo",
+      workspaceDir: "/virtual/repo",
+      modelsDir: "/virtual/models",
+      iniPath: "/virtual/repo/hexagon-models.ini",
+      configDir: "/virtual/config",
+      registryPath: "/virtual/registry.json",
+      mkdir: async () => {},
       deps: {
         exec,
+        fetch,
+        spawn: recordingSpawn(222).fn,
+        readFile: async () => "[*]\nthreads = 12\n",
+        writeFile: async () => {},
+        sleep: async () => {},
+        now: () => 0,
         exists: async () => true,
         listDir: async () => ALL_RUNTIME_FILES,
       },
@@ -602,8 +712,14 @@ describe("wiring tool sync negli hook", () => {
     expect(parsed.updated).toBe(true);
     expect(parsed.message).toBe("forzato");
     const powershell = calls.find((call) => call.command === "powershell");
-    expect(powershell?.args[powershell.args.indexOf("-File") + 1]).toBe(
-      "C:\\repo\\sync-geniex.ps1",
+    expect(powershell?.args[powershell.args.indexOf("-File") + 1]).toContain(
+      "sync-geniex.ps1",
     );
+
+    const status = JSON.parse(
+      await hooks.tool!.hexagon_status.execute({}, undefined as never),
+    );
+    expect(status.router.ready).toBe(true);
+    expect(status.runtime.commitAligned).toBe(true);
   });
 });

@@ -36,7 +36,7 @@ import {
 } from "./process.js";
 import { checkRuntime, ensureRuntime, type SyncOutcome } from "./sync.js";
 import { createHexagonTools } from "./tools.js";
-import type { OsDeps } from "./types.js";
+import type { MkdirFn, OsDeps } from "./types.js";
 import {
   startWatchdog,
   type WatchdogHandle,
@@ -58,6 +58,11 @@ export interface BootstrapResult {
 export interface RuntimeOptions {
   workspaceDir: string;
   deps?: Partial<OsDeps>;
+  modelsDir?: string;
+  iniPath?: string;
+  registryPath?: string;
+  configDir?: string;
+  mkdir?: MkdirFn;
 }
 
 /**
@@ -70,6 +75,8 @@ export async function bootstrapRuntime(
 ): Promise<BootstrapResult> {
   const deps: OsDeps = { ...nodeDeps, ...options.deps };
   const paths = defaultPaths(options.workspaceDir);
+  const iniPath = options.iniPath ?? paths.iniPath;
+  const modelsDir = options.modelsDir ?? paths.modelsDir;
   const sync = await ensureRuntime({
     paths: {
       geniexExe: paths.geniexExe,
@@ -83,7 +90,7 @@ export async function bootstrapRuntime(
     deps,
   });
   const ini = await ensureModelsIni({
-    iniPath: paths.iniPath,
+    iniPath,
     workspaceDir: paths.workspaceDir,
     exec: deps.exec,
     exists: deps.exists,
@@ -91,15 +98,17 @@ export async function bootstrapRuntime(
   });
   if (!ini.generated) {
     await syncDiscoveredModelsToIni({
-      modelsDir: paths.modelsDir,
-      iniPath: paths.iniPath,
+      modelsDir,
+      iniPath,
       workspaceDir: paths.workspaceDir,
+      configDir: options.configDir,
       deps: {
         listDir: deps.listDir,
         exists: deps.exists,
         readFile: deps.readFile,
         writeFile: deps.writeFile,
         exec: deps.exec,
+        mkdir: options.mkdir,
       },
     }).catch(() => {});
   }
@@ -108,8 +117,8 @@ export async function bootstrapRuntime(
     spawn: deps.spawn,
     runtimeDir: paths.binPath,
     serverExe: paths.serverExe,
-    iniPath: paths.iniPath,
-    modelsDir: paths.modelsDir,
+    iniPath,
+    modelsDir,
   });
   if (!server.started) {
     await reloadServerIfStale({
@@ -120,8 +129,8 @@ export async function bootstrapRuntime(
       sleep: deps.sleep,
       runtimeDir: paths.binPath,
       serverExe: paths.serverExe,
-      iniPath: paths.iniPath,
-      modelsDir: paths.modelsDir,
+      iniPath,
+      modelsDir,
     }).catch(() => {});
   }
   const health = await waitForHealth({ fetch: deps.fetch, sleep: deps.sleep, now: deps.now });
@@ -151,6 +160,8 @@ export function createHexagonHooks(options: HookOptions): Hooks {
   const workspaceDir = options.workspaceDir || process.cwd();
   const deps: OsDeps = { ...nodeDeps, ...options.deps };
   const paths = defaultPaths(workspaceDir);
+  const iniPath = options.iniPath ?? paths.iniPath;
+  const modelsDir = options.modelsDir ?? paths.modelsDir;
   const bootstrap =
     options.bootstrap ?? (() => bootstrapRuntime({ ...options, workspaceDir }));
   const startWatchdogFn = options.startWatchdogFn ?? startWatchdog;
@@ -172,8 +183,8 @@ export function createHexagonHooks(options: HookOptions): Hooks {
       spawn: deps.spawn,
       runtimeDir: paths.binPath,
       serverExe: paths.serverExe,
-      iniPath: paths.iniPath,
-      modelsDir: paths.modelsDir,
+      iniPath,
+      modelsDir,
     });
     await waitForHealth({ fetch: deps.fetch, sleep: deps.sleep, now: deps.now });
   };
@@ -203,9 +214,12 @@ export function createHexagonHooks(options: HookOptions): Hooks {
       return;
     }
     modelWatcher = startModelWatcherFn({
-      modelsDir: paths.modelsDir,
+      modelsDir,
       workspaceDir: paths.workspaceDir,
-      iniPath: paths.iniPath,
+      iniPath,
+      registryPath: options.registryPath,
+      configDir: options.configDir,
+      mkdir: options.mkdir,
       fetch: deps.fetch,
       spawn: deps.spawn,
       runtimeDir: paths.binPath,
@@ -268,8 +282,8 @@ export function createHexagonHooks(options: HookOptions): Hooks {
 
   const config: NonNullable<Hooks["config"]> = async (input) => {
     let ini: ModelsIni | undefined;
-    if (await deps.exists(paths.iniPath)) {
-      const text = await deps.readFile(paths.iniPath).catch(() => "");
+    if (await deps.exists(iniPath)) {
+      const text = await deps.readFile(iniPath).catch(() => "");
       ini = parseModelsIni(text);
     }
     const provider = buildHexagonProvider(ini);
@@ -307,11 +321,16 @@ export function createHexagonHooks(options: HookOptions): Hooks {
       exec: deps.exec,
       spawn: deps.spawn,
       sleep: deps.sleep,
+      now: deps.now,
       readFile: deps.readFile,
       writeFile: deps.writeFile,
       listDir: deps.listDir,
       exists: deps.exists,
-      modelsDir: paths.modelsDir,
+      mkdir: options.mkdir,
+      modelsDir,
+      iniPath,
+      registryPath: options.registryPath,
+      configDir: options.configDir,
       workspaceDir: paths.workspaceDir,
       sync: ({ force, stopServer } = {}) =>
         ensureRuntime({

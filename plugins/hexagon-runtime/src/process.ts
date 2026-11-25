@@ -539,6 +539,7 @@ export interface EnsureIniOptions {
   iniPath: string;
   workspaceDir: string;
   launchScript?: string;
+  syncExists?: (path: string) => boolean;
   exec: ExecFn;
   exists: ExistsFn;
   writeFile: WriteFileFn;
@@ -561,13 +562,14 @@ export async function ensureModelsIni(
   if (await options.exists(options.iniPath)) {
     return { generated: false, modelCount: 0 };
   }
+  const checkFs = options.syncExists ?? existsSync;
   const repoScript = resolve(BUNDLED_ASSETS_DIR, "..", "..", "..", "launch-hexagon.ps1");
   const wsScript = join(options.workspaceDir, "launch-hexagon.ps1");
   const script =
     options.launchScript ??
-    (existsSync(wsScript)
+    (checkFs(wsScript)
       ? wsScript
-      : (existsSync(repoScript) && options.workspaceDir !== "C:/repo"
+      : (checkFs(repoScript) && options.workspaceDir !== "C:/repo"
         ? repoScript
         : wsScript));
   const result = await options.exec(
@@ -617,7 +619,7 @@ export interface HexagonPaths {
 export function defaultPaths(
   workspaceDir?: string,
   home: string = homedir(),
-  localAppData: string = process.env.LOCALAPPDATA ?? join(home, "AppData", "Local"),
+  localAppData: string = process.env.LOCALAPPDATA || join(home, "AppData", "Local"),
   exists?: (path: string) => boolean,
 ): HexagonPaths {
   const ws = workspaceDir && workspaceDir.length > 0 ? workspaceDir : process.cwd();

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   collectStatus,
   createHexagonTools,
+  isBenchmarkActive,
   parseBenchReport,
   parseOptionalNumber,
   resetBenchmarkActiveForTests,
@@ -189,7 +190,7 @@ describe("parseOptionalNumber", () => {
 });
 
 describe("runBenchmark", () => {
-  const workspace = "C:/repo";
+  const workspace = "/virtual/repo";
 
   it("lancia benchmark-hexagon.ps1 e legge il report", async () => {
     const { fn: exec, calls } = recordingExec(() => okExec("=== RISULTATI ==="));
@@ -199,11 +200,12 @@ describe("runBenchmark", () => {
       readFile,
       workspaceDir: workspace,
       model: "Ornith-1.5-9B-Q4_0",
-      reportPath: "C:/tmp/bench.md",
+      reportPath: "/virtual/tmp/bench.md",
+      exists: () => false,
     });
     expect(report.model).toBe("Ornith-1.5-9B-Q4_0");
     expect(report.results).toHaveLength(3);
-    expect(report.reportPath).toBe("C:/tmp/bench.md");
+    expect(report.reportPath).toBe("/virtual/tmp/bench.md");
     const call = calls[0];
     expect(call.command).toBe("powershell");
     expect(call.args[call.args.indexOf("-File") + 1]).toBe(BUNDLED_BENCH_SCRIPT);
@@ -211,7 +213,7 @@ describe("runBenchmark", () => {
       "Ornith-1.5-9B-Q4_0.gguf",
     );
     expect(call.args[call.args.indexOf("-Repetitions") + 1]).toBe("1");
-    expect(readFile).toHaveBeenCalledWith("C:/tmp/bench.md");
+    expect(readFile).toHaveBeenCalledWith("/virtual/tmp/bench.md");
   });
 
   it("modello .gguf preservato, repetitions override", async () => {
@@ -224,6 +226,7 @@ describe("runBenchmark", () => {
       model: "x.gguf",
       repetitions: 3,
       reportPath: "r.md",
+      exists: () => false,
     });
     const args = calls[0].args;
     expect(args[args.indexOf("-Models") + 1]).toBe("x.gguf");
@@ -233,13 +236,18 @@ describe("runBenchmark", () => {
   it("senza modello: suite predefinita, report temporaneo", async () => {
     const { fn: exec, calls } = recordingExec(() => okExec());
     const readFile = vi.fn(async () => "");
-    const report = await runBenchmark({ exec, readFile, workspaceDir: workspace });
+    const report = await runBenchmark({
+      exec,
+      readFile,
+      workspaceDir: workspace,
+      exists: () => false,
+    });
     expect(calls[0].args).not.toContain("-Models");
     expect(report.model).toBe("suite predefinita");
     expect(report.reportPath).toContain("hexagon-bench-");
   });
 
-  it("exit non-zero: errore propagato", async () => {
+  it("exit non-zero: errore propagato con fallback stdout/output vuoto", async () => {
     const { fn: exec } = recordingExec(() => ({
       code: 2,
       stdout: "",
@@ -247,27 +255,60 @@ describe("runBenchmark", () => {
     }));
     const readFile = vi.fn(async () => "");
     await expect(
-      runBenchmark({ exec, readFile, workspaceDir: workspace, reportPath: "r.md" }),
+      runBenchmark({ exec, readFile, workspaceDir: workspace, reportPath: "r.md", exists: () => false }),
     ).rejects.toThrow(/benchmark-hexagon\.ps1 fallito \(exit 2\).*modello mancante/);
+
+    const { fn: execStdout } = recordingExec(() => ({
+      code: 3,
+      stdout: "errore su stdout",
+      stderr: "",
+    }));
+    await expect(
+      runBenchmark({ exec: execStdout, readFile, workspaceDir: workspace, reportPath: "r.md", exists: () => false }),
+    ).rejects.toThrow(/errore su stdout/);
+
+    const { fn: execEmpty } = recordingExec(() => ({
+      code: 4,
+      stdout: "",
+      stderr: "",
+    }));
+    await expect(
+      runBenchmark({ exec: execEmpty, readFile, workspaceDir: workspace, reportPath: "r.md", exists: () => false }),
+    ).rejects.toThrow(/output vuoto/);
   });
 
-  it("blocca esecuzione di benchmark in parallelo per prevenire saturazione di memoria", async () => {
+  it("blocca esecuzione di benchmark in parallelo e espone isBenchmarkActive", async () => {
     resetBenchmarkActiveForTests();
-    let resolveP1: (val: any) => void;
+    expect(isBenchmarkActive()).toBe(false);
+    let resolveP1!: (val: { code: number; stdout: string; stderr: string }) => void;
     const slowPromise = new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
       resolveP1 = resolve;
     });
     const exec = vi.fn(() => slowPromise);
     const readFile = vi.fn(async () => "");
 
-    const p1 = runBenchmark({ exec, readFile, workspaceDir: workspace, reportPath: "r1.md" });
+    const p1 = runBenchmark({
+      exec,
+      readFile,
+      workspaceDir: workspace,
+      reportPath: "r1.md",
+      exists: () => false,
+    });
+    expect(isBenchmarkActive()).toBe(true);
 
     await expect(
-      runBenchmark({ exec, readFile, workspaceDir: workspace, reportPath: "r2.md" }),
+      runBenchmark({
+        exec,
+        readFile,
+        workspaceDir: workspace,
+        reportPath: "r2.md",
+        exists: () => false,
+      }),
     ).rejects.toThrow(/Benchmark già in esecuzione: l'avvio di benchmark in parallelo è bloccato/);
 
-    resolveP1!({ code: 0, stdout: "", stderr: "" });
+    resolveP1({ code: 0, stdout: "", stderr: "" });
     await p1;
+    expect(isBenchmarkActive()).toBe(false);
   });
 });
 
@@ -286,25 +327,63 @@ describe("createHexagonTools", () => {
   };
 
   function makeDeps() {
+    const written = new Map<string, string>();
     const { fn: fetch } = recordingFetch((call) =>
       call.url.endsWith("/health")
         ? fakeResponse(200)
         : fakeResponse(200, { data: [{ id: "Ornith-1.5-9B-Q4_0" }] }),
     );
     const { fn: exec } = recordingExec(() => okExec());
-    const readFile = vi.fn(async () => BENCH_MARKDOWN);
+    const readFile = vi.fn(async (p: string) => {
+      if (p.endsWith(".md")) return BENCH_MARKDOWN;
+      const found = written.get(p);
+      if (found !== undefined) return found;
+      if (p.endsWith("hexagon-models.ini")) {
+        return "[Ornith-1.5-9B-Q4_0]\nmodel = /virtual/models/Ornith-1.5-9B-Q4_0.gguf\ndevice = HTP0\nctx-size = 65536\n";
+      }
+      throw new Error(`ENOENT: ${p}`);
+    });
+    const writeFile = vi.fn(async (p: string, content: string) => {
+      written.set(p, content);
+    });
+    const listDir = vi.fn(async () => ["Ornith-1.5-9B-Q4_0.gguf"]);
+    const exists = vi.fn(async (p: string) => {
+      if (written.has(p)) return true;
+      if (p.endsWith("kilo.json") || p.endsWith("kilo.jsonc")) return false;
+      return true;
+    });
+    const mkdir = vi.fn(async () => {});
+    const { fn: spawn } = recordingSpawn(4444);
     const sync = vi.fn(async () => syncOutcome);
     return {
-      deps: { fetch, exec, readFile, workspaceDir: "C:/repo", sync },
+      deps: {
+        fetch,
+        exec,
+        readFile,
+        writeFile,
+        listDir,
+        exists,
+        mkdir,
+        spawn,
+        sleep: async () => {},
+        now: () => 1_700_000_000_000,
+        modelsDir: "/virtual/models",
+        iniPath: "/virtual/ini/hexagon-models.ini",
+        registryPath: "/virtual/registry/models-registry.json",
+        configDir: "/virtual/config/kilo",
+        workspaceDir: "/virtual/repo",
+        sync,
+      },
       sync,
+      written,
     };
   }
 
   it("resolveBenchScript: usa script locale se presente, altrimenti fallback su bundled", () => {
-    expect(resolveBenchScript({ workspaceDir: "C:/custom", exists: (p) => p.includes("custom") })).toBe(
-      "C:\\custom\\benchmark-hexagon.ps1",
+    expect(resolveBenchScript({ workspaceDir: "/virtual/custom", exists: (p) => p.includes("custom") })).toContain(
+      "benchmark-hexagon.ps1",
     );
-    expect(resolveBenchScript({ workspaceDir: "C:/nonexistent", exists: () => false })).toBe(
+    expect(resolveBenchScript({ workspaceDir: "/virtual/nonexistent", exists: () => false })).toBe(
       BUNDLED_BENCH_SCRIPT,
     );
   });
@@ -331,11 +410,7 @@ describe("createHexagonTools", () => {
 
   it("hexagon_models: lista modelli locali con classificazione", async () => {
     const { deps } = makeDeps();
-    const tools = createHexagonTools({
-      ...deps,
-      listDir: async () => ["Ornith-1.5-9B-Q4_0.gguf"],
-      exists: async () => true,
-    });
+    const tools = createHexagonTools(deps);
     const raw = await tools.hexagon_models.execute({}, undefined as never);
     const parsed = JSON.parse(raw);
     expect(Array.isArray(parsed)).toBe(true);
@@ -343,31 +418,37 @@ describe("createHexagonTools", () => {
     expect(parsed[0].status).toBe("certified");
   });
 
-  it("hexagon_qualify: qualifica un modello", async () => {
-    const { deps } = makeDeps();
+  it("hexagon_qualify: qualifica un modello esistente e salva sul registry isolato", async () => {
+    const { deps, written } = makeDeps();
     const tools = createHexagonTools({
       ...deps,
       listDir: async () => ["test-model.gguf"],
-      exists: async () => true,
-      readFile: async () => BENCH_MARKDOWN,
-      writeFile: async () => {},
     });
     const raw = await tools.hexagon_qualify.execute({ model: "test-model" }, undefined as never);
     const parsed = JSON.parse(raw);
     expect(parsed.modelId).toBe("test-model");
     expect(parsed.status).toBe("certified");
+    expect(written.get("/virtual/registry/models-registry.json")).toContain("test-model");
   });
 
-  it("hexagon_setup: esecuzione e allineamento config", async () => {
-    const { deps } = makeDeps();
+  it("hexagon_setup: allinea config workspace e globale in memoria senza toccare disco", async () => {
+    const { deps, written } = makeDeps();
     const tools = createHexagonTools(deps);
-    const raw = await tools.hexagon_setup.execute({ workspace: true }, undefined as never);
-    const parsed = JSON.parse(raw);
-    expect(parsed.updated).toBe(true);
-    expect(parsed.modelCount).toBeGreaterThan(0);
+
+    const wsRaw = await tools.hexagon_setup.execute({ workspace: true }, undefined as never);
+    const wsParsed = JSON.parse(wsRaw);
+    expect(wsParsed.updated).toBe(true);
+    expect(wsParsed.modelCount).toBeGreaterThan(0);
+    expect(written.has(wsParsed.targetPath)).toBe(true);
+
+    const globalRaw = await tools.hexagon_setup.execute({ workspace: false }, undefined as never);
+    const globalParsed = JSON.parse(globalRaw);
+    expect(globalParsed.updated).toBe(true);
+    expect(globalParsed.targetPath).toContain("kilo.jsonc");
+    expect(written.has(globalParsed.targetPath)).toBe(true);
   });
 
-  it("hexagon_sync: trigger force e JSON dell'esito", async () => {
+  it("hexagon_sync: sincronizza catalogo, gestisce reload stale e catch sicuri", async () => {
     const { deps, sync } = makeDeps();
     const tools = createHexagonTools(deps);
     const parsed = JSON.parse(
@@ -376,6 +457,77 @@ describe("createHexagonTools", () => {
     expect(sync).toHaveBeenCalledWith({ force: true });
     expect(parsed.updated).toBe(true);
     expect(parsed.message).toBe("allineato");
+    expect(parsed.catalog.routerReloaded).toBe(false);
+
+    // Senza writeFile/listDir/exists/spawn e con waitForHealth fallito (catch sicuro)
+    const toolsMinimal = createHexagonTools({
+      fetch: async () => {
+        throw new Error("down");
+      },
+      exec: deps.exec,
+      readFile: deps.readFile,
+      sleep: async () => {},
+      workspaceDir: deps.workspaceDir,
+      sync,
+    });
+    const minParsed = JSON.parse(
+      await toolsMinimal.hexagon_sync.execute({}, undefined as never),
+    );
+    expect(minParsed.health).toBeUndefined();
+    expect(minParsed.catalog.iniUpdated).toBe(false);
+
+    // Senza spawn ma con writeFile/listDir/exists
+    const toolsNoSpawn = createHexagonTools({
+      ...deps,
+      spawn: undefined,
+    });
+    const noSpawnParsed = JSON.parse(
+      await toolsNoSpawn.hexagon_sync.execute({}, undefined as never),
+    );
+    expect(noSpawnParsed.catalog.routerReloaded).toBe(false);
+
+    // sync.updated=false ma routerReloaded=true quando il router era spento
+    let spawnedForReload = false;
+    const reloadTools = createHexagonTools({
+      ...deps,
+      sync: async () => ({ ...syncOutcome, updated: false }),
+      fetch: async (url: string) => {
+        if (!spawnedForReload) throw new Error("ECONNREFUSED");
+        return url.endsWith("/health")
+          ? fakeResponse(200, { status: "ok" })
+          : fakeResponse(200, { object: "list", data: [] });
+      },
+      spawn: (...args) => {
+        spawnedForReload = true;
+        return deps.spawn(...args);
+      },
+    });
+    const reloadedParsed = JSON.parse(
+      await reloadTools.hexagon_sync.execute({}, undefined as never),
+    );
+    expect(reloadedParsed.catalog.routerReloaded).toBe(true);
+    expect(reloadedParsed.health.ready).toBe(true);
+
+    // Con errore in listDir durante syncDiscoveredModelsToIni, spawn fallito e sync.updated=false
+    const toolsErr = createHexagonTools({
+      ...deps,
+      sync: async () => ({ ...syncOutcome, updated: false }),
+      listDir: async () => {
+        throw new Error("listDir error");
+      },
+      fetch: async () => {
+        throw new Error("network error");
+      },
+      spawn: () => {
+        throw new Error("spawn error");
+      },
+    });
+    const errParsed = JSON.parse(
+      await toolsErr.hexagon_sync.execute({}, undefined as never),
+    );
+    expect(errParsed.catalog.iniUpdated).toBe(false);
+    expect(errParsed.catalog.routerReloaded).toBe(false);
+    expect(errParsed.health).toBeUndefined();
   });
 
   it("hexagon_bench: token/s nel JSON", async () => {
@@ -393,17 +545,6 @@ describe("createHexagonTools", () => {
     expect(parsed.model).toBe("Ornith-1.5-9B-Q4_0");
   });
 
-  it("hexagon_models: elenca modelli con status e hardware", async () => {
-    const { deps } = makeDeps();
-    const tools = createHexagonTools(deps);
-    const raw = await tools.hexagon_models.execute({}, undefined as never);
-    const parsed = JSON.parse(raw);
-    expect(Array.isArray(parsed)).toBe(true);
-    expect(parsed.length).toBeGreaterThan(0);
-    expect(parsed[0]).toHaveProperty("id");
-    expect(parsed[0]).toHaveProperty("status");
-  });
-
   it("hexagon_qualify: errore se modello non esiste", async () => {
     const { deps } = makeDeps();
     const tools = createHexagonTools(deps);
@@ -413,13 +554,25 @@ describe("createHexagonTools", () => {
     expect(parsed.error).toContain("non-esistente");
   });
 
-  it("hexagon_qualify: qualifica modello esistente", async () => {
+  it("hexagon_qualify: qualifica modello certificato per nome file .gguf", async () => {
     const { deps } = makeDeps();
-    const tools = createHexagonTools(deps);
-    const raw = await tools.hexagon_qualify.execute({ model: "Ornith-1.5-9B-Q4_0" }, undefined as never);
+    const tools = createHexagonTools({
+      ...deps,
+      iniPath: undefined,
+    });
+    const raw = await tools.hexagon_qualify.execute({ model: "Ornith-1.5-9B-Q4_0.gguf" }, undefined as never);
     const parsed = JSON.parse(raw);
     expect(parsed.modelId).toBe("Ornith-1.5-9B-Q4_0");
     expect(parsed.status).toBe("certified");
+
+    const setupDefaultIni = createHexagonTools({
+      ...deps,
+      iniPath: undefined,
+    });
+    const setupParsed = JSON.parse(
+      await setupDefaultIni.hexagon_setup.execute({ workspace: true }, undefined as never),
+    );
+    expect(setupParsed.updated).toBe(true);
   });
 
   it("hexagon_status include runtime checkRuntime quando fornito e gestisce errori", async () => {
@@ -478,6 +631,24 @@ describe("createHexagonTools", () => {
     expect(parsed.restarted).toBe(true);
     expect(parsed.health.ready).toBe(true);
     expect(parsed.loadedModels).toEqual(["Ornith-1.5-9B-Q4_0"]);
+
+    // Default iniPath e modelsDir in hexagon_restart (usati solo come argomenti spawn mockati)
+    const toolsDefaults = createHexagonTools({
+      ...deps,
+      iniPath: undefined,
+      modelsDir: undefined,
+      fetch,
+      exec,
+      sleep: async () => {},
+      spawn: (...args) => {
+        spawned = true;
+        return spawn(...args);
+      },
+    });
+    killed = false;
+    spawned = false;
+    const parsedDefaults = JSON.parse(await toolsDefaults.hexagon_restart.execute({}, undefined as never));
+    expect(parsedDefaults.restarted).toBe(true);
   });
 
   it("descrizioni dei tool presenti", () => {

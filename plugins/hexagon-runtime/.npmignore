@@ -1,0 +1,12 @@
+assets/hexagon-models.ini
+assets/hexagon-models.ini*
+assets/scripts/benchmark-logs/
+assets/scripts/BENCHMARK_AUTO.md
+*.log
+*.bak
+*.bak*
+coverage/
+tests/
+tsconfig.json
+vitest.config.ts
+kilo.json

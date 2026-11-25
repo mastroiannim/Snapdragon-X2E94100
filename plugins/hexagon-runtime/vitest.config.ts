@@ -10,6 +10,7 @@ export default defineConfig({
       exclude: ["src/cli.ts"],
       reporter: ["text", "json-summary"],
       thresholds: {
+        perFile: true,
         lines: 90,
         functions: 90,
         statements: 90,

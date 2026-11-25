@@ -12,6 +12,7 @@ import type {
   ExecFn,
   ExistsFn,
   ListDirFn,
+  MkdirFn,
   ReadFileFn,
   WriteFileFn,
 } from "./types.js";
@@ -315,12 +316,15 @@ export interface SyncModelsDeps {
   readFile: ReadFileFn;
   writeFile: WriteFileFn;
   exec: ExecFn;
+  mkdir?: MkdirFn;
 }
 
 export interface SyncModelsOptions {
   modelsDir: string;
   iniPath: string;
   workspaceDir?: string;
+  localAppData?: string;
+  configDir?: string;
   deps: SyncModelsDeps;
   inspectScript?: string;
   skipInspection?: boolean;
@@ -450,7 +454,7 @@ export async function syncDiscoveredModelsToIni(
   await deps.writeFile(iniPath, updatedIniText);
 
   // Sincronizza anche %LOCALAPPDATA%/Hexagon/hexagon-models.ini se disponibile
-  const localAppData = process.env.LOCALAPPDATA;
+  const localAppData = options.localAppData ?? process.env.LOCALAPPDATA;
   if (localAppData) {
     const userIni = join(localAppData, "Hexagon", "hexagon-models.ini");
     if (userIni.toLowerCase() !== iniPath.toLowerCase()) {
@@ -470,9 +474,12 @@ export async function syncDiscoveredModelsToIni(
   try {
     await installProviderConfig({
       workspaceDir: options.workspaceDir,
+      configDir: options.configDir,
       iniPath,
       readFile: deps.readFile,
       writeFile: deps.writeFile,
+      exists: deps.exists,
+      mkdir: deps.mkdir,
     });
   } catch {
     /* fallback se la directory .config/kilo non e' accessibile */

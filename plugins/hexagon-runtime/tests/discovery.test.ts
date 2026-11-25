@@ -226,6 +226,24 @@ describe("inspectGguf", () => {
     await expect(inspectGguf("C:/models/corrupt.gguf", { exec })).rejects.toThrow(
       /Ispezione GGUF fallita/,
     );
+
+    const { fn: execStdout } = recordingExec(() => ({
+      code: 2,
+      stdout: "stdout err",
+      stderr: "",
+    }));
+    await expect(inspectGguf("C:/models/corrupt.gguf", { exec: execStdout })).rejects.toThrow(
+      /stdout err/,
+    );
+
+    const { fn: execEmpty } = recordingExec(() => ({
+      code: 3,
+      stdout: "",
+      stderr: "",
+    }));
+    await expect(inspectGguf("C:/models/corrupt.gguf", { exec: execEmpty })).rejects.toThrow(
+      /errore sconosciuto/,
+    );
   });
 });
 
@@ -339,6 +357,41 @@ describe("scanModels", () => {
     expect(models).toHaveLength(1);
     expect(models[0].mmprojPath).toContain("mmproj-customvision-7b-vision-encoder.gguf");
   });
+
+  it("marca architettura clip come incompatible", async () => {
+    const listDir = vi.fn(async () => ["clip-only.gguf"]);
+    const exists = vi.fn(async () => true);
+    const exec = vi.fn(async () =>
+      okExec(
+        JSON.stringify({
+          architecture: "clip",
+          model_name: "CLIP",
+          context_length: 512,
+          embedding_length: 768,
+          block_count: 12,
+          head_count: 12,
+          head_count_kv: 12,
+          expert_count: 0,
+          expert_used_count: 0,
+          sliding_window: 0,
+          file_type: 1,
+          file_size_bytes: 500_000_000,
+          size_gb: 0.5,
+          quant_name: "F16",
+          is_moe: false,
+        }),
+      ),
+    );
+
+    const models = await scanModels({
+      modelsDir: "/virtual/models",
+      deps: { listDir, exists, exec },
+    });
+
+    expect(models).toHaveLength(1);
+    expect(models[0].status).toBe("incompatible");
+    expect(models[0].strategy).toContain("Incompatibile");
+  });
 });
 
 describe("discovery.ts — syncDiscoveredModelsToIni", () => {
@@ -347,23 +400,25 @@ describe("discovery.ts — syncDiscoveredModelsToIni", () => {
       "Ornith-1.5-9B-Q4_0.gguf",
       "Inkling-2-Mini-UD-Q4_K_M.gguf",
     ]);
-    const exists = vi.fn(async () => true);
+    const exists = vi.fn(async (p: string) => !p.endsWith("kilo.json"));
     const existingIni = `[*]
 flash-attn = on
 
 [Ornith-1.5-9B-Q4_0]
-model = C:/models/Ornith-1.5-9B-Q4_0.gguf
+model = /virtual/models/Ornith-1.5-9B-Q4_0.gguf
 device = HTP0
 ctx-size = 65536
 `;
-    const storage = new Map<string, string>([["C:/models/hexagon-models.ini", existingIni]]);
+    const storage = new Map<string, string>([["/virtual/models/hexagon-models.ini", existingIni]]);
     const readFile = vi.fn(async (p: string) => storage.get(p) ?? "");
     const { fn: writeFile, calls: writeCalls } = recordingWriteFile();
 
     const res = await syncDiscoveredModelsToIni({
-      modelsDir: "C:/models",
-      iniPath: "C:/models/hexagon-models.ini",
-      workspaceDir: "C:/workspace",
+      modelsDir: "/virtual/models",
+      iniPath: "/virtual/models/hexagon-models.ini",
+      workspaceDir: "/virtual/workspace",
+      localAppData: "",
+      configDir: "/virtual/config",
       skipInspection: true,
       deps: {
         listDir,
@@ -371,6 +426,7 @@ ctx-size = 65536
         readFile,
         writeFile,
         exec: vi.fn(),
+        mkdir: vi.fn(),
       },
     });
 
@@ -378,7 +434,7 @@ ctx-size = 65536
     expect(res.addedModels).toEqual(["Inkling-2-Mini-UD-Q4_K_M"]);
     expect(res.totalModels).toBe(2);
 
-    const updatedIni = writeCalls.find((c) => c.path === "C:/models/hexagon-models.ini")?.content;
+    const updatedIni = writeCalls.find((c) => c.path === "/virtual/models/hexagon-models.ini")?.content;
     expect(updatedIni).toBeDefined();
     expect(updatedIni).toContain("[Inkling-2-Mini-UD-Q4_K_M]");
     expect(updatedIni).toContain("Inkling-2-Mini-UD-Q4_K_M.gguf");
@@ -392,7 +448,7 @@ ctx-size = 65536
 flash-attn = on
 
 [Ornith-1.5-9B-Q4_0]
-model = C:/models/Ornith-1.5-9B-Q4_0.gguf
+model = /virtual/models/Ornith-1.5-9B-Q4_0.gguf
 device = HTP0
 ctx-size = 65536
 `;
@@ -400,8 +456,8 @@ ctx-size = 65536
     const { fn: writeFile, calls: writeCalls } = recordingWriteFile();
 
     const res = await syncDiscoveredModelsToIni({
-      modelsDir: "C:/models",
-      iniPath: "C:/models/hexagon-models.ini",
+      modelsDir: "/virtual/models",
+      iniPath: "/virtual/models/hexagon-models.ini",
       skipInspection: true,
       deps: {
         listDir,
@@ -409,6 +465,7 @@ ctx-size = 65536
         readFile,
         writeFile,
         exec: vi.fn(),
+        mkdir: vi.fn(),
       },
     });
 
@@ -420,19 +477,19 @@ ctx-size = 65536
 
   it("rimuove dall'INI i modelli eliminati da disco", async () => {
     const listDir = vi.fn(async () => ["Ornith-1.5-9B-Q4_0.gguf"]);
-    const exists = vi.fn(async (p: string) => !p.includes("Deleted-Model"));
+    const exists = vi.fn(async (p: string) => !p.includes("Deleted-Model") && !p.endsWith("kilo.json"));
     const existingIni = `[*]
 flash-attn = on
 
 # --- Ornith-1.5-9B-Q4_0 ---
 [Ornith-1.5-9B-Q4_0]
-model = C:/models/Ornith-1.5-9B-Q4_0.gguf
+model = /virtual/models/Ornith-1.5-9B-Q4_0.gguf
 device = HTP0
 ctx-size = 65536
 
 # --- Deleted-Model ---
 [Deleted-Model]
-model = C:/models/Deleted-Model.gguf
+model = /virtual/models/Deleted-Model.gguf
 device = HTP0
 ctx-size = 32768
 `;
@@ -440,17 +497,87 @@ ctx-size = 32768
     const { fn: writeFile, calls: writeCalls } = recordingWriteFile();
 
     const res = await syncDiscoveredModelsToIni({
-      modelsDir: "C:/models",
-      iniPath: "C:/models/hexagon-models.ini",
+      modelsDir: "/virtual/models",
+      iniPath: "/virtual/models/hexagon-models.ini",
+      localAppData: "",
       skipInspection: true,
-      deps: { listDir, exists, readFile, writeFile, exec: vi.fn() },
+      deps: { listDir, exists, readFile, writeFile, exec: vi.fn(), mkdir: vi.fn() },
     });
 
     expect(res.iniUpdated).toBe(true);
     expect(res.removedModels).toEqual(["Deleted-Model"]);
     expect(res.totalModels).toBe(1);
-    const updatedIni = writeCalls.find((c) => c.path === "C:/models/hexagon-models.ini")?.content;
+    const updatedIni = writeCalls.find((c) => c.path === "/virtual/models/hexagon-models.ini")?.content;
     expect(updatedIni).toContain("[Ornith-1.5-9B-Q4_0]");
     expect(updatedIni).not.toContain("[Deleted-Model]");
+  });
+
+  it("modelsDir inesistente: ritorna zero modifiche", async () => {
+    const res = await syncDiscoveredModelsToIni({
+      modelsDir: "/virtual/missing",
+      iniPath: "/virtual/missing/hexagon-models.ini",
+      deps: {
+        listDir: vi.fn(async () => []),
+        exists: vi.fn(async () => false),
+        readFile: vi.fn(async () => ""),
+        writeFile: vi.fn(async () => {}),
+        exec: vi.fn(),
+        mkdir: vi.fn(),
+      },
+    });
+    expect(res).toEqual({ addedModels: [], removedModels: [], totalModels: 0, iniUpdated: false });
+  });
+
+  it("crea header INI predefinito, sincronizza localAppData/workspace e gestisce errore installProviderConfig", async () => {
+    const listDir = vi.fn(async () => ["hybrid-moe.gguf"]);
+    const exists = vi.fn(async (p: string) => {
+      const norm = p.replace(/\\/g, "/");
+      if (norm.endsWith("/models")) return true;
+      if (norm.endsWith("/ws/hexagon-models.ini")) return true;
+      if (norm.endsWith("kilo.json")) return true; // fa leggere "{corrotto" a installProviderConfig
+      return false;
+    });
+    const exec = vi.fn(async () =>
+      okExec(
+        JSON.stringify({
+          architecture: "qwen2moe",
+          model_name: "Hybrid MoE",
+          context_length: 65536,
+          embedding_length: 2048,
+          block_count: 28,
+          head_count: 16,
+          head_count_kv: 4,
+          expert_count: 8,
+          expert_used_count: 2,
+          sliding_window: 0,
+          file_type: 2,
+          file_size_bytes: 9_000_000_000,
+          size_gb: 8.5,
+          quant_name: "Q4_0",
+          is_moe: true,
+        }),
+      ),
+    );
+    const readFile = vi.fn(async (p: string) => {
+      if (p.endsWith("kilo.json")) return "{corrotto";
+      return "";
+    });
+    const { fn: writeFile, calls: writeCalls } = recordingWriteFile();
+
+    const res = await syncDiscoveredModelsToIni({
+      modelsDir: "/virtual/models",
+      iniPath: "/virtual/ini/hexagon-models.ini",
+      workspaceDir: "/virtual/ws",
+      localAppData: "/virtual/appdata",
+      deps: { listDir, exists, readFile, writeFile, exec, mkdir: vi.fn() },
+    });
+
+    expect(res.iniUpdated).toBe(true);
+    expect(res.addedModels).toEqual(["hybrid-moe"]);
+    const iniWritten = writeCalls.find((c) => c.path === "/virtual/ini/hexagon-models.ini")?.content;
+    expect(iniWritten).toContain("version = 1");
+    expect(iniWritten).toContain("tensor-split = 80,20");
+    expect(writeCalls.some((c) => c.path.includes("appdata") && c.path.endsWith("hexagon-models.ini"))).toBe(true);
+    expect(writeCalls.some((c) => c.path.includes("ws") && c.path.endsWith("hexagon-models.ini"))).toBe(true);
   });
 });

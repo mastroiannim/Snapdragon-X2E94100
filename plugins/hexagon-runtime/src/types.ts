@@ -52,6 +52,7 @@ export type ReadFileFn = (path: string) => Promise<string>;
 export type WriteFileFn = (path: string, content: string) => Promise<void>;
 export type ExistsFn = (path: string) => Promise<boolean>;
 export type ListDirFn = (path: string) => Promise<string[]>;
+export type MkdirFn = (path: string) => Promise<void> | void;
 export type SleepFn = (ms: number) => Promise<void>;
 export type NowFn = () => number;
 

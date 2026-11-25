@@ -16,6 +16,7 @@ import type {
   ExistsFn,
   FetchFn,
   ListDirFn,
+  MkdirFn,
   ReadFileFn,
   SpawnFn,
   WriteFileFn,
@@ -38,6 +39,8 @@ export interface ModelWatcherOptions extends ModelWatcherDeps {
   intervalMs?: number;
   registryPath?: string;
   iniPath?: string;
+  configDir?: string;
+  mkdir?: MkdirFn;
   fetch?: FetchFn;
   spawn?: SpawnFn;
   runtimeDir?: string;
@@ -73,12 +76,14 @@ export function startModelWatcher(options: ModelWatcherOptions): ModelWatcher {
             modelsDir: options.modelsDir,
             iniPath: options.iniPath,
             workspaceDir: options.workspaceDir,
+            configDir: options.configDir,
             deps: {
               listDir: options.listDir,
               exists: options.exists,
               readFile: options.readFile,
               writeFile: options.writeFile,
               exec: options.exec,
+              mkdir: options.mkdir,
             },
           });
           if (syncRes.addedModels.length > 0) {
@@ -134,6 +139,8 @@ export function startModelWatcher(options: ModelWatcherOptions): ModelWatcher {
             exec: options.exec,
             readFile: options.readFile,
             writeFile: options.writeFile,
+            exists: options.exists,
+            mkdir: options.mkdir,
             registryPath: options.registryPath,
           });
           if (options.onQualified) {

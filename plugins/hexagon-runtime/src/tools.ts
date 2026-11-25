@@ -31,6 +31,7 @@ import type {
   ExistsFn,
   FetchFn,
   ListDirFn,
+  MkdirFn,
   NowFn,
   ReadFileFn,
   SleepFn,
@@ -175,6 +176,7 @@ export interface BenchmarkOptions {
   repetitions?: number;
   reportPath?: string;
   benchScript?: string;
+  exists?: (path: string) => boolean;
 }
 
 /** Risolve lo script di benchmark: workspaceDir se presente, altrimenti asset bundled. */
@@ -213,7 +215,7 @@ export async function runBenchmark(options: BenchmarkOptions): Promise<BenchRepo
   try {
     const script =
       options.benchScript ??
-      resolveBenchScript({ workspaceDir: options.workspaceDir });
+      resolveBenchScript({ workspaceDir: options.workspaceDir, exists: options.exists });
     const reportPath =
       options.reportPath ?? join(tmpdir(), `hexagon-bench-${Date.now()}.md`);
     const args = [
@@ -257,9 +259,14 @@ export interface HexagonToolDeps {
   writeFile?: WriteFileFn;
   listDir?: ListDirFn;
   exists?: ExistsFn;
+  mkdir?: MkdirFn;
   spawn?: SpawnFn;
   sleep?: SleepFn;
+  now?: NowFn;
   modelsDir?: string;
+  iniPath?: string;
+  registryPath?: string;
+  configDir?: string;
   workspaceDir: string;
   sync: (options: { force?: boolean; stopServer?: boolean }) => Promise<SyncOutcome>;
   checkRuntime?: () => Promise<RuntimeCheck>;
@@ -276,7 +283,7 @@ export function createHexagonTools(deps: HexagonToolDeps) {
         "hexagon_sync senza eseguire comandi shell manuali.",
       args: {},
       async execute() {
-        const status = await collectStatus({ fetch: deps.fetch });
+        const status = await collectStatus({ fetch: deps.fetch, now: deps.now });
         if (deps.checkRuntime) {
           status.runtime = await deps.checkRuntime().catch((error: unknown) => ({
             error: error instanceof Error ? error.message : String(error),
@@ -294,6 +301,8 @@ export function createHexagonTools(deps: HexagonToolDeps) {
       async execute() {
         const syncRes = await deps.sync({ force: true });
         const paths = defaultPaths(deps.workspaceDir);
+        const iniPath = deps.iniPath ?? paths.iniPath;
+        const modelsDir = deps.modelsDir ?? paths.modelsDir;
         let catalogRes: SyncModelsResult = {
           addedModels: [],
           removedModels: [],
@@ -303,15 +312,17 @@ export function createHexagonTools(deps: HexagonToolDeps) {
         let routerReloaded = false;
         if (deps.writeFile && deps.listDir && deps.exists) {
           catalogRes = await syncDiscoveredModelsToIni({
-            modelsDir: deps.modelsDir ?? paths.modelsDir,
-            iniPath: paths.iniPath,
+            modelsDir,
+            iniPath,
             workspaceDir: deps.workspaceDir,
+            configDir: deps.configDir,
             deps: {
               listDir: deps.listDir,
               exists: deps.exists,
               readFile: deps.readFile,
               writeFile: deps.writeFile,
               exec: deps.exec,
+              mkdir: deps.mkdir,
             },
           }).catch(() => ({
             addedModels: [],
@@ -329,8 +340,8 @@ export function createHexagonTools(deps: HexagonToolDeps) {
               sleep: deps.sleep,
               runtimeDir: paths.binPath,
               serverExe: paths.serverExe,
-              iniPath: paths.iniPath,
-              modelsDir: deps.modelsDir ?? paths.modelsDir,
+              iniPath,
+              modelsDir,
             }).catch(() => ({ reloaded: false }));
             routerReloaded = reload.reloaded;
           }
@@ -340,6 +351,7 @@ export function createHexagonTools(deps: HexagonToolDeps) {
           health = await waitForHealth({
             fetch: deps.fetch,
             sleep: deps.sleep,
+            now: deps.now,
           }).catch(() => undefined);
         }
         return JSON.stringify(
@@ -368,9 +380,10 @@ export function createHexagonTools(deps: HexagonToolDeps) {
           spawn: deps.spawn ?? nodeSpawn,
           exec: deps.exec,
           sleep: deps.sleep,
+          now: deps.now,
           runtimeDir: paths.binPath,
           serverExe: paths.serverExe,
-          iniPath: paths.iniPath,
+          iniPath: deps.iniPath ?? paths.iniPath,
           modelsDir: deps.modelsDir ?? paths.modelsDir,
         });
         return JSON.stringify(res, null, 2);
@@ -409,8 +422,13 @@ export function createHexagonTools(deps: HexagonToolDeps) {
         const paths = defaultPaths(deps.workspaceDir);
         const res = await installProviderConfig({
           workspaceDir: args.workspace ? deps.workspaceDir : undefined,
-          iniPath: paths.iniPath,
+          configDir: deps.configDir,
+          iniPath: deps.iniPath ?? paths.iniPath,
           readFile: deps.readFile,
+          writeFile: deps.writeFile,
+          exists: deps.exists,
+          mkdir: deps.mkdir,
+          now: deps.now,
         });
         return JSON.stringify(res, null, 2);
       },
@@ -457,6 +475,9 @@ export function createHexagonTools(deps: HexagonToolDeps) {
           exec: deps.exec,
           readFile: deps.readFile,
           writeFile: deps.writeFile,
+          exists: deps.exists,
+          mkdir: deps.mkdir,
+          registryPath: deps.registryPath,
         });
         return JSON.stringify(profile, null, 2);
       },

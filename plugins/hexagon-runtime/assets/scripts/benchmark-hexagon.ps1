@@ -12,6 +12,7 @@ param(
     [int]$Repetitions = 5,
     [int]$Threads = 12,
     [string]$ReportPath = (Join-Path $PSScriptRoot "BENCHMARK_AUTO.md"),
+    [string]$LogDir = $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "Hexagon\logs" } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE "AppData\Local\Hexagon\logs" } else { Join-Path ([IO.Path]::GetTempPath()) "Hexagon\logs" }),
     [switch]$SkipReportWrite
 )
 
@@ -123,7 +124,7 @@ function Invoke-BenchWithPower {
                 else { "pp${PromptTokens}+tg${GenTokens}" }
     if ($Depth -gt 0) { $testType += "@d$Depth" }
 
-    $logDir = Join-Path $PSScriptRoot "benchmark-logs"
+    $logDir = $LogDir
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
     $runId = [guid]::NewGuid().ToString("N")
     $outFile = Join-Path $logDir ($runId + "_stdout.json")

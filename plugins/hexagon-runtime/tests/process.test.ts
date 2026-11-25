@@ -446,6 +446,54 @@ describe("ensureModelsIni: zero-setup INI", () => {
     });
     expect(result).toEqual({ generated: true, modelCount: 0 });
   });
+
+  it("risoluzione script launch-hexagon: wsScript, repoScript e fallback stdout/output vuoto", async () => {
+    const { fn: execWs, calls: wsCalls } = recordingExec(() =>
+      okExec(JSON.stringify({ ini_content: iniContent })),
+    );
+    await ensureModelsIni({
+      iniPath: "/virtual/ws/hexagon-models.ini",
+      workspaceDir: "/virtual/ws",
+      syncExists: (p) => p.includes("ws"),
+      exec: execWs,
+      exists: async () => false,
+      writeFile: recordingWriteFile().fn,
+    });
+    expect(wsCalls[0].args[wsCalls[0].args.indexOf("-File") + 1]).toContain("ws");
+
+    const { fn: execRepo, calls: repoCalls } = recordingExec(() =>
+      okExec(JSON.stringify({ ini_content: iniContent })),
+    );
+    await ensureModelsIni({
+      iniPath: "/virtual/other/hexagon-models.ini",
+      workspaceDir: "/virtual/other",
+      syncExists: (p) => !p.includes("other"),
+      exec: execRepo,
+      exists: async () => false,
+      writeFile: recordingWriteFile().fn,
+    });
+    expect(repoCalls[0].args[repoCalls[0].args.indexOf("-File") + 1]).toContain("launch-hexagon.ps1");
+
+    await expect(
+      ensureModelsIni({
+        ...base,
+        syncExists: () => false,
+        exec: recordingExec(() => ({ code: 2, stdout: "out-err", stderr: "" })).fn,
+        exists: async () => false,
+        writeFile: recordingWriteFile().fn,
+      }),
+    ).rejects.toThrow(/out-err/);
+
+    await expect(
+      ensureModelsIni({
+        ...base,
+        syncExists: () => false,
+        exec: recordingExec(() => ({ code: 2, stdout: "", stderr: "" })).fn,
+        exists: async () => false,
+        writeFile: recordingWriteFile().fn,
+      }),
+    ).rejects.toThrow(/output vuoto/);
+  });
 });
 
 describe("getLoadedModels e reloadServerIfStale", () => {
@@ -604,11 +652,73 @@ device = HTP0
       modelsDir: "C:/models",
     });
 
+    expect(result.restarted).toBe(true);
     expect(result.stopped).toBe(true);
     expect(result.started).toBe(true);
-    expect(result.restarted).toBe(true);
     expect(result.pid).toBe(7777);
     expect(result.health.ready).toBe(true);
     expect(result.loadedModels).toEqual(["model-a"]);
+  });
+
+  it("gestisce stopServer fallito, getLoadedModels vuoto e reloadServerIfStale edge-case", async () => {
+    expect(await stopServer({ exec: async () => ({ code: 1, stdout: "", stderr: "" }) })).toBe(false);
+    expect(await stopServer({ exec: async () => { throw new Error("boom"); } })).toBe(false);
+
+    expect(
+      await getLoadedModels({
+        fetch: async () => fakeResponse(500),
+      }),
+    ).toEqual([]);
+    expect(
+      await getLoadedModels({
+        fetch: async () => {
+          throw new Error("down");
+        },
+      }),
+    ).toEqual([]);
+
+    // Server spento -> reloadServerIfStale delega a ensureServer
+    const downReload = await reloadServerIfStale({
+      fetch: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      spawn: recordingSpawn(42).fn,
+      exec: recordingExec(() => okExec()).fn,
+      runtimeDir: "/virtual/bin",
+      serverExe: "/virtual/bin/llama-server.exe",
+      iniPath: "/virtual/hexagon-models.ini",
+      modelsDir: "/virtual/models",
+    });
+    expect(downReload.reloaded).toBe(true);
+
+    // readFile fallito
+    const badRead = await reloadServerIfStale({
+      fetch: recordingFetch((c) => routerResponse(c.url)).fn,
+      spawn: recordingSpawn().fn,
+      exec: recordingExec(() => okExec()).fn,
+      readFile: async () => {
+        throw new Error("EACCES");
+      },
+      runtimeDir: "/virtual/bin",
+      serverExe: "/virtual/bin/llama-server.exe",
+      iniPath: "/virtual/hexagon-models.ini",
+      modelsDir: "/virtual/models",
+    });
+    expect(badRead.reloaded).toBe(false);
+    expect(badRead.reason).toContain("Impossibile leggere iniPath");
+
+    // INI senza modelli
+    const emptyIni = await reloadServerIfStale({
+      fetch: recordingFetch((c) => routerResponse(c.url)).fn,
+      spawn: recordingSpawn().fn,
+      exec: recordingExec(() => okExec()).fn,
+      readFile: async () => "[*]\nthreads = 12\n",
+      runtimeDir: "/virtual/bin",
+      serverExe: "/virtual/bin/llama-server.exe",
+      iniPath: "/virtual/hexagon-models.ini",
+      modelsDir: "/virtual/models",
+    });
+    expect(emptyIni.reloaded).toBe(false);
+    expect(emptyIni.reason).toContain("Nessun modello configurato");
   });
 });

@@ -10,7 +10,8 @@
   },
   "files": [
     "dist",
-    "assets"
+    "assets/scripts/*.ps1",
+    "assets/scripts/*.psm1"
   ],
   "scripts": {
     "build": "tsc",

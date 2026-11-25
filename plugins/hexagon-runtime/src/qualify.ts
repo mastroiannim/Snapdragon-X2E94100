@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { type DiscoveredModel } from "./discovery.js";
 import { BUNDLED_BENCH_SCRIPT } from "./process.js";
 import { runBenchmark, type BenchReport } from "./tools.js";
-import type { ExecFn, ReadFileFn, WriteFileFn } from "./types.js";
+import type { ExecFn, ExistsFn, MkdirFn, ReadFileFn, WriteFileFn } from "./types.js";
 
 export interface BenchmarkMetrics {
   prefillTokPerSec: number;
@@ -35,13 +35,15 @@ export interface QualificationProfile {
 export type ModelsRegistry = Record<string, QualificationProfile>;
 
 export function defaultRegistryPath(localAppData = process.env.LOCALAPPDATA): string {
-  const base = localAppData ?? join(homedir(), "AppData", "Local");
+  const base = localAppData || join(homedir(), "AppData", "Local");
   return join(base, "Hexagon", "models-registry.json");
 }
 
 export interface RegistryIoDeps {
   readFile?: ReadFileFn;
   writeFile?: WriteFileFn;
+  exists?: ExistsFn;
+  mkdir?: MkdirFn;
 }
 
 export async function loadRegistry(
@@ -63,9 +65,17 @@ export async function saveRegistry(
   deps: RegistryIoDeps = {},
 ): Promise<void> {
   const write = deps.writeFile ?? (async (p, c) => writeFileSync(p, c, "utf-8"));
+  const exists = deps.exists ?? (async (p) => existsSync(p));
+  const mkdir: MkdirFn =
+    deps.mkdir ??
+    (deps.writeFile
+      ? async () => {}
+      : (p) => {
+          mkdirSync(p, { recursive: true });
+        });
   const dir = dirname(registryPath);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+  if (!(await exists(dir))) {
+    await mkdir(dir);
   }
   const content = JSON.stringify(registry, null, 2);
   await write(registryPath, content);
@@ -77,6 +87,8 @@ export interface QualifyOptions {
   exec: ExecFn;
   readFile: ReadFileFn;
   writeFile?: WriteFileFn;
+  exists?: ExistsFn;
+  mkdir?: MkdirFn;
   registryPath?: string;
   benchScript?: string;
 }
@@ -128,7 +140,11 @@ export async function qualifyModel(options: QualifyOptions): Promise<Qualificati
     const regPath = options.registryPath ?? defaultRegistryPath();
     const registry = await loadRegistry(regPath, { readFile: options.readFile });
     registry[model.id] = profile;
-    await saveRegistry(registry, regPath, { writeFile: options.writeFile });
+    await saveRegistry(registry, regPath, {
+      writeFile: options.writeFile,
+      exists: options.exists,
+      mkdir: options.mkdir,
+    });
 
     return profile;
   } catch (error) {
@@ -146,7 +162,11 @@ export async function qualifyModel(options: QualifyOptions): Promise<Qualificati
     const regPath = options.registryPath ?? defaultRegistryPath();
     const registry = await loadRegistry(regPath, { readFile: options.readFile });
     registry[model.id] = profile;
-    await saveRegistry(registry, regPath, { writeFile: options.writeFile });
+    await saveRegistry(registry, regPath, {
+      writeFile: options.writeFile,
+      exists: options.exists,
+      mkdir: options.mkdir,
+    });
 
     return profile;
   }

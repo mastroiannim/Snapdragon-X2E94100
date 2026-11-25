@@ -109,7 +109,8 @@ try {
     }
 
     $report = Join-Path $testRoot 'report.md'
-    . $source -BinPath $testRoot -ModelsDir $testRoot -Models 'fixture.gguf' -Repetitions 1 -ReportPath $report
+    $logDir = Join-Path $testRoot 'logs'
+    . $source -BinPath $testRoot -ModelsDir $testRoot -Models 'fixture.gguf' -Repetitions 1 -ReportPath $report -LogDir $logDir
     Assert-True ($script:benchCalls.Count -eq 10) 'Expected prefill and decode for each of five profiles'
     $table = @(Get-Content -LiteralPath $report | Where-Object { $_.StartsWith('|') })
     Assert-True ($table.Count -eq 12) 'Report lost results'
@@ -123,7 +124,7 @@ try {
     # A successful process returning several variants must not publish a misleading report.
     $script:multipleResults = $true
     $rejectedReport = Join-Path $testRoot 'rejected.md'
-    . $source -BinPath $testRoot -ModelsDir $testRoot -Models 'fixture.gguf' -Repetitions 1 -ReportPath $rejectedReport
+    . $source -BinPath $testRoot -ModelsDir $testRoot -Models 'fixture.gguf' -Repetitions 1 -ReportPath $rejectedReport -LogDir $logDir
     Assert-True (-not (Test-Path -LiteralPath $rejectedReport)) 'Rejected JSON was published'
     'BENCHMARK_PROFILE_TESTS=PASS (5 profiles, pp/tg, invalid JSON, report and rejection path)'
 } finally {
