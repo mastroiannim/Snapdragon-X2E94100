@@ -10,6 +10,7 @@ import { BUNDLED_SYNC_SCRIPT } from "./process.js";
 import type { ExecFn, ExistsFn, ListDirFn } from "./types.js";
 
 export const REQUIRED_RUNTIME_FILES = [
+  "ggml.dll",
   "ggml-hexagon.dll",
   "libggml-htp.cat",
   "ggml-opencl.dll",
@@ -36,6 +37,7 @@ export interface RuntimeCheck {
   missingFiles: string[];
   staleFiles?: string[];
   serverRunning?: boolean;
+  scriptError?: string;
   needsSync: boolean;
 }
 
@@ -120,6 +122,37 @@ interface ScriptRuntimeCheckResult {
   missingFiles: string[];
   staleFiles?: string[];
   serverRunning?: boolean;
+  scriptError?: string;
+}
+
+async function resolveGeniexExecutable(
+  paths: RuntimePaths,
+  deps: Pick<SyncDeps, "exists" | "exec">,
+  options?: { geniexDir?: string; resolveFromPath?: boolean },
+): Promise<{ geniexExe: string; geniexDir: string; found: boolean }> {
+  let geniexExe = paths.geniexExe;
+  let geniexDir = options?.geniexDir ?? dirname(paths.geniexExe);
+  let found = await deps.exists(geniexExe);
+
+  if (!found && options?.resolveFromPath !== false && process.platform === "win32") {
+    try {
+      const which = await deps.exec("where.exe", ["geniex.exe"], { timeoutMs: 5_000 });
+      const candidate = which.code === 0 ? which.stdout.trim().split(/\r?\n/)[0]?.trim() : "";
+      if (
+        candidate &&
+        /geniex\.exe$/i.test(candidate) &&
+        (await deps.exists(candidate))
+      ) {
+        geniexExe = candidate;
+        geniexDir = dirname(candidate);
+        found = true;
+      }
+    } catch {
+      /* geniex.exe non nel PATH */
+    }
+  }
+
+  return { geniexExe, geniexDir, found };
 }
 
 async function runSyncCheckScript(
@@ -150,16 +183,29 @@ async function runSyncCheckScript(
       ],
       { cwd: dirname(script), timeoutMs: 30_000 },
     );
-    if (checkRes.code === 0) {
-      const lines = checkRes.stdout.trim().split(/\r?\n/).filter(Boolean);
-      const lastLine = lines[lines.length - 1] ?? "";
-      const parsed = JSON.parse(lastLine) as {
-        Aligned?: boolean;
-        CommitAligned?: boolean;
-        MissingFiles?: string[];
-        StaleFiles?: string[];
-        ServerRunning?: boolean;
-      };
+    const lines = checkRes.stdout.trim().split(/\r?\n/).filter(Boolean);
+    const lastLine = lines[lines.length - 1] ?? "";
+    interface ParsedCheckJson {
+      Aligned?: boolean;
+      CommitAligned?: boolean;
+      MissingFiles?: string[];
+      StaleFiles?: string[];
+      ServerRunning?: boolean;
+      Error?: string;
+    }
+    let parsed: ParsedCheckJson | null = null;
+    if (lastLine) {
+      try {
+        parsed = JSON.parse(lastLine) as ParsedCheckJson;
+      } catch {
+        parsed = null;
+      }
+    }
+
+    if (checkRes.code === 0 && parsed) {
+      if (typeof parsed.Error === "string" && parsed.Error.trim()) {
+        out.scriptError = parsed.Error.trim();
+      }
       if (typeof parsed.Aligned === "boolean") {
         out.scriptAligned = parsed.Aligned;
         if (typeof parsed.CommitAligned === "boolean") {
@@ -175,9 +221,15 @@ async function runSyncCheckScript(
           out.serverRunning = parsed.ServerRunning;
         }
       }
+    } else if (checkRes.code !== 0) {
+      out.scriptError =
+        (parsed && typeof parsed.Error === "string" && parsed.Error.trim()) ||
+        checkRes.stderr.trim() ||
+        checkRes.stdout.trim() ||
+        `sync-geniex.ps1 -CheckOnly fallito (exit ${checkRes.code})`;
     }
-  } catch {
-    /* fallback al controllo base se -CheckOnly non disponibile */
+  } catch (error) {
+    out.scriptError = error instanceof Error ? error.message : String(error);
   }
   return out;
 }
@@ -211,16 +263,17 @@ async function readCatalogSignature(
 export async function checkRuntime(
   paths: RuntimePaths,
   deps: SyncDeps,
-  options?: CheckRuntimeOptions,
+  options?: CheckRuntimeOptions & { resolveFromPath?: boolean },
 ): Promise<RuntimeCheck> {
-  if (!(await deps.exists(paths.geniexExe))) {
+  const resolvedGeniex = await resolveGeniexExecutable(paths, deps, options);
+  if (!resolvedGeniex.found) {
     throw new Error(
       `geniex.exe non trovato in ${paths.geniexExe}: installare GenieX CLI ` +
         "prima di avviare il runtime Hexagon (il plugin non puo' allineare un vendor assente).",
     );
   }
-  const genie = await deps.exec(paths.geniexExe, ["--version", "--skip-update"], {
-    cwd: dirname(paths.geniexExe),
+  const genie = await deps.exec(resolvedGeniex.geniexExe, ["--version", "--skip-update"], {
+    cwd: resolvedGeniex.geniexDir,
     timeoutMs: 15_000,
   });
   if (genie.code !== 0) {
@@ -245,7 +298,11 @@ export async function checkRuntime(
 
   const missingFiles = await checkRequiredRuntimeFiles(paths.runtimeDir, deps);
   let commitAligned = sameCommit(geniexHash, llamaCommit);
-  const scriptRes = await runSyncCheckScript(paths, deps, options);
+  const scriptRes = await runSyncCheckScript(
+    { ...paths, geniexExe: resolvedGeniex.geniexExe },
+    deps,
+    { ...options, geniexDir: resolvedGeniex.geniexDir },
+  );
   if (typeof scriptRes.commitAligned === "boolean") {
     commitAligned = scriptRes.commitAligned;
   }
@@ -261,6 +318,7 @@ export async function checkRuntime(
     missingFiles,
     ...(scriptRes.staleFiles !== undefined ? { staleFiles: scriptRes.staleFiles } : {}),
     ...(scriptRes.serverRunning !== undefined ? { serverRunning: scriptRes.serverRunning } : {}),
+    ...(scriptRes.scriptError ? { scriptError: scriptRes.scriptError } : {}),
     needsSync:
       !commitAligned ||
       missingFiles.length > 0 ||
@@ -279,23 +337,11 @@ export async function inspectRuntimeStatus(
   deps: SyncDeps,
   options?: CheckRuntimeOptions & { resolveFromPath?: boolean },
 ): Promise<RuntimeDetails> {
-  let geniexExe = paths.geniexExe;
-  let geniexDir = options?.geniexDir ?? dirname(paths.geniexExe);
-  let geniexInstalled = await deps.exists(geniexExe);
-
-  if (!geniexInstalled && options?.resolveFromPath !== false && process.platform === "win32") {
-    try {
-      const which = await deps.exec("where.exe", ["geniex.exe"], { timeoutMs: 5_000 });
-      const candidate = which.code === 0 ? which.stdout.trim().split(/\r?\n/)[0]?.trim() : "";
-      if (candidate && (await deps.exists(candidate))) {
-        geniexExe = candidate;
-        geniexDir = dirname(candidate);
-        geniexInstalled = true;
-      }
-    } catch {
-      /* geniex.exe non nel PATH */
-    }
-  }
+  const {
+    geniexExe,
+    geniexDir,
+    found: geniexInstalled,
+  } = await resolveGeniexExecutable(paths, deps, options);
 
   let geniexVersion = "Non rilevato";
   let qairtVersion = "N/A";
@@ -352,6 +398,9 @@ export async function inspectRuntimeStatus(
   }
   for (const f of scriptRes.missingFiles) {
     if (!missingFiles.includes(f)) missingFiles.push(f);
+  }
+  if (scriptRes.scriptError) {
+    errors.push(scriptRes.scriptError);
   }
 
   const catalogSignature = await readCatalogSignature(paths.runtimeDir, deps);

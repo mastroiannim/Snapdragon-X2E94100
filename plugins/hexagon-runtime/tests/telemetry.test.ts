@@ -117,5 +117,12 @@ describe("telemetry.ts — parseLlamaLogs", () => {
     expect(timingsOnly.offload).toBeUndefined();
     expect(timingsOnly.warmUp.loadTimeMs).toBe(450);
     expect(timingsOnly.warmUp.htpWarmUpMs).toBe(450);
+
+    const backendFmt = parseLlamaLogs(
+      "Hexagon backend: arch=v79 dma64=1\nload_tensors: offloaded 10/10 layers to GPU\n",
+      "bench",
+    );
+    expect(backendFmt.offload?.htpArch).toBe("v79");
+    expect(backendFmt.offload?.dma64).toBe(true);
   });
 });

@@ -16,6 +16,7 @@ import {
   type HexagonProviderConfig,
 } from "./models.js";
 import {
+  BUNDLED_INI_PATH,
   parseModelsIni,
   resolveIniPath,
   ROUTER_HOST,
@@ -421,6 +422,51 @@ export function stripJsonComments(text: string): string {
   return out;
 }
 
+/**
+ * Rimuove le trailing commas prima di `}` o `]` in JSON/JSONC,
+ * preservando integralmente le stringhe quotate.
+ */
+export function stripTrailingCommas(text: string): string {
+  let out = "";
+  let inString = false;
+  const len = text.length;
+
+  for (let i = 0; i < len; i++) {
+    const ch = text[i];
+    if (inString) {
+      out += ch;
+      if (ch === "\\") {
+        if (i + 1 < len) {
+          out += text[++i];
+        }
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      continue;
+    }
+
+    if (ch === ",") {
+      let j = i + 1;
+      while (j < len && /\s/.test(text[j])) {
+        j++;
+      }
+      if (j < len && (text[j] === "}" || text[j] === "]")) {
+        continue;
+      }
+    }
+
+    out += ch;
+  }
+
+  return out;
+}
+
 function formatBackupTimestamp(date: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return (
@@ -449,7 +495,21 @@ export async function installProviderConfig(
         });
   const now = options.now ?? (() => Date.now());
 
-  const iniPath = options.iniPath ?? resolveIniPath({ workspaceDir: options.workspaceDir });
+  let iniPath = options.iniPath;
+  if (!iniPath) {
+    const wsIni = options.workspaceDir ? join(options.workspaceDir, "hexagon-models.ini") : undefined;
+    const localAppData = process.env.LOCALAPPDATA;
+    const userIni = localAppData ? join(localAppData, "Hexagon", "hexagon-models.ini") : undefined;
+    if (wsIni && (await exists(wsIni))) {
+      iniPath = wsIni;
+    } else if (userIni && (await exists(userIni))) {
+      iniPath = userIni;
+    } else if (await exists(BUNDLED_INI_PATH)) {
+      iniPath = BUNDLED_INI_PATH;
+    } else {
+      iniPath = resolveIniPath({ workspaceDir: options.workspaceDir, exists: () => false });
+    }
+  }
   let iniContent = "";
   try {
     iniContent = await readFile(iniPath);
@@ -539,7 +599,7 @@ export async function installProviderConfig(
     const noBom = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
     let parsed: unknown;
     try {
-      parsed = JSON.parse(stripJsonComments(noBom));
+      parsed = JSON.parse(stripTrailingCommas(stripJsonComments(noBom)));
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       throw new Error(
@@ -634,6 +694,17 @@ export async function installProviderConfig(
     model: resolvedMainRef,
     small_model: resolvedSmallRef,
     agent: mergedAgents,
+    ...(existing.permission === undefined
+      ? {
+          permission: {
+            read: { "*": "allow" },
+            edit: { "*": "ask" },
+            write: { "*": "ask" },
+            bash: { "*": "ask", "git status *": "allow" },
+            task: "ask",
+          },
+        }
+      : {}),
   };
 
   const content = `${JSON.stringify(mergedConfig, null, 2)}\n`;

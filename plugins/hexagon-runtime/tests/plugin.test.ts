@@ -284,6 +284,30 @@ describe("hook event / session.created", () => {
     resolveBootstrap!();
     await Promise.all([ev1, ev2]);
   });
+
+  it("session.created -> session.deleted prima della risoluzione di bootstrap non avvia watchdog ne' modelWatcher", async () => {
+    let resolveBootstrap: () => void;
+    const bootstrapPromise = new Promise<void>((resolve) => {
+      resolveBootstrap = resolve;
+    });
+    const startWatchdogFn = vi.fn(() => ({ stop: vi.fn(), running: true }));
+    const startModelWatcherFn = vi.fn(() => ({ stop: vi.fn(), checkNow: vi.fn(async () => []) }));
+    const hooks = createHexagonHooks({
+      workspaceDir: "/virtual/repo",
+      bootstrap: () => bootstrapPromise,
+      enableAutoBenchmark: true,
+      startWatchdogFn,
+      startModelWatcherFn,
+    });
+
+    await hooks.event!({ event: { type: "session.created" } as EventInput });
+    await hooks.event!({ event: { type: "session.deleted" } as EventInput });
+    resolveBootstrap!();
+    await new Promise((r) => setTimeout(r, 15));
+
+    expect(startWatchdogFn).not.toHaveBeenCalled();
+    expect(startModelWatcherFn).not.toHaveBeenCalled();
+  });
 });
 
 describe("bootstrapRuntime", () => {

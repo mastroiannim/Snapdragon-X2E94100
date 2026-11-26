@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$BinPath = (Join-Path $env:USERPROFILE "llama-cpp\llama-bin-win-cpu-arm64"),
     [string]$ModelsDir = (Join-Path $env:USERPROFILE ".cache\geniex\models"),
     [string[]]$Models = @(
@@ -133,6 +133,11 @@ function Parse-LlamaBenchStderr([string]$StderrText, [double]$BenchWallMs, $Eval
         if ($t -match 'Hexagon backend.*?arch=([A-Za-z0-9._-]+)') {
             $htpArch = $Matches[1]
             $dma64 = ($t -match 'dma64=1')
+        } elseif ($t -match 'ggml-hex:\s*Hexagon Arch version\s+([A-Za-z0-9._-]+)(?:,\s*DMA64\s+(enabled|disabled))?') {
+            $htpArch = $Matches[1]
+            if ($Matches[2]) {
+                $dma64 = ($Matches[2] -ieq 'enabled')
+            }
         }
         if ($t -match 'layer\s+(\d+)\s+assigned to device\s+([A-Za-z0-9_-]+)') {
             $idx = [int]$Matches[1]
@@ -223,6 +228,42 @@ function Parse-LlamaBenchStderr([string]$StderrText, [double]$BenchWallMs, $Eval
     }
 }
 
+function Resolve-ModelPath([string]$ModelRef) {
+    if ([string]::IsNullOrWhiteSpace($ModelRef)) { return $null }
+    if (-not (Test-Path -LiteralPath $ModelsDir -PathType Container)) { return $null }
+
+    $modelsRootFull = [IO.Path]::GetFullPath($ModelsDir)
+    $sep = [IO.Path]::DirectorySeparatorChar
+    $modelsPrefix = $modelsRootFull.TrimEnd('\', '/') + $sep
+
+    $candidate = if ([IO.Path]::IsPathRooted($ModelRef)) {
+        [IO.Path]::GetFullPath($ModelRef)
+    } else {
+        [IO.Path]::GetFullPath((Join-Path $modelsRootFull $ModelRef))
+    }
+
+    if (-not $candidate.StartsWith($modelsPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        return $null
+    }
+
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        $leaf = [IO.Path]::GetFileName($candidate)
+        if ($leaf -match '^mmproj') { return $null }
+        return $candidate
+    }
+
+    if (-not ($ModelRef -match '[\\/]')) {
+        $found = Get-ChildItem -LiteralPath $modelsRootFull -Filter $ModelRef -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch '^mmproj' } |
+            Select-Object -First 1
+        if ($found) {
+            return $found.FullName
+        }
+    }
+
+    return $null
+}
+
 function Invoke-BenchWithPower {
     param(
         [string]$ModelFile,
@@ -233,9 +274,9 @@ function Invoke-BenchWithPower {
         [int]$Depth = 0
     )
 
-    $fullModelPath = Join-Path $ModelsDir $ModelFile
-    if (-not (Test-Path $fullModelPath)) {
-        Write-Host "[!] Modello non trovato: $fullModelPath (salto)" -ForegroundColor Yellow
+    $fullModelPath = Resolve-ModelPath -ModelRef $ModelFile
+    if (-not $fullModelPath) {
+        Write-Host "[!] Modello non trovato o non valido in ${ModelsDir}: $ModelFile (salto)" -ForegroundColor Yellow
         return $null
     }
 
@@ -246,7 +287,7 @@ function Invoke-BenchWithPower {
 
     $logDir = $LogDir
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-    $runId = [guid]::NewGuid().ToString("N")
+    $runId = (Get-Date -Format "yyyyMMddHHmmssfff") + "_" + [guid]::NewGuid().ToString("N")
     $outFile = Join-Path $logDir ($runId + "_stdout.json")
     $errFile = Join-Path $logDir ($runId + "_stderr.txt")
 
@@ -492,5 +533,10 @@ if (-not $SkipReportWrite -and $allResults.Count -gt 0) {
     $telemetryPath = "$ReportPath.telemetry.json"
     [System.IO.File]::WriteAllText($telemetryPath, ($telemetryPayload | ConvertTo-Json -Depth 8), [System.Text.Encoding]::UTF8)
     Write-Host "[OK] Telemetria offload/warm-up salvata in: $telemetryPath" -ForegroundColor Green
+} elseif (-not $SkipReportWrite -and $allResults.Count -eq 0) {
+    $errMsg = "[ERRORE] Nessun risultato benchmark valido prodotto: verificare modello, profili hardware e output JSON di llama-bench."
+    [Console]::Error.WriteLine($errMsg)
+    Write-Host $errMsg -ForegroundColor Red
+    exit 1
 }
 

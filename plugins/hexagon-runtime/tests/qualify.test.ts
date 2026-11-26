@@ -392,4 +392,33 @@ describe("qualifyModel", () => {
     expect(result.metrics?.loadTimeMs).toBe(1450);
     expect(result.metrics?.offload?.htpArch).toBe("v81");
   });
+
+  it("qualifyModel passa il path relativo rispetto a modelsDir per modelli in sottodirectory", async () => {
+    const subModel: DiscoveredModel = {
+      id: "sub-model",
+      fileName: "sub-model.gguf",
+      filePath: "/virtual/models/org/repo/sub-model.gguf",
+      sizeGb: 5.0,
+      status: "untested",
+      device: "HTP0",
+      contextWindow: 65536,
+      strategy: "HTP0 dense",
+    };
+    const { fn: exec, calls } = recordingExec(() => okExec(""));
+    const result = await qualifyModel({
+      model: subModel,
+      workspaceDir: "/virtual/ws",
+      modelsDir: "/virtual/models",
+      exec,
+      readFile: async (p) => (p.endsWith(".md") ? BENCH_REPORT.replace(/test-model\.gguf/g, "sub-model.gguf") : "{}"),
+      writeFile: async () => {},
+      exists: async () => true,
+      mkdir: async () => {},
+      registryPath: "/virtual/registry.json",
+    });
+
+    expect(result.status).toBe("certified");
+    const modelsArg = calls[0].args[calls[0].args.indexOf("-Models") + 1] ?? "";
+    expect(modelsArg.replace(/\\/g, "/")).toBe("org/repo/sub-model.gguf");
+  });
 });

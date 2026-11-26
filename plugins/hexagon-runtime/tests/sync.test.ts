@@ -489,4 +489,38 @@ describe("inspectRuntimeStatus", () => {
     );
     expect(d4.error).toContain("output vuoto");
   });
+
+  it("checkRuntime risolve geniex.exe da PATH (where.exe) e traccia scriptError su -CheckOnly fallito", async () => {
+    const exec = vi.fn(async (cmd: string, args: string[]) => {
+      if (cmd === "where.exe") {
+        return okExec("C:\\Tools\\GenieX\\geniex.exe\r\n");
+      }
+      if (cmd.endsWith("geniex.exe")) {
+        return okExec("GenieX CLI Version: 0.10.0\nLlamaCPP Runtime Hash: 19cce6919\n");
+      }
+      if (cmd.endsWith("llama-server.exe")) {
+        return okExec("version: 11938 (19cce6919)\n");
+      }
+      if (cmd === "powershell" && args.includes("-CheckOnly")) {
+        return { code: 1, stdout: '{"Error":"Errore check script"}', stderr: "" };
+      }
+      return okExec("");
+    });
+    const exists = vi.fn(async (p: string) => p !== PATHS.geniexExe);
+    const listDir = vi.fn(async () => ["libggml-htp-v81.so"]);
+    const res = await checkRuntime(PATHS, { exec, exists, listDir });
+    expect(res.geniexHash).toBe("19cce6919");
+    expect(res.scriptError).toBe("Errore check script");
+
+    // Anche con exit 0 ma campo Error nel JSON
+    const execJsonErr = vi.fn(async (cmd: string, args: string[]) => {
+      if (cmd === "powershell" && args.includes("-CheckOnly")) {
+        return okExec('{"Aligned":false,"Error":"Warn JSON"}');
+      }
+      return exec(cmd, args);
+    });
+    const res2 = await checkRuntime(PATHS, { exec: execJsonErr, exists, listDir });
+    expect(res2.scriptError).toBe("Warn JSON");
+    expect(res2.needsSync).toBe(true);
+  });
 });

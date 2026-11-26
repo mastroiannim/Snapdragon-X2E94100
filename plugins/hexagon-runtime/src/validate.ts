@@ -6,7 +6,7 @@
  * @ai-sdk/openai-compatible, permessi sicuri su edit/write/bash).
  */
 import { dirname, join } from "node:path";
-import { stripJsonComments } from "./config.js";
+import { stripJsonComments, stripTrailingCommas } from "./config.js";
 import { nodeExists, nodeIsDirectory, nodeListDir, nodeReadFile } from "./os.js";
 import type { ExistsFn, IsDirFn, ListDirFn, ReadFileFn } from "./types.js";
 
@@ -25,6 +25,7 @@ export interface ValidateDeps {
   readFile?: ReadFileFn;
   listDir?: ListDirFn;
   isDirectory?: IsDirFn;
+  strict?: boolean;
 }
 
 export interface AgentValidationResult {
@@ -420,7 +421,7 @@ export async function validateKiloConfig(
   try {
     raw = await readFile(configPath);
     const noBom = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
-    parsed = JSON.parse(stripJsonComments(noBom));
+    parsed = JSON.parse(stripTrailingCommas(stripJsonComments(noBom)));
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { valid: false, configPath, issues: [`Errore parsing JSON: ${msg}`] };
@@ -524,6 +525,10 @@ export async function validateKiloConfig(
 
   if ("permission" in parsed) {
     issues.push(...validatePermissionConfig(parsed.permission, "kilo.json", true));
+  } else if (deps.strict !== false) {
+    issues.push(
+      "Campo obbligatorio 'permission' mancante in kilo.json (policy esplicita richiesta).",
+    );
   }
 
   if ("agent" in parsed) {

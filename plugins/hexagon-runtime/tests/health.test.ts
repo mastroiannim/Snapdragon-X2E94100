@@ -268,4 +268,20 @@ describe("collectStatus — offload reale e warm-up HTP da log", () => {
     });
     expect(safeEmpty.offload).toBeUndefined();
   });
+
+  it("collectStatus ordina i log *_stderr.txt per mtime decrescente anziche' per nome alfabetico", async () => {
+    const fetch = async () => jsonResponse(200, { status: "ok" });
+    const status = await collectStatus({
+      fetch,
+      logsDir: "/virtual/logs",
+      exists: async () => true,
+      listDir: async () => ["zzzz_old_stderr.txt", "aaaa_new_stderr.txt"],
+      stat: async (p) => ({ mtimeMs: p.includes("aaaa_new") ? 2000 : 1000 }),
+      readFile: async (p) =>
+        p.includes("aaaa_new")
+          ? "ggml-hex: Hexagon Arch version v81, DMA64 enabled\nload_tensors: offloaded 32/32 layers to GPU\n"
+          : "ggml-hex: Hexagon Arch version v75, DMA64 disabled\nload_tensors: offloaded 8/32 layers to GPU\n",
+    });
+    expect(status.offload?.[0]?.htpArch).toBe("v81");
+  });
 });

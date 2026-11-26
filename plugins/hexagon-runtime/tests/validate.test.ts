@@ -289,4 +289,24 @@ describe("validateKiloConfig e validateKiloAgents", () => {
     });
     expect(agentReadErr.issues[0]).toContain("impossibile leggere il file");
   });
+
+  it("validateKiloConfig richiede permission in modalita' strict e lo consente se strict=false", async () => {
+    const cfgNoPerm = validConfigObject() as Record<string, unknown>;
+    delete cfgNoPerm.permission;
+    const resStrict = await validateKiloConfig("/virtual/no-perm.json", {
+      exists: async () => true,
+      readFile: async () => JSON.stringify(cfgNoPerm),
+      isDirectory: async () => false,
+    });
+    expect(resStrict.valid).toBe(false);
+    expect(resStrict.issues.some((i) => i.includes("permission"))).toBe(true);
+
+    const resNonStrict = await validateKiloConfig("/virtual/no-perm.json", {
+      exists: async () => true,
+      readFile: async () => JSON.stringify(cfgNoPerm),
+      isDirectory: async () => false,
+      strict: false,
+    });
+    expect(resNonStrict.valid).toBe(true);
+  });
 });

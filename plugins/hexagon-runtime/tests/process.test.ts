@@ -251,14 +251,14 @@ describe("ensureServer", () => {
 });
 
 describe("defaultPaths e resolveIniPath", () => {
-  it("percorsi standard Windows ARM64 con fallback su ini bundled", () => {
+  it("percorsi standard Windows ARM64 con fallback scrivibile su AppData\\Hexagon\\hexagon-models.ini", () => {
     const paths = defaultPaths("C:/repo", "C:/Users/test", "C:/Users/test/AppData/Local");
     expect(paths.binPath).toBe("C:\\Users\\test\\llama-cpp\\llama-bin-win-cpu-arm64");
     expect(paths.geniexDir).toBe("C:\\Users\\test\\AppData\\Local\\GenieX CLI");
     expect(paths.geniexExe).toContain("geniex.exe");
     expect(paths.serverExe).toContain("llama-server.exe");
     expect(paths.modelsDir).toBe("C:\\Users\\test\\.cache\\geniex\\models");
-    expect(paths.iniPath).toBe(BUNDLED_INI_PATH);
+    expect(paths.iniPath).toBe("C:\\Users\\test\\AppData\\Local\\Hexagon\\hexagon-models.ini");
   });
 
   it("override ini da workspace se presente", () => {
@@ -273,8 +273,22 @@ describe("defaultPaths e resolveIniPath", () => {
     expect(paths.iniPath).toBe("C:\\Users\\test\\AppData\\Local\\Hexagon\\hexagon-models.ini");
   });
 
-  it("resolveIniPath: fallback finale su asset bundled", () => {
-    expect(resolveIniPath({ workspaceDir: "C:/none", exists: () => false })).toBe(BUNDLED_INI_PATH);
+  it("resolveIniPath: fallback scrivibile (mai BUNDLED_INI_PATH), readOnly usa bundled se esiste", () => {
+    expect(
+      resolveIniPath({
+        workspaceDir: "C:/none",
+        localAppData: "C:/Users/test/AppData/Local",
+        exists: () => false,
+      }),
+    ).toBe("C:\\Users\\test\\AppData\\Local\\Hexagon\\hexagon-models.ini");
+    expect(
+      resolveIniPath({
+        workspaceDir: "C:/none",
+        localAppData: "C:/Users/test/AppData/Local",
+        exists: (p) => p === BUNDLED_INI_PATH,
+        readOnly: true,
+      }),
+    ).toBe(BUNDLED_INI_PATH);
   });
 
   it("default da homedir/LOCALAPPDATA reali", () => {
@@ -953,5 +967,33 @@ device = HTP0
     });
     expect(res.started).toBe(true);
     expect(spawnCalls[0].options?.env?.LLAMA_ARG_LOG_FILE).toBeUndefined();
+  });
+
+  it("restartServer passa host e port personalizzati a waitForHealth", async () => {
+    const { restartServer } = await import("../src/process.js");
+    const fetchedUrls: string[] = [];
+    const res = await restartServer({
+      exec: recordingExec(() => okExec("")).fn,
+      fetch: async (url) => {
+        fetchedUrls.push(String(url));
+        if (fetchedUrls.length <= 2) throw new Error("offline");
+        if (String(url).includes("/v1/models")) {
+          return fakeResponse(200, { object: "list", data: [{ id: "m1" }] });
+        }
+        return fakeResponse(200, { status: "ok" });
+      },
+      spawn: recordingSpawn(4242).fn,
+      sleep: async () => {},
+      now: () => 1000,
+      runtimeDir: "/virtual/bin",
+      serverExe: "/virtual/bin/llama-server.exe",
+      iniPath: "/virtual/ini/hexagon-models.ini",
+      modelsDir: "/virtual/models",
+      host: "127.0.0.2",
+      port: 19999,
+      logFile: "/virtual/logs/server.log",
+    });
+    expect(res.health.ready).toBe(true);
+    expect(fetchedUrls.some((u) => u === "http://127.0.0.2:19999/health")).toBe(true);
   });
 });

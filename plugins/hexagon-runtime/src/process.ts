@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateModelsIni } from "./discovery.js";
 import { waitForHealth, type HealthResult } from "./health.js";
-import { nodeListDir, nodeWriteFile } from "./os.js";
+import { nodeListDir, nodeSpawn, nodeWriteFile } from "./os.js";
 import type { ModelsRegistry } from "./qualify.js";
 import type {
   ExecFn,
@@ -39,13 +39,17 @@ export interface ResolveIniOptions {
   workspaceDir?: string;
   localAppData?: string;
   exists?: (path: string) => boolean;
+  /** Se true, consente il fallback read-only su BUNDLED_INI_PATH se presente su disco. */
+  readOnly?: boolean;
 }
 
 /**
  * Risoluzione gerarchica di hexagon-models.ini:
  * 1. Override esplicito nel workspace: <workspaceDir>/hexagon-models.ini
  * 2. Override utente: %LOCALAPPDATA%/Hexagon/hexagon-models.ini
- * 3. Default distribuito col plugin: assets/hexagon-models.ini
+ * 3. In sola lettura (readOnly=true): default distribuito col plugin se presente
+ * 4. Destinazione scrivibile predefinita: %LOCALAPPDATA%/Hexagon/hexagon-models.ini
+ *    (o <workspaceDir>/hexagon-models.ini se LOCALAPPDATA non e' disponibile)
  */
 export function resolveIniPath(options: ResolveIniOptions = {}): string {
   const exists = options.exists ?? existsSync;
@@ -58,7 +62,16 @@ export function resolveIniPath(options: ResolveIniOptions = {}): string {
     const userIni = join(localAppData, "Hexagon", "hexagon-models.ini");
     if (exists(userIni)) return userIni;
   }
-  return BUNDLED_INI_PATH;
+  if (options.readOnly && exists(BUNDLED_INI_PATH)) {
+    return BUNDLED_INI_PATH;
+  }
+  if (localAppData) {
+    return join(localAppData, "Hexagon", "hexagon-models.ini");
+  }
+  if (options.workspaceDir) {
+    return join(options.workspaceDir, "hexagon-models.ini");
+  }
+  return join(homedir(), "AppData", "Local", "Hexagon", "hexagon-models.ini");
 }
 
 export const ROUTER_PORT = 18803;
@@ -275,6 +288,7 @@ export interface EnsureServerOptions {
   host?: string;
   modelsMax?: number;
   logFile?: string;
+  mkdir?: MkdirFn;
 }
 
 export interface EnsureServerResult {
@@ -366,7 +380,12 @@ export async function ensureServer(
   }
   const args = buildRouterArgs(options);
   if (options.logFile) {
-    mkdirSync(dirname(options.logFile), { recursive: true });
+    const logDir = dirname(options.logFile);
+    if (options.mkdir) {
+      await options.mkdir(logDir);
+    } else if (options.spawn === nodeSpawn) {
+      mkdirSync(logDir, { recursive: true });
+    }
   }
   const child = options.spawn(options.serverExe, args, {
     cwd: options.runtimeDir,
@@ -737,7 +756,10 @@ export async function restartServer(
     await options.sleep(500);
   }
   const startRes = await ensureServer(options);
+  const host = options.host ?? ROUTER_HOST;
+  const port = options.port ?? ROUTER_PORT;
   const health = await waitForHealth({
+    url: `http://${host}:${port}/health`,
     fetch: options.fetch,
     sleep: options.sleep,
     now: options.now,

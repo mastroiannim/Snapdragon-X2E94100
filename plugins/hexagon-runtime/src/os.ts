@@ -100,6 +100,7 @@ export const nodeDeps: OsDeps = {
   writeFile: nodeWriteFile,
   exists: nodeExists,
   listDir: nodeListDir,
+  isDirectory: nodeIsDirectory,
   sleep: nodeSleep,
   now: nodeNow,
 };

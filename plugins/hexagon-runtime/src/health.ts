@@ -4,6 +4,7 @@
  * L'allocazione del grafo HTP sulla NPU richiede warm-up: si ritenta ogni
  * 1000 ms fino a 30 tentativi (30 s) prima di dichiarare il timeout.
  */
+import { stat as nodeStat } from "node:fs/promises";
 import { join } from "node:path";
 import { nodeNow, nodeSleep } from "./os.js";
 import { ROUTER_HOST, ROUTER_PORT } from "./process.js";
@@ -124,10 +125,11 @@ export interface StatusOptions {
   readFile?: ReadFileFn;
   exists?: ExistsFn;
   listDir?: ListDirFn;
+  stat?: (path: string) => Promise<{ mtimeMs: number }> | { mtimeMs: number };
 }
 
 async function readTelemetryFromLogs(
-  options: Pick<StatusOptions, "logPath" | "logsDir" | "readFile" | "exists" | "listDir">,
+  options: Pick<StatusOptions, "logPath" | "logsDir" | "readFile" | "exists" | "listDir" | "stat">,
   loadedModels: string[],
 ): Promise<{
   offload: RealOffloadTelemetry[];
@@ -159,11 +161,25 @@ async function readTelemetryFromLogs(
     const dirExists = options.exists ? await options.exists(options.logsDir).catch(() => false) : true;
     if (dirExists) {
       try {
-        const files = (await options.listDir(options.logsDir))
+        const statFn = options.stat ?? ((p: string) => nodeStat(p));
+        const stderrNames = (await options.listDir(options.logsDir))
           .filter((name) => name.endsWith("_stderr.txt"))
           .sort()
-          .slice(-5)
           .reverse();
+        const withMtime = await Promise.all(
+          stderrNames.map(async (name, index) => {
+            const fullPath = join(options.logsDir!, name);
+            try {
+              const info = await statFn(fullPath);
+              const mtimeMs = typeof info?.mtimeMs === "number" && Number.isFinite(info.mtimeMs) ? info.mtimeMs : 0;
+              return { name, mtimeMs, index };
+            } catch {
+              return { name, mtimeMs: 0, index };
+            }
+          }),
+        );
+        withMtime.sort((a, b) => (b.mtimeMs !== a.mtimeMs ? b.mtimeMs - a.mtimeMs : a.index - b.index));
+        const files = withMtime.slice(0, 5).map((entry) => entry.name);
         for (const file of files) {
           try {
             const text = await options.readFile(join(options.logsDir, file));

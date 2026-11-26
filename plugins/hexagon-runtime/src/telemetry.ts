@@ -235,10 +235,22 @@ export function parseLlamaLogs(logText: string, source?: string): ParsedLlamaLog
     if (!trimmed) continue;
 
     // 1. Hardware HTP backend lines (process-level)
-    const archMatch = /ggml-hex:\s+Hexagon Arch version\s+(v\d+)(?:,\s*DMA64\s+(enabled|disabled))?/i.exec(trimmed);
+    const archMatch = /ggml-hex:\s+Hexagon Arch version\s+([A-Za-z0-9._-]+)(?:,\s*DMA64\s+(enabled|disabled))?/i.exec(trimmed);
     if (archMatch) {
       globalHtpArch = archMatch[1];
       if (archMatch[2]) globalDma64 = archMatch[2].toLowerCase() === "enabled";
+      current.htpArch = globalHtpArch;
+      if (globalDma64 !== undefined) current.dma64 = globalDma64;
+      continue;
+    }
+    const backendArchMatch = /Hexagon backend.*?arch=([A-Za-z0-9._-]+)(?:.*?dma64=([01]))?/i.exec(trimmed);
+    if (backendArchMatch) {
+      globalHtpArch = backendArchMatch[1];
+      if (backendArchMatch[2] !== undefined) {
+        globalDma64 = backendArchMatch[2] === "1";
+      } else if (/dma64=([01])/i.test(trimmed)) {
+        globalDma64 = /dma64=1/i.test(trimmed);
+      }
       current.htpArch = globalHtpArch;
       if (globalDma64 !== undefined) current.dma64 = globalDma64;
       continue;

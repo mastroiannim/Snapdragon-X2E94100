@@ -142,7 +142,7 @@ $ModelsDir = Join-Path $env:USERPROFILE ".cache\geniex\models"
 $ModelsExist = Test-Path $ModelsDir
 $GgufCount = 0
 if ($ModelsExist) {
-    $GgufCount = @(Get-ChildItem -Path $ModelsDir -Filter "*.gguf" -File).Count
+    $GgufCount = @(Get-ChildItem -Path $ModelsDir -Filter "*.gguf" -File | Where-Object { $_.Name -notlike "mmproj*" }).Count
     if ($GgufCount -eq 0) {
         $GgufCount = @(Get-ChildItem -Path $ModelsDir -Filter "*.gguf" -File -Recurse | Where-Object { $_.Name -notlike "mmproj*" }).Count
     }
@@ -177,6 +177,23 @@ if ($KiloJsonExists -and $HasPluginCli) {
 } else {
     $OfflineIssues += "cli.js non disponibile"
 }
+if ($VerifyOffline -and $OfflineValid -and $KiloJsonExists) {
+    try {
+        $cfgJson = Get-Content -LiteralPath $KiloJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($cfgJson.provider) {
+            foreach ($prop in $cfgJson.provider.PSObject.Properties) {
+                $baseUrl = [string]$prop.Value.options.baseURL
+                if ($baseUrl -and $baseUrl -notmatch '^https?://(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(/|$)') {
+                    $OfflineValid = $false
+                    $OfflineIssues += "Endpoint non-loopback per provider '$($prop.Name)': $baseUrl"
+                }
+            }
+        }
+    } catch {
+        $OfflineValid = $false
+        $OfflineIssues += "Impossibile analizzare kilo.json per verifica offline: $($_.Exception.Message)"
+    }
+}
 $OfflineDetail = if ($OfflineValid -and $VerifyOffline) {
     "Verifica rigorosa offline/loopback superata"
 } elseif (-not $OfflineValid) {
@@ -190,7 +207,7 @@ Report-Check "Sicurezza Endpoint Offline (Loopback $BindHost)" $OfflineValid $Of
 $AgentsDir = Join-Path $ScriptDir ".kilo\agents"
 $AgentsExist = Test-Path $AgentsDir
 $AgentCount = if ($AgentsExist) { @(Get-ChildItem -Path $AgentsDir -Filter "*.md").Count } else { 0 }
-Report-Check "Agenti e Subagenti personalizzati (.kilo/agents)" ($AgentCount -ge 4) "Trovati $AgentCount ruoli (code, plan, debug, explore, reviewer)"
+Report-Check "Agenti e Subagenti personalizzati (.kilo/agents)" ($AgentCount -ge 6) "Trovati $AgentCount ruoli (code, plan, debug, ask, explore, reviewer)"
 
 Write-Host "========================================================" -ForegroundColor Cyan
 Write-Host " RIEPILOGO: $Passed superati, $Failed falliti, $Warnings avvisi." -ForegroundColor $(if ($Failed -eq 0) { "Green" } else { "Red" })

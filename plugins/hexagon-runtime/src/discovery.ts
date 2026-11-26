@@ -4,10 +4,11 @@
  * Distingue modelli CERTIFIED (profilati) da UNTESTED (sperimentali), filtra gli mmproj
  * multimodali e calcola l'allocazione hardware ottimale (HTP0/GPUOpenCL) per lo Snapdragon X2 Elite.
  */
+import { mkdirSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { installProviderConfig } from "./config.js";
 import { TESTED_CONTEXT_WINDOWS } from "./models.js";
-import { nodeIsDirectory, nodeListDir } from "./os.js";
+import { nodeIsDirectory, nodeListDir, nodeWriteFile } from "./os.js";
 import { BUNDLED_INSPECT_SCRIPT, parseModelsIni } from "./process.js";
 import {
   defaultRegistryPath,
@@ -715,16 +716,81 @@ export interface SyncModelsOptions {
 
 export interface SyncModelsResult {
   addedModels: string[];
+  updatedModels?: string[];
   removedModels: string[];
   totalModels: number;
   iniUpdated: boolean;
 }
 
+interface IniSectionBlock {
+  id: string;
+  leadingComments: string[];
+  headerLine: string;
+  bodyLines: string[];
+}
+
+function splitIniBlocks(iniText: string): {
+  preamble: string[];
+  blocks: IniSectionBlock[];
+} {
+  const lines = iniText ? iniText.split(/\r?\n/) : [];
+  const headerIndices: Array<{ index: number; id: string }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    const match = /^\s*\[([^\]]+)\]\s*$/.exec(lines[i]);
+    if (match) {
+      headerIndices.push({ index: i, id: match[1].trim() });
+    }
+  }
+  if (headerIndices.length === 0) {
+    return { preamble: lines, blocks: [] };
+  }
+
+  const commentStarts = headerIndices.map(({ index }, idx) => {
+    const minIndex = idx === 0 ? 0 : headerIndices[idx - 1].index + 1;
+    let start = index;
+    while (start > minIndex && /^\s*[#;]/.test(lines[start - 1])) {
+      start--;
+    }
+    return start;
+  });
+
+  const preamble = lines.slice(0, commentStarts[0]);
+  const blocks: IniSectionBlock[] = headerIndices.map(({ index, id }, idx) => {
+    const nextStart =
+      idx + 1 < headerIndices.length ? commentStarts[idx + 1] : lines.length;
+    return {
+      id,
+      leadingComments: lines.slice(commentStarts[idx], index),
+      headerLine: lines[index],
+      bodyLines: lines.slice(index + 1, nextStart),
+    };
+  });
+
+  return { preamble, blocks };
+}
+
+function normalizePathForCompare(p: string | undefined): string {
+  return (p ?? "").replace(/[\\/]+/g, "/");
+}
+
+function hasModelMetadataChanged(
+  cfg: { model?: string; device?: string; tensorSplit?: string; ctxSize?: number; mmproj?: string },
+  discovered: DiscoveredModel,
+): boolean {
+  if (normalizePathForCompare(cfg.model) !== normalizePathForCompare(discovered.filePath)) return true;
+  if ((cfg.device ?? "") !== discovered.device) return true;
+  if ((cfg.tensorSplit ?? "") !== (discovered.tensorSplit ?? "")) return true;
+  if ((cfg.ctxSize ?? 0) !== discovered.contextWindow) return true;
+  if (normalizePathForCompare(cfg.mmproj) !== normalizePathForCompare(discovered.mmprojPath)) return true;
+  return false;
+}
+
 /**
  * Sincronizza i modelli scoperti sul disco (.cache/geniex/models) con il file INI
  * e la configurazione Kilo (kilo.json/kilo.jsonc) calcolando l'allocazione hardware euristica
- * ottimale senza avviare benchmark pesanti. Aggiunge nuovi modelli e rimuove voci i cui file
- * non esistono piu' su disco o marcate INCOMPATIBLE in models-registry.json.
+ * ottimale senza avviare benchmark pesanti. Aggiunge nuovi modelli, aggiorna quelli esistenti
+ * se cambiano metadati rilevanti e rimuove voci i cui file non esistono piu' su disco o
+ * marcate INCOMPATIBLE in models-registry.json.
  */
 export async function syncDiscoveredModelsToIni(
   options: SyncModelsOptions,
@@ -761,50 +827,80 @@ export async function syncDiscoveredModelsToIni(
   }
 
   const parsed = parseModelsIni(iniText);
+  const { preamble, blocks } = splitIniBlocks(iniText);
   const removedModels: string[] = [];
-  let baseContent = iniText;
+  const updatedModels: string[] = [];
+  const keptBlocks: IniSectionBlock[] = [];
 
-  for (const [id, cfg] of Object.entries(parsed.models)) {
-    const isIncompatible =
-      discoveredById.get(id)?.status === "incompatible" ||
-      registry[id]?.status === "incompatible";
-    if (!cfg.model || !(await deps.exists(cfg.model)) || isIncompatible) {
-      removedModels.push(id);
-      const escaped = id.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
-      const sectionPattern = new RegExp(
-        `(?:^|\\r?\\n)(?:#[^\\r\\n]*\\r?\\n)*\\[${escaped}\\][\\s\\S]*?(?=(?:\\r?\\n#[^\\r\\n]*\\r?\\n)*\\r?\\n\\[|\\r?\\n\\[|$)`,
-        "g",
-      );
-      baseContent = baseContent.replace(sectionPattern, "");
+  for (const block of blocks) {
+    if (block.id === "*") {
+      keptBlocks.push(block);
+      continue;
     }
+    const cfg = parsed.models[block.id];
+    const discoveredModel = discoveredById.get(block.id);
+    const isIncompatible =
+      discoveredModel?.status === "incompatible" ||
+      registry[block.id]?.status === "incompatible";
+
+    if (!cfg?.model || !(await deps.exists(cfg.model)) || isIncompatible) {
+      removedModels.push(block.id);
+      continue;
+    }
+
+    if (discoveredModel && hasModelMetadataChanged(cfg, discoveredModel)) {
+      updatedModels.push(block.id);
+      const sectionLines = formatModelIniSection(discoveredModel);
+      const headerIdx = sectionLines.findIndex((line) => /^\s*\[/.test(line));
+      keptBlocks.push({
+        id: block.id,
+        leadingComments: sectionLines.slice(0, headerIdx),
+        headerLine: sectionLines[headerIdx],
+        bodyLines: sectionLines.slice(headerIdx + 1),
+      });
+      continue;
+    }
+
+    keptBlocks.push(block);
   }
 
-  const remainingParsed = removedModels.length > 0 ? parseModelsIni(baseContent) : parsed;
-  const existingKeys = new Set(Object.keys(remainingParsed.models));
-  const existingFiles = new Set(
-    Object.values(remainingParsed.models).map((m) => basename(m.model).toLowerCase()),
+  const remainingKeys = new Set(
+    keptBlocks.filter((b) => b.id !== "*").map((b) => b.id),
+  );
+  const remainingFiles = new Set(
+    [...remainingKeys]
+      .map((id) => discoveredById.get(id)?.fileName ?? parsed.models[id]?.model)
+      .filter((v): v is string => Boolean(v))
+      .map((v) => basename(v).toLowerCase()),
   );
 
   const missing = discovered.filter(
     (m) =>
       m.status !== "incompatible" &&
-      !existingKeys.has(m.id) &&
-      !existingFiles.has(m.fileName.toLowerCase()),
+      !remainingKeys.has(m.id) &&
+      !remainingFiles.has(m.fileName.toLowerCase()),
   );
 
-  if (missing.length === 0 && removedModels.length === 0) {
+  if (missing.length === 0 && removedModels.length === 0 && updatedModels.length === 0) {
     return {
       addedModels: [],
       removedModels: [],
-      totalModels: existingKeys.size,
+      totalModels: remainingKeys.size,
       iniUpdated: false,
     };
   }
 
-  baseContent = baseContent.trimEnd();
-  if (!baseContent) {
-    baseContent = formatIniHeader();
-  }
+  const renderedBlocks = keptBlocks.flatMap((b) => [
+    ...b.leadingComments,
+    b.headerLine,
+    ...b.bodyLines,
+  ]);
+  const hasExistingContent =
+    preamble.some((line) => line.trim().length > 0) || renderedBlocks.length > 0;
+  const baseLines = hasExistingContent
+    ? [...preamble, ...renderedBlocks]
+    : [...formatIniHeader().split("\n"), ""];
+  const baseContent = baseLines.join("\n").trimEnd();
 
   const newSections: string[] = [];
   const added: string[] = [];
@@ -818,6 +914,18 @@ export async function syncDiscoveredModelsToIni(
     newSections.length > 0
       ? baseContent + "\n\n" + newSections.join("\n")
       : baseContent + "\n";
+
+  const ensureParentDir = async (targetPath: string): Promise<void> => {
+    const dir = dirname(targetPath);
+    if (await deps.exists(dir)) return;
+    if (deps.mkdir) {
+      await deps.mkdir(dir);
+    } else if (deps.writeFile === nodeWriteFile) {
+      mkdirSync(dir, { recursive: true });
+    }
+  };
+
+  await ensureParentDir(iniPath);
   await deps.writeFile(iniPath, updatedIniText);
 
   // Sincronizza anche %LOCALAPPDATA%/Hexagon/hexagon-models.ini se disponibile
@@ -825,6 +933,7 @@ export async function syncDiscoveredModelsToIni(
   if (localAppData) {
     const userIni = join(localAppData, "Hexagon", "hexagon-models.ini");
     if (userIni.toLowerCase() !== iniPath.toLowerCase()) {
+      await ensureParentDir(userIni).catch(() => {});
       await deps.writeFile(userIni, updatedIniText).catch(() => {});
     }
   }
@@ -856,8 +965,9 @@ export async function syncDiscoveredModelsToIni(
 
   return {
     addedModels: added,
+    ...(updatedModels.length > 0 ? { updatedModels } : {}),
     removedModels,
-    totalModels: existingKeys.size + added.length,
+    totalModels: remainingKeys.size + added.length,
     iniUpdated: true,
   };
 }

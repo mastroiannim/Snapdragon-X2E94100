@@ -3,12 +3,13 @@ name: PowerShell static checks
 on:
   push:
     branches: [main]
-    paths: ['*.ps1', '*.psm1', 'tests/**', '.github/workflows/powershell-static.yml']
+    paths: ['*.ps1', '*.psm1', 'tests/**', 'plugins/hexagon-runtime/assets/scripts/**', '.github/workflows/powershell-static.yml']
   pull_request:
     paths:
       - '*.ps1'
       - '*.psm1'
       - 'tests/**'
+      - 'plugins/hexagon-runtime/assets/scripts/**'
       - '.github/workflows/powershell-static.yml'
   workflow_dispatch:
 

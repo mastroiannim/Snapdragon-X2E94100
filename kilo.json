@@ -100,5 +100,21 @@
     }
   },
   "model": "hexagon/Ornith-1.5-9B-Q4_0",
-  "small_model": "hexagon/MiniCPM5-2B-Q4_K_M"
+  "small_model": "hexagon/MiniCPM5-2B-Q4_K_M",
+  "permission": {
+    "read": {
+      "*": "allow"
+    },
+    "edit": {
+      "*": "ask"
+    },
+    "write": {
+      "*": "ask"
+    },
+    "bash": {
+      "*": "ask",
+      "git status *": "allow"
+    },
+    "task": "ask"
+  }
 }

@@ -153,6 +153,7 @@ export function startModelWatcher(options: ModelWatcherOptions): ModelWatcher {
           const res = await qualifyModel({
             model,
             workspaceDir: options.workspaceDir,
+            modelsDir: options.modelsDir,
             exec: options.exec,
             readFile: options.readFile,
             writeFile: options.writeFile,

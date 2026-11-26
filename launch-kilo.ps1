@@ -122,7 +122,7 @@ Write-Host " * Endpoint Router:   $BaseUrl" -ForegroundColor Green
 $IsOnline = $false
 try {
     $resp = Invoke-RestMethod -Uri "$BaseUrl/models" -Method Get -TimeoutSec 2 -ErrorAction SilentlyContinue
-    if ($resp -and $resp.data) {
+    if ($resp -and $null -ne $resp.data) {
         $IsOnline = $true
         $ModelCount = $resp.data.Count
         Write-Host " * Stato Router:      Online ($ModelCount modelli registrati)" -ForegroundColor Green
@@ -176,7 +176,7 @@ if (-not $IsOnline) {
         Start-Sleep -Seconds 1
         try {
             $resp = Invoke-RestMethod -Uri "$BaseUrl/models" -Method Get -TimeoutSec 2 -ErrorAction SilentlyContinue
-            if ($resp -and $resp.data) {
+            if ($resp -and $null -ne $resp.data) {
                 $IsOnline = $true
                 $ModelCount = $resp.data.Count
                 Write-Host " Router attivo con successo! ($ModelCount modelli)" -ForegroundColor Green
@@ -197,7 +197,17 @@ if (-not $CheckOnly) {
     Write-Host " * Sincronizzazione:  Aggiornamento kilo.json via plugin TS..." -ForegroundColor Gray
     $setupRes = Invoke-CliCaptured $NodeCmd.Source $setupArgs
     if ($setupRes.Code -ne 0) {
-        Write-Warning "cli.js setup ha restituito codice $($setupRes.Code). Verifica kilo.json: $($setupRes.Text)"
+        $kiloJsonCheck = Join-Path $ScriptDir "kilo.json"
+        if (-not (Test-Path -LiteralPath $kiloJsonCheck -PathType Leaf)) {
+            Write-Error "cli.js setup fallito (exit $($setupRes.Code)) e kilo.json assente: $($setupRes.Text)"
+            exit 1
+        }
+        $valCheck = Invoke-CliCaptured $NodeCmd.Source @("validate", "--workspace", $ScriptDir)
+        if ($valCheck.Code -ne 0) {
+            Write-Error "cli.js setup fallito (exit $($setupRes.Code)) e kilo.json non valido: $($setupRes.Text)"
+            exit 1
+        }
+        Write-Warning "cli.js setup ha restituito codice $($setupRes.Code) ma kilo.json esistente e' valido: $($setupRes.Text)"
     }
 }
 
@@ -255,11 +265,6 @@ if ($Agent) {
     Write-Host " Ruolo Agente:        $Agent" -ForegroundColor White
 }
 Write-Host "========================================================`n" -ForegroundColor Cyan
-
-$kiloArgs = @()
-if ($Pure) {
-    $kiloArgs += "--pure"
-}
 
 if ($Message -ne "") {
     Write-Host "Esecuzione prompt singolo non interattivo..." -ForegroundColor Cyan

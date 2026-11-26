@@ -180,8 +180,8 @@ public class GgufModelMeta {
                     throw new InvalidDataException("GGUF header truncated");
                 }
                 uint version = br.ReadUInt32();
-                if (version == 0) {
-                    throw new InvalidDataException("Unsupported GGUF version 0");
+                if (version < 2) {
+                    throw new InvalidDataException("Unsupported GGUF version " + version + " (minimum supported: 2)");
                 }
                 ulong tensorCount = br.ReadUInt64();
                 ulong kvCount = br.ReadUInt64();
@@ -302,7 +302,7 @@ try {
         file_size_bytes = [long]$meta.FileSizeBytes
         size_gb = [math]::Round($meta.FileSizeBytes / 1GB, 2)
         quant_name = $meta.QuantName
-        is_moe = ($meta.ExpertCount -gt 0)
+        is_moe = ($meta.ExpertCount -gt 0 -and $meta.ExpertUsedCount -gt 0)
     }
 
     if ($Json) {

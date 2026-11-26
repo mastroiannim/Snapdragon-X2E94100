@@ -296,6 +296,8 @@ function Start-RuntimeProcesses($Processes, [string]$Directory) {
         $start.WorkingDirectory = $Directory
         $start.UseShellExecute = $false
         $start.EnvironmentVariables['ADSP_LIBRARY_PATH'] = $Directory
+        $start.EnvironmentVariables['GGML_HEXAGON_OPBATCH'] = '512'
+        $start.EnvironmentVariables['GGML_HEXAGON_VTCM_SIZE'] = '8M'
         $child = [Diagnostics.Process]::Start($start)
         $child.Dispose()
     }

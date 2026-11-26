@@ -284,7 +284,7 @@ export async function runBootstrapCycle(
           missingModels: [],
           staleModels: [],
         }))
-      : await reloadPromise.catch(() => ({ ...NO_RELOAD }));
+      : await reloadPromise;
 
     if (reload.reloaded) {
       const postReloadHealth = waitForHealth({

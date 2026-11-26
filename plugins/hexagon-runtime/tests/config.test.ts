@@ -684,4 +684,24 @@ describe("installProviderConfig", () => {
     });
     expect(liveRes.mainModel).toBe("CustomLive-14B-Q4_0");
   });
+
+  it("installProviderConfig supporta trailing commas in kilo.jsonc", async () => {
+    const fs = createMemoryFs({
+      "/virtual-tc/.config/kilo/kilo.jsonc": `{
+        // commento
+        "model": "hexagon/Ornith-1.5-9B-Q4_0",
+        "small_model": "hexagon/MiniCPM5-2B-Q4_K_M",
+      }`,
+      "/virtual-tc/hexagon-models.ini": "[Ornith-1.5-9B-Q4_0]\nmodel = m.gguf\ndevice = HTP0\nctx-size = 65536\n",
+    });
+    const res = await installProviderConfig({
+      configDir: "/virtual-tc/.config/kilo",
+      iniPath: "/virtual-tc/hexagon-models.ini",
+      readFile: fs.readFile,
+      writeFile: fs.writeFile,
+      exists: fs.exists,
+      mkdir: fs.mkdir,
+    });
+    expect(res.updated).toBe(true);
+  });
 });

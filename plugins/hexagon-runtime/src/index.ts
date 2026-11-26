@@ -252,8 +252,10 @@ export function createHexagonHooks(options: HookOptions): Hooks {
       if (!bootstrapPromise) {
         bootstrapPromise = bootstrap()
           .then(() => {
-            ensureWatchdog();
-            ensureModelWatcher();
+            if (sessions > 0) {
+              ensureWatchdog();
+              ensureModelWatcher();
+            }
           })
           .catch((error: unknown) => {
             console.error("[hexagon-runtime] bootstrap runtime fallito:", error);
@@ -297,6 +299,7 @@ export function createHexagonHooks(options: HookOptions): Hooks {
           listDir: deps.listDir,
           exists: deps.exists,
           exec: deps.exec,
+          isDirectory: deps.isDirectory,
           readFile: deps.readFile,
         },
         skipInspection: true,

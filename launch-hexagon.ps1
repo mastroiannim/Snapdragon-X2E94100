@@ -293,7 +293,7 @@ function Get-HexagonOptimalConfig([GgufModelMeta]$meta) {
 if (-not (Test-Path -LiteralPath $ModelsDir -PathType Container)) {
     throw "Cache modelli assente: $ModelsDir. Scaricare un GGUF con GenieX (geniex pull) oppure indicare -ModelsDir."
 }
-if (-not $Json) {
+if (-not $Json -and -not $DryRun -and -not $ListOnly) {
     Get-ChildItem -Path $ModelsDir -Filter "*.gguf" -Recurse -File | ForEach-Object {
         if ($_.DirectoryName -ne $ModelsDir -and $_.Name -notlike "mmproj*") {
             $linkTarget = Join-Path $ModelsDir $_.Name
@@ -308,7 +308,7 @@ if (-not $Json) {
     }
 }
 
-$allGguf = if ($Json) {
+$allGguf = if ($Json -or $DryRun -or $ListOnly) {
     Get-ChildItem -Path $ModelsDir -Filter "*.gguf" -Recurse -File | Where-Object { $_.Name -notlike "mmproj*" }
 } else {
     Get-ChildItem -Path $ModelsDir -Filter "*.gguf" -File | Where-Object { $_.Name -notlike "mmproj*" }
@@ -417,17 +417,28 @@ if ($Mode -eq "Router") {
         if ($cfg.TensorSplit) { $iniLines += "tensor-split = $($cfg.TensorSplit)" }
         $iniLines += "ctx-size = $($cfg.ContextSize)"
 
+        $mmprojPathResolved = $null
         $mmprojCandidates = @(
             "mmproj-$($alias)-f16.gguf",
             "mmproj-$($alias)-BF16.gguf",
             "mmproj-$alias.gguf"
         )
-        foreach ($mp in $mmprojCandidates) {
-            $mpPath = Join-Path $ModelsDir $mp
-            if (Test-Path $mpPath) {
-                $iniLines += "mmproj = $mpPath"
-                break
+        foreach ($searchDir in @($file.DirectoryName, $ModelsDir) | Select-Object -Unique) {
+            foreach ($mp in $mmprojCandidates) {
+                $mpPath = Join-Path $searchDir $mp
+                if (Test-Path -LiteralPath $mpPath -PathType Leaf) {
+                    $mmprojPathResolved = $mpPath
+                    break
+                }
             }
+            if ($mmprojPathResolved) { break }
+        }
+        if (-not $mmprojPathResolved -and $file.DirectoryName -ne $ModelsDir) {
+            $dirMmproj = Get-ChildItem -LiteralPath $file.DirectoryName -Filter "mmproj*.gguf" -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($dirMmproj) { $mmprojPathResolved = $dirMmproj.FullName }
+        }
+        if ($mmprojPathResolved) {
+            $iniLines += "mmproj = $mmprojPathResolved"
         }
 
         $iniLines += ""
@@ -459,10 +470,13 @@ if ($Mode -eq "Router") {
         exit 0
     }
 
-    # I flussi legacy conservano la generazione INI anche durante DryRun.
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllLines($iniPath, $iniLines, $utf8NoBom)
-    Write-Host "`n Generato: $iniPath ($modelCount modelli configurati)" -ForegroundColor Yellow
+    if (-not $DryRun) {
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllLines($iniPath, $iniLines, $utf8NoBom)
+        Write-Host "`n Generato: $iniPath ($modelCount modelli configurati)" -ForegroundColor Yellow
+    } else {
+        Write-Host "`n [DRY RUN] Generazione INI simulata: $iniPath ($modelCount modelli configurati)" -ForegroundColor Yellow
+    }
     Write-Host " Modelli simultanei in RAM: max $ModelsMax" -ForegroundColor Yellow
     Write-Host "========================================================`n" -ForegroundColor Cyan
 
@@ -487,9 +501,13 @@ if ($Mode -eq "Router") {
     Write-Host "Endpoint OpenAI compatibile: http://127.0.0.1:$Port/v1" -ForegroundColor Cyan
     Write-Host "I modelli vengono caricati on-demand alla prima richiesta.`n" -ForegroundColor Cyan
 
-    Set-Location -Path $BinPath
-    & $ServerExe @cliArgs
-    exit $LASTEXITCODE
+    Push-Location -Path $BinPath
+    try {
+        & $ServerExe @cliArgs
+        exit $LASTEXITCODE
+    } finally {
+        Pop-Location
+    }
 }
 
 # =============================================================
@@ -636,6 +654,10 @@ $env:LLAMA_ARG_LOG_FILE = Join-Path $serverLogDir "llama-server.log"
 Write-Host "Avvio llama-server.exe su porta $Port..." -ForegroundColor Green
 Write-Host "Endpoint OpenAI compatibile locale: http://127.0.0.1:$Port/v1`n" -ForegroundColor Cyan
 
-Set-Location -Path $BinPath
-& $ServerExe @cliArgs
-exit $LASTEXITCODE
+Push-Location -Path $BinPath
+try {
+    & $ServerExe @cliArgs
+    exit $LASTEXITCODE
+} finally {
+    Pop-Location
+}

@@ -6,7 +6,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { type DiscoveredModel } from "./discovery.js";
 import { BUNDLED_BENCH_SCRIPT } from "./process.js";
 import { runBenchmark, type BenchReport } from "./benchmark.js";
@@ -97,6 +97,7 @@ export async function saveRegistry(
 export interface QualifyOptions {
   model: DiscoveredModel;
   workspaceDir: string;
+  modelsDir?: string;
   exec: ExecFn;
   readFile: ReadFileFn;
   writeFile?: WriteFileFn;
@@ -166,11 +167,19 @@ export async function qualifyModel(options: QualifyOptions): Promise<Qualificati
   const timestamp = new Date().toISOString();
 
   try {
+    let modelArg = model.fileName || model.id;
+    if (options.modelsDir && model.filePath) {
+      const rel = relative(options.modelsDir, model.filePath);
+      if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
+        modelArg = rel;
+      }
+    }
+
     const report: BenchReport = await runBenchmark({
       exec,
       readFile,
       workspaceDir,
-      model: model.id,
+      model: modelArg,
       device: model.device,
       tensorSplit: model.tensorSplit,
       benchScript: options.benchScript ?? BUNDLED_BENCH_SCRIPT,
@@ -182,7 +191,9 @@ export async function qualifyModel(options: QualifyOptions): Promise<Qualificati
       (r) =>
         r.model === model.fileName ||
         r.model === model.id ||
-        r.model === `${model.id}.gguf`,
+        r.model === `${model.id}.gguf` ||
+        r.model === modelArg ||
+        basename(r.model) === model.fileName,
     );
     const candidateRows = modelMatches.length > 0 ? modelMatches : allRows;
     const matchingRows = candidateRows.filter((r) =>

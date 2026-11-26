@@ -913,4 +913,177 @@ ctx-size = 32768
     expect(type39MoEGiant.tensorSplit).toBe("85,15");
     expect(type39MoEGiant.contextSize).toBe(32_768);
   });
+
+  it("syncDiscoveredModelsToIni preserva commenti #/; delle sezioni mantenute, aggiorna metadati modificati e crea dir di userIni", async () => {
+    const existingFiles = new Set([
+      "/virtual/models",
+      "/virtual/models/kept.gguf",
+      "/virtual/models/mmproj-kept-f16.gguf",
+      "/virtual/models/hexagon-models.ini",
+    ]);
+    const listDir = vi.fn(async () => ["kept.gguf", "mmproj-kept-f16.gguf"]);
+    const exists = vi.fn(async (p: string) => existingFiles.has(p.replace(/[\\/]+/g, "/")));
+    const existingIni = [
+      "version = 1",
+      "",
+      "[*]",
+      "threads = 12",
+      "",
+      "# Commento modello rimosso",
+      "[removed-model]",
+      "model = /virtual/models/missing.gguf",
+      "device = HTP0",
+      "ctx-size = 65536",
+      "",
+      "# Commento mantenuto hash",
+      "; Commento mantenuto punto e virgola",
+      "[kept]",
+      "model = /virtual/models/kept.gguf",
+      "device = HTP0",
+      "ctx-size = 65536",
+      "",
+    ].join("\n");
+    const storage = new Map<string, string>([
+      ["/virtual/models/hexagon-models.ini", existingIni],
+    ]);
+    const mkdir = vi.fn(async () => {});
+
+    const res = await syncDiscoveredModelsToIni({
+      modelsDir: "/virtual/models",
+      iniPath: "/virtual/models/hexagon-models.ini",
+      localAppData: "/virtual/appdata",
+      skipInspection: true,
+      deps: {
+        listDir,
+        exists,
+        readFile: async (p) => storage.get(p) ?? "",
+        writeFile: async (p, c) => {
+          storage.set(p, c);
+        },
+        exec: vi.fn(),
+        mkdir,
+      },
+    });
+
+    expect(res.iniUpdated).toBe(true);
+    expect(res.removedModels).toEqual(["removed-model"]);
+    expect(res.updatedModels).toEqual(["kept"]);
+    expect(mkdir).toHaveBeenCalled();
+    const written = storage.get("/virtual/models/hexagon-models.ini") ?? "";
+    expect(written).not.toContain("[removed-model]");
+    expect(written).toContain("mmproj =");
+
+    // Verifica preservazione commenti # e ; quando una sezione precedente viene rimossa senza aggiornare la successiva
+    const stableIni = [
+      "[*]",
+      "threads = 12",
+      "",
+      "# Da rimuovere",
+      "[gone]",
+      "model = /virtual/models/gone.gguf",
+      "device = HTP0",
+      "ctx-size = 65536",
+      "",
+      "# Commento # preservato",
+      "; Commento ; preservato",
+      "[kept]",
+      "model = /virtual/models/kept.gguf",
+      "device = HTP0",
+      "ctx-size = 32768",
+      "mmproj = /virtual/models/mmproj-kept-f16.gguf",
+      "",
+    ].join("\n");
+    storage.set("/virtual/models/hexagon-models.ini", stableIni);
+    const res2 = await syncDiscoveredModelsToIni({
+      modelsDir: "/virtual/models",
+      iniPath: "/virtual/models/hexagon-models.ini",
+      skipInspection: true,
+      deps: {
+        listDir,
+        exists,
+        readFile: async (p) => storage.get(p) ?? "",
+        writeFile: async (p, c) => {
+          storage.set(p, c);
+        },
+        exec: vi.fn(),
+        mkdir,
+      },
+    });
+    expect(res2.iniUpdated).toBe(true);
+    const written2 = storage.get("/virtual/models/hexagon-models.ini") ?? "";
+    expect(written2).toContain("# Commento # preservato");
+    expect(written2).toContain("; Commento ; preservato");
+    expect(written2).not.toContain("[gone]");
+
+    // Verifica aggiornamento su cambio device / tensorSplit e INI privo di sezioni
+    const noHeaderStorage = new Map<string, string>([
+      ["/virtual/models/hexagon-models.ini", "version = 1\n"],
+    ]);
+    const res3 = await syncDiscoveredModelsToIni({
+      modelsDir: "/virtual/models",
+      iniPath: "/virtual/models/hexagon-models.ini",
+      skipInspection: true,
+      deps: {
+        listDir,
+        exists,
+        readFile: async (p) => noHeaderStorage.get(p) ?? "",
+        writeFile: async (p, c) => {
+          noHeaderStorage.set(p, c);
+        },
+        exec: vi.fn(),
+        mkdir,
+      },
+    });
+    expect(res3.addedModels).toEqual(["kept"]);
+
+    const diffDevIni = [
+      "[kept]",
+      "model = /virtual/models/kept.gguf",
+      "device = GPUOpenCL",
+      "tensor-split = 50,50",
+      "ctx-size = 32768",
+      "mmproj = /virtual/models/mmproj-kept-f16.gguf",
+    ].join("\n");
+    storage.set("/virtual/models/hexagon-models.ini", diffDevIni);
+    const res4 = await syncDiscoveredModelsToIni({
+      modelsDir: "/virtual/models",
+      iniPath: "/virtual/models/hexagon-models.ini",
+      skipInspection: true,
+      deps: {
+        listDir,
+        exists,
+        readFile: async (p) => storage.get(p) ?? "",
+        writeFile: async (p, c) => {
+          storage.set(p, c);
+        },
+        exec: vi.fn(),
+        mkdir,
+      },
+    });
+    expect(res4.updatedModels).toEqual(["kept"]);
+
+    const diffMmprojIni = [
+      "[kept]",
+      "model = /virtual/models/kept.gguf",
+      "device = HTP0",
+      "ctx-size = 32768",
+    ].join("\n");
+    storage.set("/virtual/models/hexagon-models.ini", diffMmprojIni);
+    const res5 = await syncDiscoveredModelsToIni({
+      modelsDir: "/virtual/models",
+      iniPath: "/virtual/models/hexagon-models.ini",
+      localAppData: "",
+      skipInspection: true,
+      deps: {
+        listDir,
+        exists,
+        readFile: async (p) => storage.get(p) ?? "",
+        writeFile: async (p, c) => {
+          storage.set(p, c);
+        },
+        exec: vi.fn(),
+      },
+    });
+    expect(res5.updatedModels).toEqual(["kept"]);
+  });
 });

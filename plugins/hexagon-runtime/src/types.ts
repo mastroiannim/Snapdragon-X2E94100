@@ -66,6 +66,7 @@ export interface OsDeps {
   writeFile: WriteFileFn;
   exists: ExistsFn;
   listDir: ListDirFn;
+  isDirectory?: IsDirFn;
   sleep: SleepFn;
   now: NowFn;
 }

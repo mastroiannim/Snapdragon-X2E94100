@@ -19,7 +19,7 @@ import {
 import { runBootstrapCycle } from "./bootstrap.js";
 import { installProviderConfig } from "./config.js";
 import { scanModels } from "./discovery.js";
-import { nodeExists, nodeListDir, nodeSpawn } from "./os.js";
+import { nodeExists, nodeIsDirectory, nodeListDir, nodeSpawn } from "./os.js";
 import {
   defaultLogsDir,
   defaultPaths,
@@ -33,6 +33,7 @@ import type {
   ExecFn,
   ExistsFn,
   FetchFn,
+  IsDirFn,
   ListDirFn,
   MkdirFn,
   NowFn,
@@ -65,6 +66,7 @@ export interface HexagonToolDeps {
   readFile: ReadFileFn;
   writeFile?: WriteFileFn;
   listDir?: ListDirFn;
+  isDirectory?: IsDirFn;
   exists?: ExistsFn;
   mkdir?: MkdirFn;
   spawn?: SpawnFn;
@@ -249,10 +251,11 @@ export function createHexagonTools(deps: HexagonToolDeps) {
         const modelsDir = deps.modelsDir ?? defaultPaths(deps.workspaceDir).modelsDir;
         const listDir = deps.listDir ?? nodeListDir;
         const exists = deps.exists ?? nodeExists;
+        const isDirectory = deps.isDirectory ?? nodeIsDirectory;
         const models = await scanModels({
           modelsDir,
           registryPath: deps.registryPath,
-          deps: { listDir, exists, exec: deps.exec, readFile: deps.readFile },
+          deps: { listDir, exists, isDirectory, exec: deps.exec, readFile: deps.readFile },
         });
         return JSON.stringify(models, null, 2);
       },
@@ -271,10 +274,11 @@ export function createHexagonTools(deps: HexagonToolDeps) {
         const modelsDir = deps.modelsDir ?? defaultPaths(deps.workspaceDir).modelsDir;
         const listDir = deps.listDir ?? nodeListDir;
         const exists = deps.exists ?? nodeExists;
+        const isDirectory = deps.isDirectory ?? nodeIsDirectory;
         const models = await scanModels({
           modelsDir,
           registryPath: deps.registryPath,
-          deps: { listDir, exists, exec: deps.exec, readFile: deps.readFile },
+          deps: { listDir, exists, isDirectory, exec: deps.exec, readFile: deps.readFile },
         });
         const target = models.find((m) => m.id === args.model || m.fileName === args.model);
         if (!target) {
@@ -283,6 +287,7 @@ export function createHexagonTools(deps: HexagonToolDeps) {
         const profile = await qualifyModel({
           model: target,
           workspaceDir: deps.workspaceDir,
+          modelsDir,
           exec: deps.exec,
           readFile: deps.readFile,
           writeFile: deps.writeFile,
