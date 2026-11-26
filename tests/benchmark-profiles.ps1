@@ -139,7 +139,10 @@ try {
     # A successful process returning several variants must not publish a misleading report.
     $script:multipleResults = $true
     $rejectedReport = Join-Path $testRoot 'rejected.md'
+    $global:LASTEXITCODE = 0
     . $source -BinPath $testRoot -ModelsDir $testRoot -Models 'fixture.gguf' -Repetitions 1 -ReportPath $rejectedReport -LogDir $logDir
+    Assert-True ($LASTEXITCODE -eq 1) 'Expected exit code 1 when all benchmark results are rejected'
+    $global:LASTEXITCODE = 0
     Assert-True (-not (Test-Path -LiteralPath $rejectedReport)) 'Rejected JSON was published'
     Assert-True (-not (Test-Path -LiteralPath "$rejectedReport.telemetry.json")) 'Rejected telemetry JSON was published'
 
